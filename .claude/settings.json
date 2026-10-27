@@ -1,0 +1,80 @@
+{
+  "permissions": {
+    "disableBypassPermissionsMode": "disable",
+    "disableAutoMode": "disable",
+    "ask": [
+      "Bash(gh api *)",
+      "Bash(gh pr merge *)",
+      "Bash(gh workflow run *)",
+      "Bash(az containerapp revision restart *)",
+      "Bash(docker push *)",
+      "Bash(psql *)",
+      "Bash(*--live*)",
+      "Edit(CLAUDE.md)",
+      "Edit(.claude/agents/**)",
+      "Edit(.claude/skills/**)",
+      "Edit(.github/workflows/**)"
+    ],
+    "deny": [
+      "Bash(az deployment group create *)",
+      "Bash(az containerapp update *)",
+      "Bash(az containerapp secret *)",
+      "Bash(az keyvault secret *)",
+      "Bash(az role assignment *)",
+      "Bash(az ad *)",
+      "Bash(az rest *)",
+      "Bash(az * delete*)",
+      "Bash(az * purge*)",
+      "Bash(az acr credential *)",
+      "Bash(az account get-access-token*)",
+      "Bash(az postgres flexible-server ad-admin *)",
+      "Bash(gh secret set *)",
+      "Bash(gh secret delete *)",
+      "Bash(gh variable set *)",
+      "Bash(gh variable delete *)",
+      "Bash(gh repo delete *)",
+      "Bash(gh repo edit *)",
+      "Bash(gh api *rulesets*)",
+      "Bash(gh api *secrets*)",
+      "Bash(gh api *environments*)",
+      "Bash(gh auth *token*)",
+      "Bash(gh workflow run *deploy*)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Read(.env)",
+      "Read(.env.local)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Edit(.claude/settings*.json)",
+      "Edit(.claude/hooks/**)"
+    ]
+  },
+  "switchModelsOnFlag": false,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PROJECT_DIR}/.claude/hooks/block_secrets.py\"",
+            "timeout": 10,
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PROJECT_DIR}/.claude/hooks/ruff_format.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
