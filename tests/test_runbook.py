@@ -25,8 +25,8 @@ MAKE = re.compile(r"(?<![\w-])make\s+([a-z][\w-]*)")
 
 
 def rule_lines(text: str) -> list[tuple[list[str], bool]]:
-    """(target names, whether the line carries a "##" comment) per rule line."""
-    return [(match.group(1).split(), "##" in match.group(2)) for match in RULE.finditer(text)]
+    """(target names, whether the line carries a "## " comment, as `make help` greps it)."""
+    return [(match.group(1).split(), "## " in match.group(2)) for match in RULE.finditer(text)]
 
 
 def makefile_targets(text: str) -> dict[str, bool]:

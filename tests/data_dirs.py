@@ -44,8 +44,11 @@ def violations(root: Path) -> list[str]:
 
     for rel_dir in DATA_DIRS:
         base = root / rel_dir
-        if base.is_symlink():
-            found.append(f"{rel_dir}: symlink")
+        # Any component may be a link, not only the last: redteam -> elsewhere.
+        parts = Path(rel_dir).parts
+        links = [i for i in range(1, len(parts) + 1) if root.joinpath(*parts[:i]).is_symlink()]
+        if links:
+            found.append(f"{'/'.join(parts[: links[0]])}: symlink")
             continue
         if not base.exists():
             continue
@@ -70,4 +73,4 @@ def violations(root: Path) -> list[str]:
                     name not in ALLOWED_NAMES | FINDER_METADATA and path.suffix not in DATA_SUFFIXES
                 ):
                     found.append(f"{rel}: not a declared data extension")
-    return found
+    return list(dict.fromkeys(found))  # a linked parent is reported once

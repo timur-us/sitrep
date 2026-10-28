@@ -3,7 +3,9 @@
 Each pattern is assembled at runtime from split pieces, so this file matches
 none of them and push protection does not flag it. A finding carries the line,
 the pattern name and a fingerprint (the first 16 hex digits of the match's
-sha256), never the matched text: a real secret must not reach a log.
+sha256), never the matched text: a real secret must not reach a log. The
+fingerprint only matches findings against the allowlist; report() never prints
+it, because the fingerprint of a URL password can be reversed with a dictionary.
 """
 
 from __future__ import annotations
@@ -31,13 +33,10 @@ PATTERNS: dict[str, re.Pattern[str]] = {
     "url-credentials": re.compile(
         r"\b[a-z][a-z0-9+.-]*://[^\s/:@]*:(?P<password>[^\s/@]+)@", re.IGNORECASE
     ),
-    # Header and payload are base64url JSON objects, so both start with "eyJ".
+    # Header and payload are base64url JSON objects, so both start with "eyJ". No
+    # leading \b: URL-encoded forms put a word character in front ("Bearer%20eyJ").
     "jwt": re.compile(
-        r"\b"
-        + _join("ey", "J")
-        + r"[A-Za-z0-9_-]{8,}\."
-        + _join("ey", "J")
-        + r"[A-Za-z0-9_-]{8,}\."
+        _join("ey", "J") + r"[A-Za-z0-9_-]{8,}\." + _join("ey", "J") + r"[A-Za-z0-9_-]{8,}\."
     ),
 }
 
@@ -78,14 +77,31 @@ def fingerprint(text: str) -> str:
 
 
 def find_secrets(text: str) -> list[Hit]:
-    """One hit per pattern that matches a line."""
-    found = []
+    """One hit per distinct match: a second key on a line is its own finding."""
+    found: dict[Hit, None] = {}
     for number, line in enumerate(text.splitlines(), start=1):
         for name, pattern in PATTERNS.items():
             for match in pattern.finditer(line):
                 password = match.groupdict().get("password")
                 if password is not None and PLACEHOLDER_PASSWORD.fullmatch(password):
                     continue
-                found.append(Hit(number, name, fingerprint(match.group(0))))
-                break
-    return found
+                found[Hit(number, name, fingerprint(match.group(0)))] = None
+    return list(found)
+
+
+def report(hits: dict[str, list[Hit]]) -> tuple[list[str], list[str]]:
+    """Leaks as "<file>:<line>: <pattern>" and stale allowlist entries as
+    "<file>: <pattern>". No fingerprint is printed."""
+    leaks: list[str] = []
+    stale: list[str] = []
+    for rel in sorted(hits.keys() | ALLOWLIST.keys()):
+        allowed = ALLOWLIST[rel].fingerprints if rel in ALLOWLIST else frozenset()
+        found = hits.get(rel, [])
+        seen = {(hit.pattern, hit.fingerprint) for hit in found}
+        leaks += [
+            f"{rel}:{hit.line}: {hit.pattern}"
+            for hit in found
+            if (hit.pattern, hit.fingerprint) not in allowed
+        ]
+        stale += [f"{rel}: {pattern}" for pattern, _ in sorted(allowed - seen)]
+    return leaks, stale

@@ -13,9 +13,11 @@ def git(root: Path, *args: str) -> bytes:
     """Run git in root and return its stdout.
 
     GIT_* variables are dropped: inside a git hook, GIT_DIR and GIT_INDEX_FILE
-    point at the outer repository. A failure raises with git's own message.
+    point at the outer repository. LC_ALL=C keeps git's messages in English. A
+    failure raises with git's own message.
     """
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["LC_ALL"] = "C"
     result = subprocess.run(
         ["git", "-C", str(root), *args], env=env, capture_output=True, check=False
     )
