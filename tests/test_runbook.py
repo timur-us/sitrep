@@ -13,17 +13,25 @@ from repo_files import ROOT
 
 RUNBOOK = ROOT / "docs" / "runbooks" / "local-setup.md"
 
-# A rule line: "target: prerequisites ## comment". Variable assignments
-# (`:=`, `::=`) and special targets (".PHONY") do not match.
-RULE = re.compile(r"^([A-Za-z0-9][\w.-]*)\s*:(?![:=])(.*)$", re.MULTILINE)
+# A rule line: "target ...: prerequisites ## comment". Variable assignments
+# (`:=`, `::=`, `export X := 1`) and special targets (".PHONY") do not match.
+RULE = re.compile(r"^([A-Za-z0-9_][^:=#\n]*?)\s*:(?![:=])(.*)$", re.MULTILINE)
+PHONY = re.compile(r"^\.PHONY\s*:(.*)$", re.MULTILINE)
+# What `make help` greps for: one lower-case name at the start of a rule line.
+HELP_NAME = re.compile(r"[a-z][a-z0-9-]*")
 FENCE = re.compile(r"```.*?```", re.DOTALL)
 INLINE = re.compile(r"`([^`\n]+)`")
 MAKE = re.compile(r"(?<![\w-])make\s+([a-z][\w-]*)")
 
 
+def rule_lines(text: str) -> list[tuple[list[str], bool]]:
+    """(target names, whether the line carries a "##" comment) per rule line."""
+    return [(match.group(1).split(), "##" in match.group(2)) for match in RULE.finditer(text)]
+
+
 def makefile_targets(text: str) -> dict[str, bool]:
     """Target name -> whether its rule line carries a "##" comment."""
-    return {match.group(1): "##" in match.group(2) for match in RULE.finditer(text)}
+    return {name: documented for names, documented in rule_lines(text) for name in names}
 
 
 def runbook_targets(text: str) -> set[str]:
@@ -35,7 +43,20 @@ def drift(makefile: str, runbook: str) -> list[str]:
     targets = makefile_targets(makefile)
     mentioned = runbook_targets(runbook)
     public = {name for name in targets if not name.startswith("_")}
-    problems = [f"{name}: no ## comment in the Makefile" for name in public if not targets[name]]
+    phony = {name for match in PHONY.finditer(makefile) for name in match.group(1).split()}
+    problems = [
+        f"{' '.join(names)}: one target per rule line, so that `make help` lists it"
+        for names, _ in rule_lines(makefile)
+        if len(names) > 1
+    ]
+    problems += [
+        f"{name}: `make help` lists only names matching {HELP_NAME.pattern}"
+        for name in public
+        if not HELP_NAME.fullmatch(name)
+    ]
+    problems += [f"{name}: not in .PHONY" for name in public - phony]
+    problems += [f"{name}: in .PHONY, no rule" for name in phony - targets.keys()]
+    problems += [f"{name}: no ## comment in the Makefile" for name in public if not targets[name]]
     problems += [f"{name}: not in the runbook" for name in public if name not in mentioned]
     problems += [
         f"{name}: in the runbook, not in the Makefile" for name in mentioned - targets.keys()

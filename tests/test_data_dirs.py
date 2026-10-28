@@ -40,7 +40,7 @@ def test_planted_violations_are_caught(tmp_path: Path) -> None:
     _plant(tmp_path, "evals/cases/.DS_Store")
 
     _plant(tmp_path, "evals/cases/evil.py")
-    _plant(tmp_path, "evals/cases/evil.PY")
+    _plant(tmp_path, "evals/cases/upper.PY")  # own stem: macOS file systems ignore case
     _plant(tmp_path, "evals/cases/notes.md")
     _plant(tmp_path, "evals/recorded/nested/deep.py")
     _plant(tmp_path, "redteam/recorded/conftest.json")
@@ -52,9 +52,9 @@ def test_planted_violations_are_caught(tmp_path: Path) -> None:
 
     assert sorted(violations(tmp_path)) == [
         "data/synthetic/out/run.json: executable",
-        "evals/cases/evil.PY: not a declared data extension",
         "evals/cases/evil.py: not a declared data extension",
         "evals/cases/notes.md: not a declared data extension",
+        "evals/cases/upper.PY: not a declared data extension",
         "evals/recorded/.DS_Store: executable",
         "evals/recorded/nested/deep.py: not a declared data extension",
         "redteam/attacks/dangling.json: symlink",
