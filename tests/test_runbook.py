@@ -44,8 +44,8 @@ def drift(makefile: str, runbook: str) -> list[str]:
 
 
 def test_runbook_bidirectional() -> None:
-    makefile = (ROOT / "Makefile").read_text()
-    runbook = RUNBOOK.read_text()
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    runbook = RUNBOOK.read_text(encoding="utf-8")
     assert "test" in makefile_targets(makefile), "the Makefile has no test target"
     assert "test" in runbook_targets(runbook), "the runbook never says `make test`"
     problems = drift(makefile, runbook)
@@ -59,4 +59,18 @@ def test_drift_is_detected() -> None:
         "b: no ## comment in the Makefile",
         "b: not in the runbook",
         "c: in the runbook, not in the Makefile",
+    ]
+
+
+def test_rule_shapes_that_make_help_misses() -> None:
+    # `make help` greps one lower-case name per rule line; every public target is phony.
+    makefile = ".PHONY: a Up\na: ## A\nc d: ## Both\nUp: ## Upper\ne: ## Not phony\n"
+    runbook = "`make a`, `make c`, `make d`, `make e`\n"
+    assert drift(makefile, runbook) == [
+        "Up: `make help` lists only names matching [a-z][a-z0-9-]*",
+        "Up: not in the runbook",
+        "c d: one target per rule line, so that `make help` lists it",
+        "c: not in .PHONY",
+        "d: not in .PHONY",
+        "e: not in .PHONY",
     ]
