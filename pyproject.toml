@@ -44,4 +44,6 @@ extend-select = ["S"]
 
 [tool.pytest]
 testpaths = ["tests"]
-addopts = ["--strict-markers"]
+# Offline: connect() on Python sockets is refused except to loopback
+# (tests/test_network.py; the limits are listed there).
+addopts = ["--strict-markers", "--disable-socket", "--allow-hosts=127.0.0.1,::1"]

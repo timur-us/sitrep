@@ -14,9 +14,19 @@ import os
 import stat
 from pathlib import Path
 
-DATA_DIRS: tuple[str, ...] = ()
+DATA_DIRS: tuple[str, ...] = (
+    "evals/cases",
+    "evals/recorded",
+    "redteam/attacks",
+    "redteam/recorded",
+    "data/synthetic/templates",
+    "data/synthetic/out",
+)
 
-DATA_SUFFIXES: frozenset[str] = frozenset()
+# Read only with json, tomllib or yaml.safe_load, or as plain text.
+DATA_SUFFIXES: frozenset[str] = frozenset(
+    {".json", ".jsonl", ".toml", ".yaml", ".yml", ".txt", ".md"}
+)
 
 # Allowed by exact name: keeps an empty directory in git.
 ALLOWED_NAMES = frozenset({".gitkeep"})

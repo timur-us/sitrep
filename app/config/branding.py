@@ -59,11 +59,45 @@ class Mandate:
     advisor_id: str
 
 
-PRODUCT = Product(name="", expansion="", slug="", tagline="")
-BANK = Bank(legal_name="", display_name="", name_stems=())
-DOMAINS = Domains(staff="", attacker="", canary="")
-CAST: tuple[Person, ...] = ()
-DEMO_MANDATE = Mandate(id="", family="", advisor_id="")
+PRODUCT = Product(
+    name="SITREP",
+    expansion="situation report",
+    slug="sitrep",
+    tagline="Know your client before the call.",
+)
+
+# Fictional, named after Horst Feistel (IFF, DES).
+BANK = Bank(
+    legal_name="Feistel Privatbank AG",
+    display_name="Feistel Private Bank",
+    name_stems=("Feistel", "Privatbank"),
+)
+
+DOMAINS = Domains(
+    staff="feistel.example",
+    attacker="mallory.example",
+    canary="canary.example",
+)
+
+
+def _person(name: str, role: Role, domain: str) -> Person:
+    person_id = name.lower()
+    return Person(id=person_id, name=name, role=role, email=f"{person_id}@{domain}")
+
+
+# Staff and the trusted party live under the staff domain, every adversary under
+# the attacker domain.
+CAST = (
+    _person("Alice", Role.ADVISOR, DOMAINS.staff),
+    _person("Bob", Role.ADVISOR, DOMAINS.staff),
+    _person("Carol", Role.ADVISOR, DOMAINS.staff),
+    _person("Mallory", Role.ATTACKER, DOMAINS.attacker),
+    _person("Eve", Role.PASSIVE_READER, DOMAINS.attacker),
+    _person("Sybil", Role.MANY_IDENTITIES, DOMAINS.attacker),
+    _person("Trent", Role.TRUSTED_PARTY, DOMAINS.staff),
+)
+
+DEMO_MANDATE = Mandate(id="weber", family="Weber", advisor_id="alice")
 
 SLUG = PRODUCT.slug
 ADVISORS = tuple(person for person in CAST if person.role is Role.ADVISOR)

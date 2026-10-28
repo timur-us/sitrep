@@ -58,7 +58,7 @@ def test_branding_values() -> None:
 
 
 def test_branding_matches_claude_md() -> None:
-    """The names in branding are the ones CLAUDE.md documents (Alice owns the demo mandate)."""
+    """The names in branding are the ones CLAUDE.md documents, the demo mandate's owner included."""
     text = (ROOT / "CLAUDE.md").read_text()
     product, bank, domains = branding.PRODUCT, branding.BANK, branding.DOMAINS
     owners = [p.name for p in branding.CAST if p.id == branding.DEMO_MANDATE.advisor_id]
