@@ -12,10 +12,11 @@ and native libraries; and anything reached through a loopback proxy or tunnel
 from __future__ import annotations
 
 import socket
-import tomllib
+from pathlib import Path
 
 import pytest
 import pytest_socket
+import repo_files
 from repo_files import ROOT, list_files, read_text
 
 TEST_NET_1 = "192.0.2.1"  # RFC 5737: documentation only, never routed
@@ -71,28 +72,64 @@ def test_plugins_load_only_by_name(pytestconfig: pytest.Config) -> None:
     assert manager.has_plugin("pytest_socket"), "pytest_socket is not loaded by name"
 
 
-def test_no_socket_opt_outs() -> None:
-    files = [
+def test_effective_socket_config(pytestconfig: pytest.Config) -> None:
+    # What pytest actually runs with, whatever the source: pyproject, another
+    # config file, PYTEST_ADDOPTS or the command line.
+    assert pytestconfig.inipath == ROOT / "pyproject.toml", f"config from {pytestconfig.inipath}"
+    for name in (
+        "pytest.ini",
+        ".pytest.ini",
+        "pytest.toml",
+        ".pytest.toml",
+        "tox.ini",
+        "setup.cfg",
+    ):
+        assert not (ROOT / name).exists(), f"{name} would compete with pyproject.toml"
+    # Option names assembled like OPT_OUTS, so that the scan below stays clean.
+    assert pytestconfig.getoption("disable_socket") is True
+    assert pytestconfig.getoption(_join("allow", "_hosts")) == "127.0.0.1,::1"
+    assert not pytestconfig.getoption(_join("force_", "enable", "_socket"))
+
+
+def opt_out_files(root: Path) -> list[str]:
+    """Code and config that could switch the block off: every .py, .toml, .ini and
+    .cfg file git sees, the Makefile and .github/."""
+    return [
         rel
-        for rel in list_files(ROOT)
-        if (rel.startswith("tests/") and rel.endswith(".py"))
-        or rel in {"pyproject.toml", "Makefile"}
+        for rel in list_files(root)
+        if rel.endswith((".py", ".toml", ".ini", ".cfg"))
+        or rel == "Makefile"
+        or rel.startswith(".github/")
     ]
-    assert len(files) >= 12, f"only {len(files)} files scanned"
-    assert {"tests/test_network.py", "pyproject.toml", "Makefile"} <= set(files)
+
+
+def test_no_socket_opt_outs() -> None:
+    files = opt_out_files(ROOT)
+    assert len(files) >= 18, f"only {len(files)} files scanned"
+    named = {"tests/test_network.py", "tests/guardrails/test_block_secrets.py", "app/__init__.py"}
+    assert named | {"pyproject.toml", "Makefile", ".claude/hooks/block_secrets.py"} <= set(files)
     found = [
         f"{rel}: {hit}" for rel in files for hit in socket_opt_outs(read_text(ROOT, rel) or "")
     ]
     assert not found, "the socket block is switched off:\n" + "\n".join(found)
 
-    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    addopts = pyproject["tool"]["pytest"]["addopts"]
-    hosts = [opt for opt in addopts if opt.startswith("--allow-hosts")]
-    assert "--disable-socket" in addopts, addopts
-    assert hosts == ["--allow-hosts=127.0.0.1,::1"], addopts
 
-
-def test_opt_out_scan_planted() -> None:
+def test_opt_out_scan_planted(tmp_path: Path) -> None:
     for needle in OPT_OUTS:
         assert socket_opt_outs(f"x = {needle!r}\n") == [needle]
     assert socket_opt_outs("--disable-socket --allow-hosts=127.0.0.1,::1") == []
+
+    repo_files.git(tmp_path, "init", "-q")
+    planted = {
+        "tests/sub/test_x.py": f"pytestmark = {OPT_OUTS[0]!r}\n",
+        "pytest.ini": f"[pytest]\naddopts = -p {OPT_OUTS[4]}\n",
+        ".github/workflows/ci.yml": f"run: pytest --{OPT_OUTS[3]}\n",
+        "docs/notes.md": f"{OPT_OUTS[0]}\n",  # prose is not scanned
+    }
+    for rel, text in planted.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    flagged = {
+        rel for rel in opt_out_files(tmp_path) if socket_opt_outs(read_text(tmp_path, rel) or "")
+    }
+    assert flagged == {"tests/sub/test_x.py", "pytest.ini", ".github/workflows/ci.yml"}

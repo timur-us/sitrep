@@ -95,3 +95,8 @@ def test_rule_shapes_that_make_help_misses() -> None:
         "d: not in .PHONY",
         "e: not in .PHONY",
     ]
+
+
+def test_comment_marker_needs_a_space() -> None:
+    # `make help` greps for "## " with the space; "##x" is not listed.
+    assert drift(".PHONY: f\nf:##no space\n", "`make f`") == ["f: no ## comment in the Makefile"]

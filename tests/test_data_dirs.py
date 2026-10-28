@@ -76,6 +76,14 @@ def test_declared_path_that_is_not_a_plain_directory(tmp_path: Path) -> None:
     ]
 
 
+def test_symlinked_parent_of_a_data_dir(tmp_path: Path) -> None:
+    _plant(tmp_path, "outside/synthetic/out/run.json")
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "data").symlink_to(tmp_path / "outside", target_is_directory=True)
+    assert violations(root) == ["data: symlink"]
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
 def test_unreadable_directory_is_reported(tmp_path: Path) -> None:
     locked = tmp_path / "evals/cases/locked"
