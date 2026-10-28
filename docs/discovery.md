@@ -1,6 +1,6 @@
 # SITREP — discovery
 
-Date: 2026-10-27 · Status: simulated engagement · Owner: Timur Usipbekov
+Date: 2026-10-27 · Status: simulated engagement · Owner: Timur
 **This document is a simulation.** Feistel Private Bank is fictional; the interviews below are written from the perspective of the roles a real discovery would meet, to make the requirements concrete and testable. No real bank, person or data is involved.
 
 ## Engagement frame

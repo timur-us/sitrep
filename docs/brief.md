@@ -1,6 +1,6 @@
 # SITREP — project brief
 
-Date: 2026-10-27 · Status: accepted plan, nothing built yet · Owner: Timur Usipbekov
+Date: 2026-10-27 · Status: accepted plan, nothing built yet · Owner: Timur
 SITREP (situation report) is an advisor copilot for **Feistel Private Bank**, a fictional German private bank (legal name Feistel Privatbank AG). Everything in this repository is synthetic. Tagline: *Know your client before the call.*
 
 ## Users
