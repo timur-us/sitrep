@@ -1,0 +1,57 @@
+[project]
+name = "sitrep"
+version = "0.1.0"
+description = "Advisor copilot for a fictional private bank, built on synthetic data."
+requires-python = "==3.12.*"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pip-audit==2.10.1",
+    "pytest==9.1.1",
+    "pytest-socket==0.8.1",
+    "pyyaml==6.0.3",
+    "ruff==0.17.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv]
+required-version = ">=0.13.5,<0.14"
+# Minimum release age: nothing uploaded in the last 7 days is resolved. uv stores
+# the span in uv.lock (exclude-newer-span = "P7D"), so the lock does not go stale.
+exclude-newer = "7 days"
+
+[tool.uv.build-backend]
+module-name = "app"
+module-root = ""
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+extend-select = ["S"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S603", "S607"]
+# The hooks catch every exception on purpose (block_secrets fails closed,
+# ruff_format never blocks). They are guardrail files: linted, never edited.
+".claude/hooks/**" = ["S603", "BLE001"]
+"data/synthetic/**" = ["S311"]
+
+[tool.pytest]
+testpaths = ["tests"]
+# Plugins load by name only: an installed package's pytest11 entry point would
+# run before the socket guard. Offline: connect() on Python sockets is refused
+# except to loopback (tests/test_network.py; the limits are listed there).
+addopts = [
+    "--strict-markers",
+    "--disable-plugin-autoload",
+    "-p",
+    "pytest_socket",
+    "--disable-socket",
+    "--allow-hosts=127.0.0.1,::1",
+]
