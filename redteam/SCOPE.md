@@ -1,6 +1,6 @@
 # Red-team scope
 
-Date: 2026-10-27 · Owner and sole authoriser: Timur Usipbekov · Status: in force for the life of the repository
+Date: 2026-10-27 · Owner and sole authoriser: Timur · Status: in force for the life of the repository
 
 ## Target
 

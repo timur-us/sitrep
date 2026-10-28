@@ -1,6 +1,6 @@
 # SITREP — threat model
 
-Date: 2026-10-27 · Status: v1, to be revised at every milestone · Owner: Timur Usipbekov · Reviewer: Fable (security)
+Date: 2026-10-27 · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
 Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the system prompt staying secret (Kerckhoffs).
 
 ## Assets
