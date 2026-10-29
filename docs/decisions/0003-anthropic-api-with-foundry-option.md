@@ -37,7 +37,9 @@ SITREP (situation report) sends client data to the model at runtime: Sonnet 5.5,
 - Anthropic, "Data residency", https://platform.claude.com/docs/en/manage-claude/data-residency (accessed 2026-10-29).
 - Microsoft, "Foundry Models from partners and community", https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-from-partners (page date 2026-09-21).
 - Anthropic, "Claude in Microsoft Foundry", https://platform.claude.com/docs/en/build-with-claude/claude-in-microsoft-foundry (accessed 2026-10-29).
-- AWS, Bedrock model cards for Claude Sonnet 5.5 and Haiku 5.5 (geo inference ids `eu.*`), https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html (accessed 2026-10-29).
+- AWS, Bedrock model card for Claude Sonnet 5.5 (geo inference id `eu.anthropic.claude-sonnet-5-5`), https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-5-5.html (accessed 2026-10-29).
+- AWS, Bedrock model card for Claude Haiku 5.5 (geo inference id `eu.anthropic.claude-haiku-5-5`), https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-5-5.html (accessed 2026-10-29).
 - Google Cloud, Claude Sonnet 5.5 on Vertex AI, https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/sonnet-5-5 (page date 2026-10-28).
+- Google Cloud, Claude Haiku 5.5 on Vertex AI (Europe multi-region), https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/partner-models/claude/haiku-5-5 (page date 2026-10-28).
 - Anthropic Privacy Center, "How long do you store my organization's data?", https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data (page date 2026-07-01).
 - Anthropic, "API and data retention", https://platform.claude.com/docs/en/manage-claude/api-and-data-retention (accessed 2026-10-29).

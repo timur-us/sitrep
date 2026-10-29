@@ -5,8 +5,14 @@
 - Every sdist and wheel is a PyPI file with a sha256 and an upload time.
 - No upload lies inside the 7-day window before this test runs.
 
-uv enforces the window when it resolves; this test catches a lock that was
-written another way (an override, a hand edit, another span).
+uv enforces the window when it resolves. This test catches a lock whose
+recorded facts break the policy: another span, another source, a missing hash,
+a recorded upload inside the window. It trusts upload-time as written: no hash
+covers it, so a hand edit that backdates it is not caught here. Re-resolving
+in CI is the control for that (PR 4).
+
+Messages name packages, files and source hosts only: never a hash, a URL's
+credentials or its query string.
 """
 
 from __future__ import annotations
@@ -15,6 +21,7 @@ import re
 import tomllib
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 from repo_files import ROOT
 
@@ -27,33 +34,65 @@ SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
 PROJECT = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["name"]
 
 
+def _describe(source: Any) -> str:
+    """The source's kind and, for a URL, its host: no credentials, path or query."""
+    if not isinstance(source, dict) or not source:
+        return repr(type(source).__name__)
+    kinds = "+".join(sorted(source))
+    hosts = {urlsplit(str(value)).hostname for value in source.values()} - {None}
+    return f"{kinds} ({', '.join(sorted(hosts))})" if hosts else kinds
+
+
+def _upload_problem(uploaded: Any, now: datetime) -> str | None:
+    try:
+        parsed = datetime.fromisoformat(uploaded)
+    except (TypeError, ValueError):
+        return f"upload time {uploaded!r} is not an ISO timestamp"
+    if parsed.tzinfo is None:
+        return f"upload time {uploaded!r} has no time zone"
+    if parsed > now - WINDOW:
+        return f"uploaded {uploaded}, inside the 7-day window"
+    return None
+
+
+def _is_project(package: dict[str, Any]) -> bool:
+    return package.get("name") == PROJECT and package.get("source") == {"editable": "."}
+
+
 def lock_problems(lock: dict[str, Any], now: datetime) -> list[str]:
-    """One line per way the lock breaks the policy. Names packages and files, never hashes."""
+    """One line per way the lock breaks the policy."""
     span = lock.get("options", {}).get("exclude-newer-span")
     problems = [] if span == SPAN else [f"exclude-newer-span is {span!r}, expected {SPAN!r}"]
-    for package in lock.get("package", []):
+    packages = lock.get("package", [])
+    count = sum(map(_is_project, packages))
+    if count != 1:
+        problems.append(f"the project {PROJECT!r} appears {count} times as editable, expected once")
+    for package in packages:
         name = f"{package.get('name')} {package.get('version', '')}".strip()
-        source = package.get("source")
-        if package.get("name") == PROJECT and source == {"editable": "."}:
-            continue
-        if source != PYPI:
-            problems.append(f"{name}: source {source}, expected {PYPI}")
         dists = [package["sdist"]] if "sdist" in package else []
         dists += package.get("wheels", [])
+        if _is_project(package):
+            # Built from the working tree: nothing to download, nothing else to check.
+            if dists:
+                problems.append(f"{name}: the project entry lists files to download")
+            continue
+        if package.get("source") != PYPI:
+            problems.append(
+                f"{name}: source {_describe(package.get('source'))}, expected the PyPI registry"
+            )
         if not dists:
             problems.append(f"{name}: no sdist and no wheel")
         for dist in dists:
-            url = dist.get("url", "")
-            file = url.rsplit("/", 1)[-1] or "?"
+            url = str(dist.get("url", ""))
+            file = url.split("?", 1)[0].rsplit("/", 1)[-1] or "?"
             if not url.startswith(FILE_HOST):
                 problems.append(f"{name}: {file} not from {FILE_HOST}")
-            if not SHA256.fullmatch(dist.get("hash", "")):
+            if not SHA256.fullmatch(str(dist.get("hash", ""))):
                 problems.append(f"{name}: {file} has no sha256")
-            uploaded = dist.get("upload-time")
-            if uploaded is None:
+            if "upload-time" not in dist:
                 problems.append(f"{name}: {file} has no upload time")
-            elif datetime.fromisoformat(uploaded) > now - WINDOW:
-                problems.append(f"{name}: {file} uploaded {uploaded}, inside the 7-day window")
+            elif problem := _upload_problem(dist["upload-time"], now):
+                problems.append(f"{name}: {file} {problem}")
     return problems
 
 

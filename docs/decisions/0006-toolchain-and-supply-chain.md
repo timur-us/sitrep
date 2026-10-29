@@ -10,7 +10,7 @@ Accepted (Timur, 2026-10-28, in the M0 plan, questions 2, 3 and 7).
 
 ## Context
 
-SITREP (situation report) handles client data and an API key, so every dependency, action and image is code that runs with that access (threat-model, "Supply chain"). A fresh malicious release is the common case: most are caught and pulled within days. CI must be reproducible and must not install anything unpinned.
+SITREP (situation report) handles client data and an API key, so every dependency, action and image is code that runs with that access (threat-model, "Supply chain"). A malicious release often does its damage in the first days after upload, before it is reported and pulled; a minimum release age lets the ecosystem's detection run first. CI must be reproducible and must not install anything unpinned.
 
 ## Options
 
@@ -22,7 +22,7 @@ SITREP (situation report) handles client data and an API key, so every dependenc
 ## Decision
 
 - **uv** (question 2): `uv.lock` with sha256 on every distribution; `required-version = ">=0.13.5,<0.14"`; the Makefile exports `UV_LOCKED=1`, so uv fails instead of rewriting the lock.
-- **Minimum release age, 7 days** (question 3): `exclude-newer = "7 days"`. uv records it in the lock as `exclude-newer-span = "P7D"`, with a placeholder timestamp labelled as having no effect, so the lock does not go stale. Verified in PR 1 with uv 0.13.6 (which wrote the lock) and 0.13.5 (`uv lock --check`). `tests/test_lock.py` checks the span, PyPI-only sources, a sha256 and an upload time on every file, and that no upload lies inside the window.
+- **Minimum release age, 7 days** (question 3): `exclude-newer = "7 days"`. uv records it in the lock as `exclude-newer-span = "P7D"`, with a placeholder timestamp labelled as having no effect, so the lock does not go stale. Verified in PR 1 with uv 0.13.6 (which wrote the lock) and 0.13.5 (`uv lock --check`). `tests/test_lock.py` checks the span, PyPI-only sources, exactly one editable project entry, a sha256 and an upload time on every file, and that no recorded upload lies inside the window. It trusts `upload-time` as written, since no hash covers it; a CI step that re-resolves the lock (PR 4) is the control against a backdated hand edit.
 - **The build toolchain is pinned by exact version, not by release age.** uv builds the editable package itself, so `uv_build` is never resolved through the lock, and its constraint `>=0.13,<0.14` admits a release newer than 7 days. The control is uv pinned to exactly 0.13.5 in CI (setup-uv `version:`) and in the Dockerfile's uv image tag, kept equal by a test (PRs 3 and 4).
 - **Audit:** `uv export --format requirements.txt --locked --no-emit-project --all-groups`, then `pip-audit -r … --require-hashes --disable-pip`, with pip-audit 2.10.1 itself in the lock.
 - **Tests offline:** pytest-socket 0.8.1 with `--disable-socket --allow-hosts=127.0.0.1,::1`; plugins load by name only (`--disable-plugin-autoload -p pytest_socket`).
@@ -36,7 +36,7 @@ SITREP (situation report) handles client data and an API key, so every dependenc
 - **Harder:**
   - an urgent fix newer than 7 days needs a deliberate, reviewed exception;
   - the exact uv pin is bumped by hand, in two places;
-  - the Chromium download from Playwright's CDN is the one fetch in CI without a hash pin.
+  - the Chromium download from Playwright's CDN is the one code download in CI without a hash pin (pip-audit's vulnerability data is fetched unpinned as well, but it is data).
 - **Watch:** Dependabot's `uv` support and cooldown on uv 0.13 locks, once PR 4 runs it.
 
 ## Sources

@@ -46,7 +46,7 @@ The project is run like a customer engagement, with synthetic stakeholders: `doc
 
 | Milestone | Days | Outcome |
 |---|---|---|
-| M0 foundation, local | 1–3 | repo with guardrails, CI with all gates (evals and red team offline), Postgres with pgvector and RLS via Docker Compose, dev auth shim, FastAPI skeleton with `/health` and tracing, harness interfaces with tests, synthetic data generator, ADRs 0001–0005 |
+| M0 foundation, local | 1–3 | repo with guardrails, CI with all gates (evals and red team offline), Postgres with pgvector and RLS via Docker Compose, dev auth shim, FastAPI skeleton with `/health` and tracing, harness interfaces with tests, synthetic data generator, ADRs 0001–0006 |
 | M1 MVP core, local | 4–9 | retrieval with RLS, agent loop with four tools, approval gate, UI from the app, evals v1 (recorded), first red-team case unhardened with a measured success rate — **demo on day 9** |
 | M2 hardening, local | 10–14 | output policy, canaries, provenance wrapper, recipient allowlist, automated red-team harness (15–20 variants, recorded), cross-mandate case, eval gate in CI, README with before/after — **MVP done** |
 | M3 Azure with full identity | 15–21 | Bicep, Entra ID login, managed identity, Key Vault, OIDC from a protected GitHub environment, forged-header test, production proof |

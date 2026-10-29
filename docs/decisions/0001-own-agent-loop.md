@@ -10,7 +10,7 @@ Accepted (Timur, 2026-10-28, in the M0 plan).
 
 ## Context
 
-SITREP (situation report) lets a model call four tools for an advisor. Two of them have effects (`draft_email`, `create_followup`) and may run only after the advisor approves, with a server-issued single-use token (`docs/brief.md`, threat-model path 4). Every turn needs a trace without prompt plaintext, a token budget and a turn limit (paths 8 and 10). The loop is where those controls live, so it has to be code we read and test, not configuration of someone else's runtime.
+SITREP (situation report) lets a model call four tools for an advisor. Two of them have effects (`draft_email`, `create_followup`) and may run only after the advisor approves, with a server-issued single-use token (`docs/brief.md`, threat-model path 4). Every turn needs a token budget and a turn limit (path 8), and a trace without prompt plaintext (CLAUDE.md rule 10). The loop is where those controls live, so it has to be code we read and test, not configuration of someone else's runtime.
 
 ## Options
 

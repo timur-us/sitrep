@@ -10,7 +10,7 @@ Accepted (Timur, 2026-10-28, in the M0 plan).
 
 ## Context
 
-SITREP (situation report) retrieves from German and English documents, about 70 % German. The vector column needs a fixed dimension in M0 (PR 5b), long before the real embedder arrives in M1. The model file runs inside our process with client data, so where it comes from is a supply-chain question.
+SITREP (situation report) retrieves from German and English documents; the synthetic corpus targets about 70 % German. The vector column needs a fixed dimension in M0 (PR 5b), long before the real embedder arrives in M1. The model file runs inside our process with client data, so where it comes from is a supply-chain question.
 
 ## Options
 
@@ -23,7 +23,7 @@ SITREP (situation report) retrieves from German and English documents, about 70 
   - bge-m3, Qwen3-0.6B, e5-base: too large.
   - paraphrase-MiniLM: weak, 128 tokens.
   - quantized ONNX exports: tuned per instruction set.
-  - `intfloat/multilingual-e5-small`: best German retrieval among the rest in the plan research.
+  - `intfloat/multilingual-e5-small`: best German retrieval among the rest in the plan research (figure not re-verified; see Consequences).
   - `ibm-granite/granite-embedding-97m-multilingual-r2`: Apache-2.0, 384-d, a sigstore `model.sig`; BF16 weights, so `float32` must be pinned.
 - **Runtime:** onnxruntime plus `tokenizers` (about 20 packages, about 150 MB) against torch (about 1 GB). fastembed cannot pin a revision: it always resolves the repository head.
 
@@ -59,7 +59,7 @@ files:
   - The German evidence is public MTEB, not banking text. The plan's German average (64.65 over 7 tasks) was not re-verified here: the leaderboard is an app we could not read.
   - e5's training data includes MS MARCO.
   - The ONNX sha256 values are git LFS oids from the Hugging Face API, not hashes of a download; `make model` checks the bytes in M1.
-- **Watch:** a new revision means a new ADR-backed change to `FILES`, and re-embedding everything.
+- **Watch:** a new revision means a new ADR-backed change to `FILES`, and re-embedding everything. The M1 loader rejects ONNX external-data paths and custom operator domains.
 
 ## Sources
 

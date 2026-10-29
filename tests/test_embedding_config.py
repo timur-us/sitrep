@@ -35,8 +35,9 @@ CONSTANTS = (
 )
 SHA256 = re.compile(r"[0-9a-f]{64}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
-# Formats that can run code when loaded (pickle and its wrappers).
-PICKLE_SUFFIXES = {".bin", ".pt", ".pth", ".pkl", ".pickle", ".ckpt"}
+# An allow-list, not a deny-list of pickle formats: anything else (.bin, .pt,
+# .npz, .py, ...) may run code when loaded. Exact case: ".ONNX" is rejected too.
+ALLOWED_SUFFIXES = frozenset({".json", ".onnx"})
 YAML_BLOCK = re.compile(r"^```yaml\n(.*?)^```", re.DOTALL | re.MULTILINE)
 
 
@@ -45,7 +46,11 @@ def yaml_mismatches(adr: str, module: ModuleType | SimpleNamespace) -> list[str]
     blocks = YAML_BLOCK.findall(adr)
     if len(blocks) != 1:
         return [f"expected one yaml block, found {len(blocks)}"]
-    facts = yaml.safe_load(blocks[0])
+    try:
+        facts = yaml.safe_load(blocks[0])
+    except yaml.YAMLError:
+        return ["the yaml block is not yaml"]
+    # Known limit: PyYAML keeps the last of two equal keys without a warning.
     if not isinstance(facts, dict):
         return ["the yaml block is not a mapping"]
     expected = {name.lower(): getattr(module, name, None) for name in CONSTANTS}
@@ -67,9 +72,13 @@ def yaml_mismatches(adr: str, module: ModuleType | SimpleNamespace) -> list[str]
 def files_problems(files: dict[str, str]) -> list[str]:
     """One line per FILES entry that is not a safe, pinned file."""
     problems = []
+    allowed = ", ".join(sorted(ALLOWED_SUFFIXES))
     for path, digest in files.items():
-        if PurePosixPath(path).suffix in PICKLE_SUFFIXES:
-            problems.append(f"{path}: not an allowed file type (.json, .onnx)")
+        parts = PurePosixPath(path).parts
+        if "\\" in path or path.startswith("/") or ".." in parts or "." in parts:
+            problems.append(f"{path}: not a plain relative path")
+        elif PurePosixPath(path).suffix not in ALLOWED_SUFFIXES:
+            problems.append(f"{path}: not an allowed file type ({allowed})")
         if not SHA256.fullmatch(digest):
             problems.append(f"{path}: digest is not 64 lowercase hex")
     return problems

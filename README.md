@@ -14,7 +14,7 @@ This section is a promise for the finished project. Each item names the mileston
 
 ### Shows
 
-- **An own agent harness** on the Anthropic Messages API: a tool registry with declared effects, side effects only after the advisor approves, untrusted retrieval results wrapped with provenance, and traces without prompt plaintext (M1, hardened in M2; ADR 0001).
+- **An own agent harness** on the Anthropic Messages API: a tool registry with declared effects, side effects only after the advisor approves, untrusted retrieval results wrapped with provenance, and traces without prompt plaintext (interfaces and traces M0, the loop M1, hardening M2; ADR 0001).
 - **An advisor boundary enforced by the database**: row-level security in PostgreSQL scopes every query to the logged-in advisor's own mandates, not the prompt (M0 schema and tests, M1 retrieval).
 - **Measured red teaming**: the attack success rate of the EchoLeak pattern (prompt injection through an e-mail) in English and German, before and after each hardening layer, from a recorded corpus (M1 unhardened, M2 hardened).
 

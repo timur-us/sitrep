@@ -9,6 +9,7 @@ The README says what the project shows and what it does not.
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 
 from repo_files import ROOT
@@ -29,6 +30,7 @@ ISO_DATE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
 FENCE = re.compile(r"^```.*?^```", re.DOTALL | re.MULTILINE)
 HEADING = re.compile(r"^## (.+)$", re.MULTILINE)
 MILESTONE = re.compile(r"\bM[0-4]\b")
+NOT_AN_ITEM = "Sources line is not a '- ' item or its indented continuation"
 
 README_SECTION = "What this project shows, and what it does not"
 # Each item of "Shows" names one of these, with its milestone.
@@ -36,20 +38,43 @@ SHOWS = ("harness", "row-level security", "red team")
 DOES_NOT_SHOW = ("production", "real data", "legal advice", "EU-only inference", "egress")
 
 
-def sections(text: str) -> dict[str, str]:
-    """`## ` heading -> body, in file order. Fenced blocks never hold a heading."""
+def sections(text: str) -> list[tuple[str, str]]:
+    """(`## ` heading, body) pairs in file order, duplicates kept. Fences hold no heading."""
     # Blank the fences character by character, so offsets still point into text.
     unfenced = FENCE.sub(lambda match: re.sub(r"[^\n]", " ", match.group(0)), text)
     marks = list(HEADING.finditer(unfenced))
     ends = [mark.start() for mark in marks[1:]] + [len(text)] * bool(marks)
-    return {
-        mark.group(1).strip(): text[mark.end() : end].strip()
+    return [
+        (mark.group(1).strip(), text[mark.end() : end].strip())
         for mark, end in zip(marks, ends, strict=True)
-    }
+    ]
 
 
 def words(text: str) -> int:
     return len(FENCE.sub("", text).split())
+
+
+def is_date(text: str) -> bool:
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return False
+    return bool(ISO_DATE.fullmatch(text))
+
+
+def source_items(body: str) -> tuple[list[str], list[str]]:
+    """The Sources bullets, each joined with its indented continuation lines, and
+    the lines that are neither."""
+    items: list[str] = []
+    stray: list[str] = []
+    for line in body.splitlines():
+        if line.startswith("- "):
+            items.append(line)
+        elif line.startswith("  ") and line.strip() and items:
+            items[-1] += " " + line.strip()
+        elif line.strip():
+            stray.append(line)
+    return items, stray
 
 
 def adr_problems(directory: Path) -> list[str]:
@@ -77,24 +102,32 @@ def adr_problems(directory: Path) -> list[str]:
         name = path.name
         if not text.startswith(f"# ADR {number:04d}: "):
             problems.append(f"{name}: first line is not '# ADR {number:04d}: <title>'")
-        found = sections(text)
-        if tuple(found) != SECTIONS:
-            problems.append(f"{name}: sections {list(found)}, expected {list(SECTIONS)}")
+        pairs = sections(text)
+        headings = [heading for heading, _ in pairs]
+        if headings != list(SECTIONS):
+            problems.append(f"{name}: sections {headings}, expected {list(SECTIONS)}")
+        found = dict(pairs)
+        # A note may follow the status: "Accepted (Timur, 2026-10-28)".
         if not STATUS.match(found.get("Status", "")):
             problems.append(f"{name}: status is not Proposed, Accepted or Superseded by NNNN")
-        if not ISO_DATE.fullmatch(found.get("Date", "")):
+        if not is_date(found.get("Date", "")):
             problems.append(f"{name}: date is not YYYY-MM-DD")
-        sources = [line for line in found.get("Sources", "").splitlines() if line.startswith("- ")]
+        sources, stray = source_items(found.get("Sources", ""))
         if not sources:
             problems.append(f"{name}: no sources")
+        # Known limit: a date inside a URL counts as the source's date.
         problems += [
-            f"{name}: undated source: {line[:60]}" for line in sources if not ISO_DATE.search(line)
+            f"{name}: undated source: {item[:60]}"
+            for item in sources
+            if not any(is_date(day) for day in ISO_DATE.findall(item))
         ]
+        problems += [f"{name}: {NOT_AN_ITEM}: {line.strip()}" for line in stray]
         body = words(text) - words(found.get("Sources", ""))
         if body > MAX_WORDS:
             problems.append(f"{name}: {body} words, more than one page ({MAX_WORDS})")
-        if spelled_out not in text:
-            problems.append(f"{name}: never spells out {spelled_out!r}")
+        times = text.count(spelled_out)
+        if times != 1:
+            problems.append(f"{name}: spells out {spelled_out!r} {times} times, expected once")
     return problems
 
 
@@ -156,9 +189,6 @@ def test_planted_adrs_are_checked(tmp_path: Path) -> None:
     assert words(long) - words(SOURCE) > MAX_WORDS >= words(_adr(6)) - words(SOURCE)
 
 
-NOT_AN_ITEM = "Sources line is not a '- ' item or its indented continuation"
-
-
 def test_planted_adr_shapes(tmp_path: Path) -> None:
     decisions = tmp_path / "decisions"
     spelled_out = f"{branding.PRODUCT.name} ({branding.PRODUCT.expansion})"
@@ -217,7 +247,7 @@ def test_planted_adr_heading_inside_a_fence_is_ignored(tmp_path: Path) -> None:
 
 
 def test_readme_has_shows_and_does_not() -> None:
-    found = sections(README.read_text(encoding="utf-8"))
+    found = dict(sections(README.read_text(encoding="utf-8")))
     assert README_SECTION in found, f"README has no '## {README_SECTION}'"
     section = found[README_SECTION]
     parts = dict(re.findall(r"^### (.+?)\n(.*?)(?=^### |\Z)", section, re.DOTALL | re.MULTILINE))

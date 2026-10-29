@@ -12,7 +12,7 @@ SITREP (situation report) has a seed commit with guardrails and docs, and no cod
 - a FastAPI skeleton with `/health` and tracing;
 - harness interfaces with tests;
 - a synthetic data generator;
-- ADRs 0001–0005.
+- ADRs 0001–0006 (the brief names 0001–0005; 0006, toolchain and supply chain, was added by this plan).
 
 M0 is local only: no Azure, no `infra/`, no OIDC, no deploy job.
 

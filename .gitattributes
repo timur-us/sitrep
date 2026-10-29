@@ -1,0 +1,2 @@
+# Pinned by its sha256 (app/config/embedding.py FILES): never convert line endings.
+app/config/embedding_model_config.json -text
