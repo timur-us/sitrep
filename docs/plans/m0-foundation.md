@@ -1,6 +1,6 @@
 # M0 — foundation, local: plan
 
-Date: 2026-10-28 · Status: accepted by Timur with four changes (folded in below) · Owner: Timur · Milestone: M0, days 1–3 of `docs/brief.md`
+Date: 2026-10-28 · Status: accepted by Timur with four changes (folded in below); amended 2026-10-29 with the PR 1 review handovers (see "Amendment") · Owner: Timur · Milestone: M0, days 1–3 of `docs/brief.md`
 
 ## Context
 
@@ -12,7 +12,7 @@ SITREP (situation report) has a seed commit with guardrails and docs, and no cod
 - a FastAPI skeleton with `/health` and tracing;
 - harness interfaces with tests;
 - a synthetic data generator;
-- ADRs 0001–0005.
+- ADRs 0001–0006 (the brief names 0001–0005; 0006, toolchain and supply chain, was added by this plan).
 
 M0 is local only: no Azure, no `infra/`, no OIDC, no deploy job.
 
@@ -51,6 +51,17 @@ The outcome that matters is this: the advisor boundary and the properties "no pl
 | 12 | Identity pattern and effect taxonomy | Yes. |
 | 13 | Shim | Cookie, with server-side sessions. |
 | 14 | Corpus split, ratio, e-mails, global product sheets | Yes. |
+
+### Amendment (Timur, 2026-10-29)
+
+The PR 1 review (#3) left four handovers for later PRs. Timur accepted them on 2026-10-29, to land in this file as a docs commit at the start of PR 2. They are folded into the PR sections below:
+
+| Handover | To | Section |
+|---|---|---|
+| A test of `uv.lock`'s contents; ADR 0006 says the build toolchain is pinned by exact version, not by release age | PR 2 | Files, tests |
+| The autouse settings fixture clears the proxy variables | PR 3 | Files, tests |
+| A history scan of the PR's commits for secrets; the test job runs as non-root | PR 4 | Files, tests |
+| Data-directory non-vacuity once the directories exist (and whether `redteam/results/` joins the catalogue) | PR 4, PR 8 | Tests |
 
 ## Defaults that shape every PR
 
@@ -310,12 +321,14 @@ The outcome that matters is this: the advisor boundary and the properties "no pl
   - **Recorded honestly:** CPU speed is unmeasured, and M1 benchmarks e5-small against granite-r2. The German evidence is public MTEB. e5 was trained on MS MARCO.
   - A fenced `yaml` block holds the model facts in machine-readable form.
 - `docs/decisions/0006-toolchain-and-supply-chain.md`: uv, the lock, the 7-day minimum release age and how it is applied, hash-locked pip-audit, pytest-socket, Playwright, SHA and digest pins, the Dependabot cooldown (7 days).
+  - **Build toolchain** (amendment): the release-age policy does not cover it. uv builds the editable package itself, and `uv_build` is never resolved through the lock. The control is the exact uv version pinned in CI and in the Dockerfile (PRs 3 and 4), not the release age.
 - `app/config/embedding.py`: `MODEL_ID`, `REVISION`, `DIM`, `QUERY_PREFIX`, `PASSAGE_PREFIX`, `MAX_TOKENS`, `FILES = {path: sha256}`.
 - `app/config/embedding_model_config.json`: the model's `config.json` at `REVISION`, fetched once while building, as data. Its sha256 is in `FILES`.
 - `README.md`: "What this project shows, and what it does not".
   - **Shows:** the harness, the database-enforced boundary, measured red teaming. Each item names its milestone.
   - **Does not show:** production readiness, real data, legal advice, EU-only inference, network-level egress control.
 - `tests/test_docs.py`, `tests/test_embedding_config.py`.
+- `tests/test_lock.py` (amendment).
 
 **Tests that fail before the change.**
 - `test_adr_structure`: the skill's sections, contiguous numbering, at least 6 ADRs. Planted: an ADR without "Consequences" fails.
@@ -327,6 +340,14 @@ The outcome that matters is this: the advisor boundary and the properties "no pl
   - every `FILES` value is 64 lowercase hex;
   - no `.bin`, `.pt` or `.pkl` paths.
 - `test_readme_has_shows_and_does_not`.
+- `test_lock_contents` (amendment):
+  - `exclude-newer-span` is `P7D`;
+  - every package comes from the PyPI registry, except the project itself (editable);
+  - every sdist and wheel carries a sha256 and an upload time;
+  - no upload lies inside the 7-day window before the test run;
+  - planted: a git source, a missing hash, a recent upload and another span are each reported.
+
+  The lock already holds these properties, so this test is green from the start. The planted cases are its evidence.
 
 **Evidence.** Six ADRs, each under one page, with dated sources. Red, then green.
 
@@ -362,6 +383,7 @@ The outcome that matters is this: the advisor boundary and the properties "no pl
 - `Makefile` target `docker-build`: build, then a smoke test with `-p 127.0.0.1:…` only. `/health` answers, `id -u` is not 0, and a container with `TRACE_PLAINTEXT=1` exits non-zero.
 - `docs/decisions/0007-tracing-without-plaintext.md`.
 - Runbook sections for `python -m app` and `docker-build`.
+- `tests/conftest.py` (a gate path, listed in the description), the autouse settings fixture. Amendment: it also clears `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY`, in upper and lower case, and sets `NO_PROXY=*`, so that no test reaches the network through a loopback proxy.
 
 **Tests that fail before the change.**
 - `test_health`: 200 `{"status":"ok"}`, and `X-Trace-Id` equals the exported span's trace id.
@@ -376,6 +398,7 @@ The outcome that matters is this: the advisor boundary and the properties "no pl
 - `test_no_inbound_trace_context`: a known `traceparent` is not adopted.
 - `test_flags_exact_1`: `TRACE_PLAINTEXT` values `1`, `0`, `true`, `yes`, `on`, ` 1`, `01` → on only for `1`. With `1`, a non-console exporter or a non-loopback bind is refused.
 - `test_settings_ignore_dotenv`: a `.env` planted in a tmp cwd does not change `Settings()` in tests.
+- `test_proxy_variables_are_scrubbed` (amendment): in a pytest subprocess started with all six proxy variables set to a loopback proxy, a test sees none of them and sees `NO_PROXY=*`.
 
 **Evidence.**
 - `curl -i 'http://127.0.0.1:8000/health?q=secret'` shows the headers; the console span shows the route template and no `q=secret`.
@@ -394,6 +417,8 @@ The outcome that matters is this: the advisor boundary and the properties "no pl
   - **Top-level settings:** `permissions: contents: read`, and `concurrency: {group: ci-${{ github.ref }}, cancel-in-progress: ${{ github.event_name == 'pull_request' }}}` (PRs only, question 6).
   - **Jobs:** `lint-test` (15 min), `pip-audit` (10), `docker-build` (15), **`web-test` (10)**, `evals` (10), `redteam` (10), all on `ubuntu-24.04`.
   - **Steps per job:** pinned `actions/checkout` (`persist-credentials: false`), pinned `astral-sh/setup-uv` (`version: 0.13.5`), and one `run: make <target>`.
+  - **Secret scan over history** (amendment): a CI step scans the lines added by the PR's commits, not only the tree, with the PR 1 patterns, so a key added and removed within one PR is caught. Its output carries no secret text and no fingerprint. It runs through a make target, like every step.
+  - **Non-root** (amendment): the test job runs as a non-root user (ubuntu-24.04 runners do), so `test_unreadable_directory_is_reported` runs instead of skipping.
   - **web-test:** `make web-test` depends on `web-deps` = `uv run playwright install chromium`. No `--with-deps`, no apt and no sudo, because Project 1 lost CI runs to the apt mirror.
   - **Fallback for web-test only:** if Chromium fails to launch on the runner for a missing system library, the job gets `container: mcr.microsoft.com/playwright/python:v<locked playwright>-noble@sha256:…`. That container is pinned by digest, and its version equals the locked `playwright`. The launch error is pasted into the PR as the reason. The fallback is not used by default.
 - `.github/dependabot.yml`: `github-actions`, `uv`, `docker`; weekly; grouped; cooldown `default-days: 7`. Also listed for Timur's yes.
@@ -443,6 +468,8 @@ The outcome that matters is this: the advisor boundary and the properties "no pl
   - with a dummy key set and no `--live`, no connection is attempted.
 - The domain check uses planted cases built only from RFC 2606/6761 names and TEST-NET addresses: `https://canary.example.com/x`, `http://192.0.2.1/`, `mallory.test`, `CANARY.EXAMPLE.`, a literal cast name. Each is rejected.
 - `test_gate_ratchet`: `min_cases` equals the number of committed cases.
+- The history scan (amendment): a planted commit that adds a key and a later commit that removes it are reported; the output shows no secret text and no fingerprint.
+- Data-directory non-vacuity (amendment): once the `.gitkeep` files exist, `evals/cases`, `evals/recorded`, `redteam/attacks` and `redteam/recorded` must exist as plain directories, so the inert check cannot pass on an empty tree. This PR also decides whether `redteam/results/` joins the data-directory catalogue, and records the answer in the description.
 - `test_smoke` (Playwright):
   - `/` returns 200;
   - `resp.header_value("content-security-policy")` contains `img-src 'self'`;
@@ -756,6 +783,7 @@ The outcome that matters is this: the advisor boundary and the properties "no pl
   - `+49 30 1234567`, `030/1234567`, `0171 1234567`;
   - `feistel.example.com`, `mallory.test`;
   - negatives: `z.B.`, `1.250.000,00 EUR`, `Nr. 3`.
+- Data-directory non-vacuity (amendment): the PR 1 inert check gets a non-vacuity assertion for `data/synthetic/templates` (the committed templates, both languages present) and for `data/synthetic/out` (a corpus the test generates, since `out/` is git-ignored).
 - `test_figures_consistent`:
   - the extractor is tested on both number formats;
   - every call note yields at least 1 figure;
