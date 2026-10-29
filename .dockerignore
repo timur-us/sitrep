@@ -1,1 +1,14 @@
+# Deny by default: the build context holds the project definition, the lock and app/.
+*
+!pyproject.toml
+!uv.lock
+!app/
+
+# Excluded again, after the re-includes, wherever they are.
+**/.env*
+**/__pycache__
+**/*.pyc
 .git
+.claude
+data/synthetic/out
+tests

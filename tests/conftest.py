@@ -3,6 +3,10 @@
 Every test gets settings built without a dotenv file (`Settings(_env_file=None)`),
 from an environment that carries none of the settings' own variables, so the
 developer's shell does not leak into a test.
+
+The same fixture removes the proxy variables and sets NO_PROXY to "*": pytest-socket
+allows loopback, so a proxy on 127.0.0.1 would turn an allowed connect into egress,
+for the test and for any subprocess it starts.
 """
 
 from __future__ import annotations
@@ -16,14 +20,18 @@ import pytest
 from app.config.settings import Settings
 from app.observability.logs import LOG_CONFIG
 
+PROXY_VARIABLES = frozenset({"http_proxy", "https_proxy", "all_proxy"})
+
 
 @pytest.fixture(autouse=True)
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     fields = {name.lower() for name in Settings.model_fields}
     for name in list(os.environ):
-        # pydantic-settings matches variable names without regard to case.
-        if name.lower() in fields:
+        # pydantic-settings, like most proxy clients, matches names without regard to case.
+        if name.lower() in fields | PROXY_VARIABLES:
             monkeypatch.delenv(name)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
     return Settings(_env_file=None)
 
 

@@ -10,8 +10,10 @@ not the configuration, has to keep them out.
 
 from __future__ import annotations
 
+import errno
 import http.client
 import logging
+import sys
 import threading
 import time
 import uuid
@@ -28,7 +30,7 @@ from app.__main__ import server_config
 from app.config import branding
 from app.config.settings import Settings
 from app.observability import tracing
-from app.observability.logs import LOG_CONFIG
+from app.observability.logs import LOG_CONFIG, SafeFormatter, StderrHandler
 
 # The reviewed allowlists, written out here so that widening one is a visible change.
 # The keys are the instrumentation's default (pre-stable) HTTP conventions; target,
@@ -43,6 +45,10 @@ WAIT = 5.0
 
 class CanaryError(RuntimeError):
     """Raised with the canary as its message."""
+
+
+# How OpenTelemetry writes exception.type, and the logs with it: module and name.
+CANARY_ERROR = f"{CanaryError.__module__}.{CanaryError.__qualname__}"
 
 
 @dataclass
@@ -171,16 +177,18 @@ def test_no_plaintext_in_traces_or_logs(
     failed = [span for span in spans if span.status.status_code is StatusCode.ERROR]
     assert [span.name for span in failed] == ["GET /boom"], [span.name for span in spans]
     assert [(event.name, dict(event.attributes or {})) for event in failed[0].events] == [
-        ("exception", {"exception.type": "CanaryError"})
+        ("exception", {"exception.type": CANARY_ERROR})
     ]
     trace_id = format(failed[0].context.trace_id, "032x")
 
-    # Log records, as every handler receives them, including the exception record.
+    # Log records, as every handler receives them, including the exception record. pytest
+    # attaches its handler to non-propagating loggers too, so uvicorn.access records
+    # appear here although the server itself has no access handler (test_server_config).
     def logged() -> list[logging.LogRecord]:
         return [
             record
             for record in caplog.records
-            if record.name == "uvicorn.error" and getattr(record, "exc_type", None) == "CanaryError"
+            if record.name == "uvicorn.error" and getattr(record, "exc_type", None) == CANARY_ERROR
         ]
 
     _wait_for(logged, "uvicorn's exception record")
@@ -196,7 +204,7 @@ def test_no_plaintext_in_traces_or_logs(
     out, err = capfd.readouterr()
     assert canary not in out, "canary on stdout"
     assert canary not in err, "canary on stderr"
-    assert f"exc_type=CanaryError trace_id={trace_id}" in err, err[-1000:]
+    assert f"exc_type={CANARY_ERROR} trace_id={trace_id}" in err, err[-1000:]
 
 
 def test_server_config(settings: Settings, restore_logging: None) -> None:
@@ -206,3 +214,58 @@ def test_server_config(settings: Settings, restore_logging: None) -> None:
     assert config.proxy_headers is False, "proxy headers trusted"
     assert config.server_header is False, "server header sent"
     assert config.log_config is LOG_CONFIG, "not the redacting log config"
+    # uvicorn writes an access line only when its access logger reaches a handler.
+    assert not logging.getLogger("uvicorn.access").hasHandlers(), "access records are handled"
+
+
+def test_logged_exception_object_shows_type_and_errno_only() -> None:
+    # uvicorn logs a failed bind as logger.error(exc): the record's message is the
+    # exception itself, and str() of it would be its text.
+    canary = f"cnry{uuid.uuid4().hex}"
+    record = logging.LogRecord(
+        "uvicorn.error", logging.ERROR, __file__, 1, OSError(errno.EADDRINUSE, canary), (), None
+    )
+    line = SafeFormatter().format(record)
+    assert canary not in line, line
+    assert line.endswith(
+        " ERROR uvicorn.error OSError exc_type=OSError errno=EADDRINUSE trace_id=-"
+    )
+
+
+class _BreaksOnce:
+    """A stderr whose first write fails, as a closed or full pipe would."""
+
+    def __init__(self) -> None:
+        self.written: list[str] = []
+        self.broken = True
+
+    def write(self, text: str) -> int:
+        if self.broken:
+            self.broken = False
+            raise ValueError("I/O operation on closed file.")
+        self.written.append(text)
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("safe", [True, False])
+def test_failed_log_write_prints_no_exception(monkeypatch: pytest.MonkeyPatch, safe: bool) -> None:
+    # logging's handleError prints a traceback whose context is the exception being
+    # logged. The stock handler (the control) leaks its message; StderrHandler does not.
+    canary = f"cnry{uuid.uuid4().hex}"
+    stream = _BreaksOnce()
+    monkeypatch.setattr(sys, "stderr", stream)
+    handler = StderrHandler() if safe else logging.StreamHandler(stream)
+    handler.setFormatter(SafeFormatter())
+    record = logging.LogRecord("uvicorn.error", logging.ERROR, __file__, 1, "failed", (), None)
+    try:
+        raise CanaryError(canary)
+    except CanaryError:
+        record.exc_info = sys.exc_info()
+        handler.handle(record)
+    leaked = any(canary in text for text in stream.written)
+    assert leaked is not safe, f"safe={safe}: written {stream.written}"
+    if safe:
+        assert stream.written == ["logging error: a log line was dropped\n"], stream.written

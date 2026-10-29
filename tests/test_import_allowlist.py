@@ -25,6 +25,7 @@ ALLOWED = frozenset(
         "collections",
         "dataclasses",
         "enum",
+        "errno",
         "fastapi",
         "html",
         "logging",
