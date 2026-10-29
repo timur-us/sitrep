@@ -80,44 +80,68 @@ def test_planted_violations() -> None:
         "package": [
             {"name": PROJECT, "version": "0.1.0", "source": {"editable": "."}},
             {"name": "ok", "version": "1", "source": PYPI, "wheels": [_dist("ok-1.whl")]},
-            # Exactly at the edge of the window: allowed.
+            # Exactly at the edge of the window: allowed. uv writes fractional seconds.
             {"name": "edge", "version": "1", "source": PYPI, "sdist": _dist("edge-1.tar.gz")},
+            {
+                "name": "frac",
+                "version": "1",
+                "source": PYPI,
+                "wheels": [_dist("frac-1.whl", uploaded="2025-04-03T10:39:49.734Z")],
+            },
         ],
     }
     good["package"][2]["sdist"]["upload-time"] = "2026-10-22T12:00:00Z"
     assert lock_problems(good, now) == []
 
-    git = {"git": "https://github.com/x/y?rev=1"}
+    def pkg(name: str, *dists: dict[str, str], source: dict[str, str] = PYPI) -> dict[str, Any]:
+        return {"name": name, "version": "1", "source": source, "wheels": list(dists)}
+
     bad = {
         "options": {"exclude-newer-span": "P1D"},
         "package": [
             {"name": "other", "version": "1", "source": {"editable": "."}},
-            {"name": "fromgit", "version": "1", "source": git, "wheels": [_dist("g-1.whl")]},
-            {"name": "nohash", "version": "1", "source": PYPI, "wheels": [_dist("n.whl", hash="")]},
-            {
-                "name": "fresh",
-                "version": "1",
-                "source": PYPI,
-                "sdist": _dist("f-1.tar.gz", uploaded="2026-10-25T00:00:00Z"),
-            },
-            {
-                "name": "mirror",
-                "version": "1",
-                "source": PYPI,
-                "wheels": [_dist("m.whl") | {"url": "https://mirror.example/m.whl"}],
-            },
+            pkg("fromgit", _dist("g-1.whl"), source={"git": "https://github.com/x/y?rev=1"}),
+            # Assembled, so the repo-wide secret scan does not flag this file.
+            pkg(
+                "creds", _dist("c-1.whl"), source={"registry": "https://u:" + "t0k@mirror.example"}
+            ),
+            pkg("nohash", _dist("n.whl", hash="")),
+            pkg("fresh", _dist("f-1.whl", uploaded="2026-10-25T00:00:00Z")),
+            # One second inside the window: a WINDOW shorter than 7 days lets this through.
+            pkg("justin", _dist("j-1.whl", uploaded="2026-10-22T12:00:01Z")),
+            pkg("naive", _dist("v-1.whl", uploaded="2025-01-01T00:00:00")),
+            pkg("garbage", _dist("x-1.whl", uploaded="yesterday")),
+            pkg("mirror", _dist("m.whl") | {"url": "https://mirror.example/m.whl?token=abc"}),
             {"name": "empty", "version": "1", "source": PYPI},
         ],
     }
-    del bad["package"][2]["wheels"][0]["upload-time"]
+    del bad["package"][3]["wheels"][0]["upload-time"]
     assert lock_problems(bad, now) == [
         "exclude-newer-span is 'P1D', expected 'P7D'",
-        "other 1: source {'editable': '.'}, expected {'registry': 'https://pypi.org/simple'}",
+        f"the project {PROJECT!r} appears 0 times as editable, expected once",
+        "other 1: source editable, expected the PyPI registry",
         "other 1: no sdist and no wheel",
-        f"fromgit 1: source {git}, expected {PYPI}",
+        "fromgit 1: source git (github.com), expected the PyPI registry",
+        "creds 1: source registry (mirror.example), expected the PyPI registry",
         "nohash 1: n.whl has no sha256",
         "nohash 1: n.whl has no upload time",
-        "fresh 1: f-1.tar.gz uploaded 2026-10-25T00:00:00Z, inside the 7-day window",
+        "fresh 1: f-1.whl uploaded 2026-10-25T00:00:00Z, inside the 7-day window",
+        "justin 1: j-1.whl uploaded 2026-10-22T12:00:01Z, inside the 7-day window",
+        "naive 1: v-1.whl upload time '2025-01-01T00:00:00' has no time zone",
+        "garbage 1: x-1.whl upload time 'yesterday' is not an ISO timestamp",
         f"mirror 1: m.whl not from {FILE_HOST}",
         "empty 1: no sdist and no wheel",
+    ]
+
+
+def test_planted_project_entries() -> None:
+    # The project's own entry skips the per-file checks, so it must be exactly
+    # one editable entry with nothing to download.
+    now = datetime(2026, 10, 29, 12, tzinfo=UTC)
+    project = {"name": PROJECT, "version": "0.1.0", "source": {"editable": "."}}
+    carrying = project | {"wheels": [{"url": "https://elsewhere.example/p.whl"}]}
+    lock = {"options": {"exclude-newer-span": SPAN}, "package": [project, carrying]}
+    assert lock_problems(lock, now) == [
+        f"the project {PROJECT!r} appears 2 times as editable, expected once",
+        f"{PROJECT} 0.1.0: the project entry lists files to download",
     ]

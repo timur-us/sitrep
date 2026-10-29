@@ -2,6 +2,7 @@
 
 ADRs follow .claude/skills/adr/SKILL.md: numbered without gaps, the skill's
 sections in its order, a status the skill allows, dated sources, under one page.
+docs/decisions/ holds ADRs only: any other file or directory there is reported.
 The README says what the project shows and what it does not.
 """
 
@@ -153,6 +154,57 @@ def test_planted_adrs_are_checked(tmp_path: Path) -> None:
         f"0006-title.md: {words(long) - words(SOURCE)} words, more than one page ({MAX_WORDS})",
     ]
     assert words(long) - words(SOURCE) > MAX_WORDS >= words(_adr(6)) - words(SOURCE)
+
+
+NOT_AN_ITEM = "Sources line is not a '- ' item or its indented continuation"
+
+
+def test_planted_adr_shapes(tmp_path: Path) -> None:
+    decisions = tmp_path / "decisions"
+    spelled_out = f"{branding.PRODUCT.name} ({branding.PRODUCT.expansion})"
+    wrapped = "- A long source,\n  continued on the next line (2026-10-28)."
+    _write(decisions, 1, _adr(1).replace("# ADR 0001: ", "# 0001 ", 1))
+    _write(decisions, 2, _adr(2).replace(spelled_out, "It"))
+    _write(decisions, 3, _adr(3).replace("needs a decision.", f"needs {spelled_out}.", 1))
+    _write(decisions, 4, _adr(4, source=""))
+    _write(decisions, 5, _adr(5) + "\n## Sources\n\n" + SOURCE + "\n")
+    _write(decisions, 6, _adr(6).replace("2026-10-29", "2026-99-99"))
+    _write(decisions, 7, _adr(7, source=wrapped))
+    _write(decisions, 8, _adr(8, source=SOURCE + "\n* Undated star item."))
+    _write(decisions, 9, _adr(9, source=SOURCE + "\n1. Undated numbered item."))
+    assert adr_problems(decisions) == [
+        "0001-title.md: first line is not '# ADR 0001: <title>'",
+        f"0002-title.md: spells out {spelled_out!r} 0 times, expected once",
+        f"0003-title.md: spells out {spelled_out!r} 2 times, expected once",
+        "0004-title.md: no sources",
+        f"0005-title.md: sections {[*SECTIONS, 'Sources']}, expected {list(SECTIONS)}",
+        "0006-title.md: date is not YYYY-MM-DD",
+        f"0008-title.md: {NOT_AN_ITEM}: * Undated star item.",
+        f"0009-title.md: {NOT_AN_ITEM}: 1. Undated numbered item.",
+    ]
+
+
+def test_words_skips_fences() -> None:
+    assert words("a b\n```yaml\nx y z\n```\nc") == 3
+    assert words("") == 0
+
+
+def test_word_cap_boundary(tmp_path: Path) -> None:
+    decisions = tmp_path / "decisions"
+    base = words(_adr(1)) - words(SOURCE)
+
+    def padded(number: int, extra: int) -> str:
+        return _adr(number).replace("One.\n", "One. " + "w " * extra + "\n", 1)
+
+    _write(decisions, 1, padded(1, MAX_WORDS - base))
+    _write(decisions, 2, padded(2, MAX_WORDS - base + 1))
+    fence = "```text\n" + "w " * (2 * MAX_WORDS) + "\n```\n"
+    _write(decisions, 3, _adr(3).replace("One.\n", "One.\n\n" + fence, 1))
+    for number in range(4, MIN_ADRS + 1):
+        _write(decisions, number, _adr(number))
+    assert adr_problems(decisions) == [
+        f"0002-title.md: {MAX_WORDS + 1} words, more than one page ({MAX_WORDS})"
+    ]
 
 
 def test_planted_adr_heading_inside_a_fence_is_ignored(tmp_path: Path) -> None:

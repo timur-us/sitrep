@@ -14,6 +14,7 @@ import re
 from pathlib import PurePosixPath
 from types import ModuleType, SimpleNamespace
 
+import repo_files
 import yaml
 from repo_files import ROOT
 
@@ -63,6 +64,17 @@ def yaml_mismatches(adr: str, module: ModuleType | SimpleNamespace) -> list[str]
     return problems
 
 
+def files_problems(files: dict[str, str]) -> list[str]:
+    """One line per FILES entry that is not a safe, pinned file."""
+    problems = []
+    for path, digest in files.items():
+        if PurePosixPath(path).suffix in PICKLE_SUFFIXES:
+            problems.append(f"{path}: not an allowed file type (.json, .onnx)")
+        if not SHA256.fullmatch(digest):
+            problems.append(f"{path}: digest is not 64 lowercase hex")
+    return problems
+
+
 def _adr_0005() -> str:
     found = sorted(DECISIONS.glob("0005-*.md")) if DECISIONS.is_dir() else []
     assert len(found) == 1, f"expected one ADR 0005 in docs/decisions, found {len(found)}"
@@ -85,10 +97,8 @@ def test_revision_is_a_commit() -> None:
 def test_dim_anchored_to_model() -> None:
     files = embedding.FILES
     assert files, "FILES is empty"
-    bad = [path for path, digest in files.items() if not SHA256.fullmatch(digest)]
-    assert not bad, f"not 64 lowercase hex: {bad}"
-    pickled = [path for path in files if PurePosixPath(path).suffix in PICKLE_SUFFIXES]
-    assert not pickled, f"pickle-based files in FILES: {pickled}"
+    problems = files_problems(dict(files))
+    assert not problems, "FILES:\n" + "\n".join(problems)
 
     assert MODEL_CONFIG.is_file(), f"{MODEL_CONFIG.relative_to(ROOT)} is missing"
     assert CONFIG_PATH in files, f"FILES has no {CONFIG_PATH!r}"
@@ -155,3 +165,56 @@ def test_planted_mismatches() -> None:
     assert yaml_mismatches(good.replace("dim: 384\n", ""), module) == ["dim: not in the ADR"]
     assert yaml_mismatches(good + good, module) == ["expected one yaml block, found 2"]
     assert yaml_mismatches("no block\n", module) == ["expected one yaml block, found 0"]
+
+    # The trailing space of a prefix is the plausible slip.
+    no_space = good.replace('query_prefix: "query: "', 'query_prefix: "query:"')
+    assert yaml_mismatches(no_space, module) == [
+        "query_prefix: ADR 'query:', embedding.py 'query: '"
+    ]
+    one_file = good.replace("  onnx/model.onnx: " + "c" * 64 + "\n", "")
+    assert yaml_mismatches(one_file, module) == [
+        "files[onnx/model.onnx]: ADR and embedding.py differ"
+    ]
+    as_list = good.replace("files:\n  config.json: ", "files:\n  - config.json: ").replace(
+        "\n  onnx/model.onnx: ", "\n  - onnx/model.onnx: "
+    )
+    assert yaml_mismatches(as_list, module) == ["files: not a mapping in the ADR"]
+    assert yaml_mismatches("```yaml\n- a\n- b\n```\n", module) == [
+        "the yaml block is not a mapping"
+    ]
+    assert yaml_mismatches("```yaml\ndim: [384\n```\n", module) == ["the yaml block is not yaml"]
+
+
+def test_planted_files() -> None:
+    ok = "a" * 64
+    files = {
+        "config.json": ok,
+        "onnx/model.onnx": ok,
+        "pytorch_model.bin": ok,
+        "MODEL.BIN": ok,
+        "model.py": ok,
+        "weights.npz": ok,
+        "../escape.json": ok,
+        "/absolute.json": ok,
+        "dir\\back.json": ok,
+        "upper.json": "A" * 64,
+        "short.json": "a" * 63,
+    }
+    assert files_problems(files) == [
+        "pytorch_model.bin: not an allowed file type (.json, .onnx)",
+        "MODEL.BIN: not an allowed file type (.json, .onnx)",
+        "model.py: not an allowed file type (.json, .onnx)",
+        "weights.npz: not an allowed file type (.json, .onnx)",
+        "../escape.json: not a plain relative path",
+        "/absolute.json: not a plain relative path",
+        "dir\\back.json: not a plain relative path",
+        "upper.json: digest is not 64 lowercase hex",
+        "short.json: digest is not 64 lowercase hex",
+    ]
+
+
+def test_model_config_is_binary_to_git() -> None:
+    # The config is pinned by its bytes: git must never convert its line endings.
+    rel = MODEL_CONFIG.relative_to(ROOT).as_posix()
+    out = repo_files.git(ROOT, "check-attr", "text", "--", rel).decode().strip()
+    assert out == f"{rel}: text: unset", f"git check-attr: {out!r} (add '{rel} -text')"
