@@ -38,13 +38,19 @@ docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-
 	echo "smoke: published on $$addr"; \
 	case "$$addr" in 127.0.0.1:*) ;; *) echo "smoke: not on 127.0.0.1 only"; exit 1;; esac; \
 	for i in $$(seq 1 40); do \
-	  curl -fsS -o /dev/null "http://$$addr/health" 2>/dev/null && break; sleep 0.25; \
+	  curl --noproxy '*' -fsS -o /dev/null "http://$$addr/health" 2>/dev/null && break; sleep 0.25; \
 	done; \
-	body="$$(curl -fsS "http://$$addr/health")"; \
+	canary="cnry$$$$$$(date +%s)"; \
+	body="$$(curl --noproxy '*' -fsS -H "X-Canary: $$canary" "http://$$addr/health?q=$$canary")"; \
 	echo "smoke: /health $$body"; \
 	test "$$body" = '{"status":"ok"}'; \
-	curl -fsS -o /dev/null "http://$$addr/"; \
-	echo "smoke: / 200"
+	curl --noproxy '*' -fsS -o /dev/null "http://$$addr/"; \
+	echo "smoke: / 200"; \
+	sleep 0.5; \
+	logs="$$(docker logs "$$cid" 2>&1)"; \
+	case "$$logs" in *'"GET /health"'*) ;; *) echo "smoke: no span in the logs"; exit 1;; esac; \
+	case "$$logs" in *"$$canary"*) echo "smoke: the canary is in the logs"; exit 1;; esac; \
+	echo "smoke: logs carry the span, not the canary"
 	@set -eu; \
 	cid="$$(docker run -d -e TRACE_PLAINTEXT=1 $(IMAGE))"; \
 	trap 'docker rm -f "$$cid" >/dev/null' EXIT; \
@@ -53,4 +59,6 @@ docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-
 	done; \
 	state="$$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$$cid")"; \
 	echo "smoke: TRACE_PLAINTEXT=1 on 0.0.0.0: $$state"; \
-	case "$$state" in "exited 0") exit 1;; exited*) ;; *) exit 1;; esac
+	test "$$state" = "exited 2"; \
+	docker logs "$$cid" 2>&1 | grep -q 'refused to start: TRACE_PLAINTEXT=1'; \
+	echo "smoke: refused with exit code 2"

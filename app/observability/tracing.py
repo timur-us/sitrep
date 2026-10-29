@@ -13,6 +13,7 @@ or baggage header is never adopted.
 
 from __future__ import annotations
 
+import secrets
 import sys
 from collections.abc import Mapping, Sequence
 from types import MappingProxyType
@@ -38,7 +39,8 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
-from opentelemetry.trace import Status
+from opentelemetry.sdk.trace.id_generator import IdGenerator
+from opentelemetry.trace import SpanContext, Status
 
 from app.config import branding
 from app.config.settings import LOOPBACK, Settings
@@ -54,6 +56,12 @@ ALLOWED_EVENTS: Mapping[str, frozenset[str]] = MappingProxyType(
     {"exception": frozenset({"exception.type"})}
 )
 ALLOWED_RESOURCE_KEYS = frozenset({"service.name"})
+# http.method values kept as they are; any other becomes OTHER_METHOD, as the
+# instrumentation itself does by default.
+KNOWN_METHODS = frozenset(
+    {"CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE"}
+)
+OTHER_METHOD = "_OTHER"
 # The name of a span whose name is not method plus route.
 REDACTED_NAME = "redacted"
 
@@ -95,17 +103,54 @@ def current_trace_id() -> str | None:
     return trace.format_trace_id(context.trace_id) if context.is_valid else None
 
 
+class SecureIdGenerator(IdGenerator):
+    """Trace and span ids from `secrets`. The SDK's default uses `random`, whose state
+    can be recovered from enough outputs, and X-Trace-Id hands one out per response."""
+
+    def generate_span_id(self) -> int:
+        span_id = 0
+        while span_id == trace.INVALID_SPAN_ID:
+            span_id = secrets.randbits(64)
+        return span_id
+
+    def generate_trace_id(self) -> int:
+        trace_id = 0
+        while trace_id == trace.INVALID_TRACE_ID:
+            trace_id = secrets.randbits(128)
+        return trace_id
+
+
 def _keep(attributes: Mapping[str, object] | None, allowed: frozenset[str]) -> dict:
     return {key: value for key, value in (attributes or {}).items() if key in allowed}
 
 
-def _name(span: ReadableSpan) -> str:
-    attributes = span.attributes or {}
+def _attributes(span: ReadableSpan) -> dict:
+    kept = _keep(span.attributes, ALLOWED_KEYS)
+    # With OTEL_PYTHON_INSTRUMENTATION_HTTP_CAPTURE_ALL_METHODS the raw method token,
+    # which the client chooses, lands here; only standard methods pass.
+    if "http.method" in kept and kept["http.method"] not in KNOWN_METHODS:
+        kept["http.method"] = OTHER_METHOD
+    return kept
+
+
+def _name(span: ReadableSpan, attributes: Mapping[str, object]) -> str:
     method, route = attributes.get("http.method"), attributes.get("http.route")
     # The instrumentation names a span "<method> <route>", or "<method>" without a
     # route, and uses "HTTP" for methods it does not know.
     names = {f"{verb} {route}" if route else str(verb) for verb in (method, "HTTP") if verb}
     return span.name if span.name in names else REDACTED_NAME
+
+
+def _without_state(context: SpanContext | None) -> SpanContext | None:
+    # Trace state is vendor text, and inbound tracestate headers are its source.
+    if context is None:
+        return None
+    return SpanContext(
+        trace_id=context.trace_id,
+        span_id=context.span_id,
+        is_remote=context.is_remote,
+        trace_flags=context.trace_flags,
+    )
 
 
 def redact(span: ReadableSpan) -> ReadableSpan:
@@ -114,12 +159,13 @@ def redact(span: ReadableSpan) -> ReadableSpan:
         for event in span.events
         if event.name in ALLOWED_EVENTS
     ]
+    attributes = _attributes(span)
     return ReadableSpan(
-        name=_name(span),
-        context=span.context,
-        parent=span.parent,
+        name=_name(span, attributes),
+        context=_without_state(span.context),
+        parent=_without_state(span.parent),
         resource=Resource(_keep(span.resource.attributes, ALLOWED_RESOURCE_KEYS)),
-        attributes=_keep(span.attributes, ALLOWED_KEYS),
+        attributes=attributes,
         events=events,
         links=(),
         kind=span.kind,
@@ -176,7 +222,9 @@ def build_tracer_provider(
 ) -> TracerProvider:
     # A plain Resource: Resource.create() would merge OTEL_RESOURCE_ATTRIBUTES and
     # OTEL_SERVICE_NAME from the environment. Spans export as they end (local console).
-    provider = TracerProvider(resource=Resource({"service.name": branding.SLUG}))
+    provider = TracerProvider(
+        resource=Resource({"service.name": branding.SLUG}), id_generator=SecureIdGenerator()
+    )
     provider.add_span_processor(SimpleSpanProcessor(exporter_chain(settings, bind_host, inner)))
     return provider
 

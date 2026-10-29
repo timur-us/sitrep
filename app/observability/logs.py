@@ -36,8 +36,14 @@ def exception_type(cls: type) -> str:
 
 def tag_trace_id(exc: BaseException) -> None:
     trace_id = current_trace_id()
-    if trace_id is not None:
+    if trace_id is None:
+        return
+    # An exception may refuse new attributes (a frozen dataclass exception); the 500
+    # still goes out with its headers, and the log line falls back to "-".
+    try:
         setattr(exc, TRACE_ID_ATTRIBUTE, trace_id)
+    except (AttributeError, TypeError):
+        return
 
 
 class RedactFilter(logging.Filter):
