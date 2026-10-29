@@ -83,12 +83,46 @@ def test_base_images_are_pinned() -> None:
     assert uv == [floor.group(1)], f"uv image {uv}, required-version floor {floor.group(1)}"
 
 
+def unpinned_sources(text: str) -> list[str]:
+    """`--from=` values (COPY, RUN --mount) that are not a stage defined earlier: those
+    pull a registry image, without a digest check."""
+    stage_names: set[str] = set()
+    found = []
+    for keyword, arguments in instructions(text):
+        if keyword == "FROM":
+            parts = arguments.split()
+            if len(parts) == 3 and parts[1].upper() == "AS":
+                stage_names.add(parts[2])
+            continue
+        found += [
+            source
+            for source in re.findall(r"(?:^|[\s,])--?(?:mount=[^\s]*?,)?from=([^\s,]+)", arguments)
+            if source not in stage_names
+        ]
+    return found
+
+
+def test_copy_from_names_an_earlier_stage() -> None:
+    assert unpinned_sources(_text()) == []
+    planted = (
+        "FROM a@sha256:" + "0" * 64 + " AS uv\n"
+        "COPY --from=uv /uv /bin/uv\n"
+        "COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv\n"
+        "RUN --mount=type=bind,from=python:3.12,target=/x true\n"
+        "COPY --from=later /x /x\n"
+        "FROM b@sha256:" + "0" * 64 + " AS later\n"
+    )
+    assert unpinned_sources(planted) == ["ghcr.io/astral-sh/uv:latest", "python:3.12", "later"]
+
+
 def test_install_is_locked_without_dev_tools() -> None:
     runs = [arguments for keyword, arguments in instructions(_text()) if keyword == "RUN"]
     syncs = [run for run in runs if "uv sync" in run]
     assert syncs, "no uv sync"
     for run in syncs:
         assert "--locked" in run and "--no-dev" in run, run
+    # The runtime stage has no source tree, so the project must be installed, not linked.
+    assert "--no-editable" in syncs[-1], syncs[-1]
     banned = ("pip install", "curl", "wget", "apt-get", "uv pip", "uv add", "uv lock")
     found = [(run, word) for run in runs for word in banned if word in run]
     assert not found, found

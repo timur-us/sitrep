@@ -33,6 +33,7 @@ ALLOWED = frozenset(
         "pathlib",
         "pydantic",
         "pydantic_settings",
+        "secrets",
         "starlette",
         "sys",
         "types",
@@ -49,8 +50,12 @@ BANNED_MODULES = frozenset(
         "http",
         "httpx",
         "importlib",
+        # Submodules of reviewed packages that ship data away: log handlers for HTTP,
+        # sockets, syslog and mail, and OpenTelemetry's network exporters.
+        "logging.handlers",
         "marshal",
         "multiprocessing",
+        "opentelemetry.exporter",
         "pickle",
         "requests",
         "smtplib",
@@ -63,25 +68,38 @@ BANNED_MODULES = frozenset(
     }
 )
 BANNED_NAMES = frozenset({"__import__", "compile", "eval", "exec"})
-# Attribute names that open a connection or import by name, on any object.
+# Names that connect, serve, run a program, import by name or redirect, on any object
+# or in a from-import. RedirectResponse: the app has no endpoint that redirects.
 BANNED_ATTRIBUTES = frozenset(
     {
+        "RedirectResponse",
         "create_connection",
         "create_datagram_endpoint",
+        "create_server",
+        "create_subprocess_exec",
+        "create_subprocess_shell",
         "create_unix_connection",
         "import_module",
         "open_connection",
         "open_unix_connection",
         "sock_connect",
+        "start_server",
+        "urlopen",
     }
 )
 # On the os module only: running or replacing a program.
 OS_PROGRAM = re.compile(r"system|popen|startfile|fork\w*|exec\w*|spawn\w*|posix_spawn\w*")
 
 
+def banned_module(name: str) -> str | None:
+    """The BANNED_MODULES entry that name is, or lies under."""
+    return next((b for b in BANNED_MODULES if name == b or name.startswith(b + ".")), None)
+
+
 def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
     """The top-level modules a file imports, and its banned uses."""
     modules: set[str] = set()
+    dotted: set[str] = set()  # full module names, and module.name for from-imports
     problems: list[str] = []
     os_names: set[str] = set()
     for node in ast.walk(ast.parse(source)):
@@ -89,23 +107,29 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
             for alias in node.names:
                 top = alias.name.partition(".")[0]
                 modules.add(top)
+                dotted.add(alias.name)
                 if top == "os":
                     os_names.add(alias.asname or "os")
         elif isinstance(node, ast.ImportFrom):
-            top = "app" if node.level else (node.module or "").partition(".")[0]
+            module = node.module or ""
+            top = "app" if node.level else module.partition(".")[0]
             modules.add(top)
+            if not node.level:
+                dotted.add(module)
+                dotted.update(f"{module}.{alias.name}" for alias in node.names)
             for alias in node.names:
                 if alias.name in BANNED_ATTRIBUTES or (
-                    node.module == "os" and OS_PROGRAM.fullmatch(alias.name)
+                    module == "os" and OS_PROGRAM.fullmatch(alias.name)
                 ):
-                    problems.append(f"{rel}:{node.lineno}: from {node.module} import {alias.name}")
+                    problems.append(f"{rel}:{node.lineno}: from {module} import {alias.name}")
         elif isinstance(node, ast.Attribute):
             on_os = isinstance(node.value, ast.Name) and node.value.id in os_names
             if node.attr in BANNED_ATTRIBUTES or (on_os and OS_PROGRAM.fullmatch(node.attr)):
                 problems.append(f"{rel}:{node.lineno}: .{node.attr}")
         elif isinstance(node, ast.Name) and node.id in BANNED_NAMES:
             problems.append(f"{rel}:{node.lineno}: {node.id}")
-    problems += [f"{rel}: banned module {module}" for module in sorted(modules & BANNED_MODULES)]
+    banned = {entry for name in dotted if (entry := banned_module(name))}
+    problems += [f"{rel}: banned module {entry}" for entry in sorted(banned)]
     return modules, problems
 
 
@@ -132,10 +156,20 @@ def test_import_allowlist() -> None:
     modules, problems = check(sources)
     assert not problems, "\n".join(problems)
     assert modules == ALLOWED, f"not imported, drop from the list: {sorted(ALLOWED - modules)}"
+    # A banned name may sit under a reviewed package (logging.handlers), not be one.
     assert not ALLOWED & BANNED_MODULES, sorted(ALLOWED & BANNED_MODULES)
 
 
 PLANTED = [
+    ("import socket\n", "banned module socket"),
+    ("import logging.handlers\n", "banned module logging.handlers"),
+    ("from logging.handlers import HTTPHandler\n", "banned module logging.handlers"),
+    ("from logging import handlers\n", "banned module logging.handlers"),
+    ("from opentelemetry.exporter.otlp import x\n", "banned module opentelemetry.exporter"),
+    ("from fastapi.responses import RedirectResponse\n", "import RedirectResponse"),
+    ("import starlette.responses as r\nr.RedirectResponse('/')\n", ".RedirectResponse"),
+    ("from os import system\n", "from os import system"),
+    ("import builtins\nbuiltins.__import__('socket')\n", "unreviewed import builtins"),
     ("import httpx\n", "unreviewed import httpx"),
     ("import httpx\n", "banned module httpx"),
     ("import urllib.request as r\n", "banned module urllib"),
@@ -164,7 +198,9 @@ def test_clean_code_is_not_reported() -> None:
     source = (
         "import logging\nimport re\nimport os\nfrom app.config import branding\n"
         "cursor.execute('select 1')\nre.compile('x')\nos.environ.get('X')\nos.path.join('a')\n"
+        "from logging import Filter\nimport logging.config\nfrom fastapi.responses import Response\n"
+        "from opentelemetry.sdk.trace import TracerProvider\n"
     )
     modules, problems = scan(source, "app/clean.py")
     assert problems == [], problems
-    assert modules == {"logging", "re", "os", "app"}
+    assert modules == {"logging", "re", "os", "app", "fastapi", "opentelemetry"}

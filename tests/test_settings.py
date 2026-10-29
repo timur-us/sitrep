@@ -15,6 +15,7 @@ import uvicorn
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from pydantic import ValidationError
 from repo_files import ROOT
 
 from app import __main__ as entry
@@ -48,6 +49,34 @@ def test_flags_exact_1(monkeypatch: pytest.MonkeyPatch, value: str, on: bool) ->
     settings = Settings(_env_file=None)
     assert settings.trace_plaintext == value, "the value was changed on the way in"
     assert (settings.trace_plaintext_on, settings.dev_auth_on) == (on, on), repr(value)
+
+
+@pytest.mark.parametrize(("plaintext", "dev_auth"), [("1", "0"), ("0", "1")])
+def test_flags_are_independent(
+    monkeypatch: pytest.MonkeyPatch, plaintext: str, dev_auth: str
+) -> None:
+    monkeypatch.setenv("TRACE_PLAINTEXT", plaintext)
+    monkeypatch.setenv("DEV_AUTH", dev_auth)
+    settings = Settings(_env_file=None)
+    assert (settings.trace_plaintext_on, settings.dev_auth_on) == (
+        plaintext == "1",
+        dev_auth == "1",
+    )
+
+
+@pytest.mark.parametrize("port", ["-1", "65536", "http"])
+def test_port_must_be_a_port(monkeypatch: pytest.MonkeyPatch, port: str) -> None:
+    monkeypatch.setenv("PORT", port)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_env_example_is_safe() -> None:
+    # The file a developer copies: every flag off, the bind on loopback, and the
+    # variables Settings does not know (the API key, the database URL) ignored.
+    example = Settings(_env_file=ROOT / ".env.example")
+    assert (example.host, example.port) == ("127.0.0.1", 8000)
+    assert (example.trace_plaintext_on, example.dev_auth_on) == (False, False)
 
 
 def test_plaintext_needs_console_and_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -91,6 +120,24 @@ def test_entry_point_refuses_plaintext_off_loopback(
     assert "TRACE_PLAINTEXT=1" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    ("variables", "host"),
+    [({"TRACE_PLAINTEXT": "1"}, "127.0.0.1"), ({"HOST": ALL_INTERFACES}, ALL_INTERFACES)],
+)
+@pytest.mark.usefixtures("restore_logging")
+def test_entry_point_starts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variables: dict[str, str], host: str
+) -> None:
+    # Positive cases: plaintext on loopback, and the image's 0.0.0.0 without plaintext.
+    started: list[str] = []
+    monkeypatch.setattr(uvicorn.Server, "run", lambda server: started.append(server.config.host))
+    monkeypatch.chdir(tmp_path)
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    assert entry.main() == 0
+    assert started == [host], started
+
+
 @pytest.mark.usefixtures("restore_logging")
 def test_entry_point_reads_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Only `python -m app` reads .env; the same refusal, driven from the file.
@@ -109,19 +156,28 @@ def test_settings_ignore_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert (settings.host, settings.port, settings.trace_plaintext) == ("127.0.0.1", 8000, "0")
 
 
-def test_proxy_environment_is_clean() -> None:
-    # The probe. In the normal run nothing sets a proxy, so on its own it proves
-    # little; test_proxy_variables_are_scrubbed runs it with every variable set.
+def test_proxy_environment_is_clean(settings: Settings) -> None:
+    # The probe. In the normal run nothing sets these, so on its own it proves little;
+    # test_proxy_variables_are_scrubbed runs it with every one of them set.
     # Locals only: pytest's assertion rewriting would print all of os.environ.
-    leaked = sorted(name for name in PROXY_VARIABLES if name in os.environ)
+    proxies = {name.lower() for name in PROXY_VARIABLES}
+    leaked = sorted(name for name in os.environ if name.lower() in proxies)
+    otel = sorted(name for name in os.environ if name.upper().startswith("OTEL_"))
     no_proxy = (os.environ.get("NO_PROXY"), os.environ.get("no_proxy"))
     assert not leaked, f"proxy variables visible to tests: {leaked}"
+    assert not otel, f"OpenTelemetry variables visible to tests: {otel}"
     assert no_proxy == ("*", "*"), f"NO_PROXY, no_proxy: {no_proxy}"
+    defaults = (settings.host, settings.port, settings.dev_auth, settings.trace_plaintext)
+    assert defaults == ("127.0.0.1", 8000, "0", "0"), defaults
 
 
 def test_proxy_variables_are_scrubbed() -> None:
+    # The inner run inherits this environment, the developer's included; the probe
+    # prints variable names and settings only, never values from os.environ.
     env = {name: value for name, value in os.environ.items() if name.lower() != "no_proxy"}
     env |= dict.fromkeys(PROXY_VARIABLES, LOOPBACK_PROXY)
+    env |= {"Https_Proxy": LOOPBACK_PROXY, "OTEL_SDK_DISABLED": "true"}
+    env |= {"Host": ALL_INTERFACES, "PORT": "9", "DEV_AUTH": "1", "TRACE_PLAINTEXT": "1"}
     probe = f"{Path(__file__).relative_to(ROOT).as_posix()}::test_proxy_environment_is_clean"
     result = subprocess.run(
         [sys.executable, "-P", "-m", "pytest", "-q", "-p", "no:cacheprovider", probe],

@@ -14,6 +14,7 @@ import uuid
 
 import pytest
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse, Response
 from fastapi.testclient import TestClient
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
@@ -55,6 +56,28 @@ async def _boom() -> None:
     raise BoomError("boom")
 
 
+class FrozenError(RuntimeError):
+    """An exception that refuses new attributes, as a frozen dataclass exception does."""
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(name)
+
+
+async def _frozen() -> None:
+    raise FrozenError("frozen")
+
+
+async def _sets_owned_headers() -> Response:
+    # A route that tries to set the headers the middleware owns.
+    headers = {
+        "content-security-policy": "default-src *",
+        "cache-control": "public, max-age=3600",
+        "x-trace-id": "0" * 32,
+        "referrer-policy": "unsafe-url",
+    }
+    return JSONResponse({"ok": True}, headers=headers)
+
+
 @pytest.fixture
 def traced(settings: Settings) -> tuple[FastAPI, InMemorySpanExporter]:
     memory = InMemorySpanExporter()
@@ -90,13 +113,20 @@ def test_health(traced: tuple[FastAPI, InMemorySpanExporter]) -> None:
 
 @pytest.mark.parametrize(
     ("path", "status", "api"),
-    [("/", 200, False), ("/health", 200, True), ("/nope", 404, True), ("/boom", 500, True)],
+    [
+        ("/", 200, False),
+        ("/health", 200, True),
+        ("/nope", 404, True),
+        ("/boom", 500, True),
+        ("/frozen", 500, True),
+    ],
 )
 def test_security_headers(
     traced: tuple[FastAPI, InMemorySpanExporter], path: str, status: int, api: bool
 ) -> None:
-    app, _ = traced
+    app, memory = traced
     app.add_api_route("/boom", _boom)
+    app.add_api_route("/frozen", _frozen)
     response = _client(app).get(path)
     assert response.status_code == status, f"{path}: {response.status_code}"
 
@@ -105,11 +135,25 @@ def test_security_headers(
         assert response.headers.get_list(name) == [value], (
             f"{path}: {name} is {response.headers.get_list(name)}"
         )
-    assert TRACE_ID.fullmatch(response.headers.get("x-trace-id", "")), (
-        f"{path}: x-trace-id is {response.headers.get('x-trace-id')!r}"
+    trace_ids = {format(span.context.trace_id, "032x") for span in memory.get_finished_spans()}
+    assert response.headers.get("x-trace-id") in trace_ids, (
+        f"{path}: x-trace-id {response.headers.get('x-trace-id')!r} is no exported span's"
     )
     extra = set(response.headers.keys()) - set(expected) - BODY_HEADERS - {"x-trace-id"}
     assert not extra, f"{path}: unexpected headers {sorted(extra)}"
+
+
+def test_owned_headers_replace_route_headers(
+    traced: tuple[FastAPI, InMemorySpanExporter],
+) -> None:
+    app, _ = traced
+    app.add_api_route("/owned", _sets_owned_headers)
+    response = _client(app).get("/owned")
+    assert response.status_code == 200
+    for name, value in (SECURITY_HEADERS | NO_STORE).items():
+        assert response.headers.get_list(name) == [value], (name, response.headers.get_list(name))
+    assert response.headers.get_list("x-trace-id") != ["0" * 32]
+    assert len(response.headers.get_list("x-trace-id")) == 1
 
 
 def test_index_title_comes_from_branding(traced: tuple[FastAPI, InMemorySpanExporter]) -> None:
@@ -122,33 +166,44 @@ def test_index_title_comes_from_branding(traced: tuple[FastAPI, InMemorySpanExpo
     assert "{{" not in response.text, "a placeholder was not filled in"
 
 
-def redirects(app: FastAPI) -> tuple[int, list[str]]:
-    """Every route with and without a trailing slash, plus /static and a 404, under every
-    method, with a foreign Host. Returns the number of requests and every 3xx or Location."""
+def redirects(app: FastAPI) -> tuple[set[str], int, list[str]]:
+    """Every route with and without a trailing slash, plus /static, a 404 and the usual
+    open-redirect shapes, under every method, with a foreign Host and forwarding headers.
+    Returns the paths, the number of requests and every 3xx or Location."""
+    attacker = branding.DOMAINS.attacker
     paths = {"/static", "/static/", "/static/x", "/nope", "/nope/"}
+    paths |= {f"//{attacker}/", f"/%2F%2F{attacker}", "/health//", "/./health/", "/health/.."}
     for route in app.routes:
         path = re.sub(r"\{[^}]+\}", "x", route.path)
         stem = path.rstrip("/")
         paths |= {variant for variant in (stem, stem + "/") if variant != "/" or path == "/"}
     paths.discard("")
+    headers = {
+        "host": branding.DOMAINS.canary,
+        "x-forwarded-host": attacker,
+        "x-forwarded-proto": "https",
+        "forwarded": f"host={attacker};proto=https",
+    }
     client = _client(app)
     count, found = 0, []
     for path in sorted(paths):
         for method in METHODS:
-            response = client.request(method, path, headers={"host": branding.DOMAINS.canary})
+            # An absolute URL, so that "//host/" stays a path and is not read as a host.
+            response = client.request(method, f"http://testserver{path}", headers=headers)
             count += 1
             location = response.headers.get("location")
             if 300 <= response.status_code < 400 or location is not None:
                 found.append(f"{method} {path}: {response.status_code} {location}")
-    return count, found
+    return paths, count, found
 
 
 def test_no_redirects(traced: tuple[FastAPI, InMemorySpanExporter]) -> None:
     app, _ = traced
     routes = {route.path for route in app.routes}
     assert {"/", "/health"} <= routes, f"routes: {sorted(routes)}"
-    count, found = redirects(app)
-    assert count >= 8 * len(METHODS), f"only {count} requests"
+    paths, count, found = redirects(app)
+    assert {"/", "/health", "/health/"} <= paths, sorted(paths)
+    assert count == len(paths) * len(METHODS) >= 13 * len(METHODS), f"only {count} requests"
     assert not found, "redirects:\n" + "\n".join(found)
 
 
@@ -156,17 +211,28 @@ def test_redirect_check_catches_a_redirect() -> None:
     # Positive control: FastAPI's default redirects a trailing slash.
     plain = FastAPI()
     plain.add_api_route("/health", lambda: {"status": "ok"})
-    _, found = redirects(plain)
+    _, _, found = redirects(plain)
     assert any(line.startswith("GET /health/: 307") for line in found), found
 
 
-def test_no_inbound_trace_context(traced: tuple[FastAPI, InMemorySpanExporter]) -> None:
+@pytest.mark.parametrize(
+    "traceparent",
+    [
+        f"00-{INBOUND_TRACE_ID}-{INBOUND_PARENT_ID}-01",
+        # Unsampled: if adopted, no span would be recorded at all.
+        f"00-{INBOUND_TRACE_ID}-{INBOUND_PARENT_ID}-00",
+        f"00-{INBOUND_TRACE_ID}-zz-01",
+    ],
+)
+def test_no_inbound_trace_context(
+    traced: tuple[FastAPI, InMemorySpanExporter], traceparent: str
+) -> None:
     app, memory = traced
     response = _client(app).get(
         "/health",
         headers={
-            "traceparent": f"00-{INBOUND_TRACE_ID}-{INBOUND_PARENT_ID}-01",
-            "tracestate": "vendor=value",
+            "traceparent": traceparent,
+            "tracestate": "vendor=inbound",
             "baggage": "advisor=other",
         },
     )
@@ -174,7 +240,9 @@ def test_no_inbound_trace_context(traced: tuple[FastAPI, InMemorySpanExporter]) 
     assert len(spans) == 1, [span.name for span in memory.get_finished_spans()]
     assert format(spans[0].context.trace_id, "032x") != INBOUND_TRACE_ID, "traceparent adopted"
     assert spans[0].parent is None, "the server span has a remote parent"
-    assert response.headers.get("x-trace-id") != INBOUND_TRACE_ID
+    assert not spans[0].context.trace_state, "tracestate adopted"
+    values = " ".join(response.headers.values())
+    assert INBOUND_TRACE_ID not in values and "inbound" not in values, response.headers
 
 
 def test_default_exporter_chain(settings: Settings, capfd: pytest.CaptureFixture[str]) -> None:
@@ -190,6 +258,10 @@ def test_default_exporter_chain(settings: Settings, capfd: pytest.CaptureFixture
     spans = [json.loads(line) for line in out.splitlines() if line.startswith("{")]
     assert [span["name"] for span in spans] == ["GET /health"], out[:500]
     assert canary not in out, "the query reached the console"
+
+
+def test_global_tracer_provider_stays_unset(settings: Settings) -> None:
+    _client(create_app(settings)).get("/health")
     assert isinstance(trace.get_tracer_provider(), trace.ProxyTracerProvider), (
         "the global tracer provider was set"
     )
