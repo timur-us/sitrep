@@ -3,10 +3,20 @@ name = "sitrep"
 version = "0.1.0"
 description = "Advisor copilot for a fictional private bank, built on synthetic data."
 requires-python = "==3.12.*"
-dependencies = []
+dependencies = [
+    "fastapi==0.159.1",
+    "opentelemetry-api==1.45.1",
+    "opentelemetry-instrumentation-fastapi==0.66b1",
+    "opentelemetry-sdk==1.45.1",
+    "pydantic==2.14.1",
+    "pydantic-settings==2.16.1",
+    "starlette==1.9.0",
+    "uvicorn==0.54.0",
+]
 
 [dependency-groups]
 dev = [
+    "httpx==0.28.1",
     "pip-audit==2.10.1",
     "pytest==9.1.1",
     "pytest-socket==0.8.1",
