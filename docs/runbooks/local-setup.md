@@ -22,7 +22,7 @@ The first `make test` creates `.venv/` from `uv.lock`.
 ## How the toolchain is pinned
 
 - **Lock.** `uv.lock` pins every package with hashes. The Makefile exports `UV_LOCKED=1`, so uv fails instead of rewriting the lock when it disagrees with `pyproject.toml`. After a dependency change, run `uv lock` and commit both files.
-- **Minimum release age: 7 days.** `exclude-newer = "7 days"` in `[tool.uv]`: nothing uploaded to PyPI in the last 7 days is resolved. uv records the span in the lock (`exclude-newer-span = "P7D"`), not a timestamp, so the lock does not go stale as days pass. uv 0.13.5 and 0.13.6 both accept it.
+- **Minimum release age: 7 days.** `exclude-newer = "7 days"` in `[tool.uv]`: nothing uploaded to PyPI in the last 7 days is resolved. uv records the span in the lock (`exclude-newer-span = "P7D"`), not a timestamp, so the lock does not go stale as days pass. uv 0.13.5 and 0.13.6 both accept it. The policy does not cover the build backend `uv_build`, which the lock never resolves; the exact uv pin in CI and Docker is the control there (ADR 0006).
 - **`sys.path`.** pytest runs as `python -P -m pytest`, so the working directory is not put in front of the standard library. The editable install still appends the repository root (its `.pth` file, a consequence of `module-root = ""`), so `evals`, `redteam` and `data` are importable as namespace packages. `tests/test_data_dirs.py` is what keeps the data in them inert.
 - **pytest plugins load by name only.** `--disable-plugin-autoload -p pytest_socket`: an installed package's `pytest11` entry point (platformdirs, a dependency of pip-audit, declares one) does not run.
 
@@ -53,6 +53,9 @@ Later PRs keep those offline through loopback-only URLs and scrubbed environment
 | `tests/test_runbook.py` | Every Makefile target is documented here, has a `##` comment, is phony and is listed by `make help`; every `make` command here exists. |
 | `tests/test_data_dirs.py` | `evals/cases`, `evals/recorded`, `redteam/attacks`, `redteam/recorded`, `data/synthetic/templates` and `data/synthetic/out` hold only `.json`, `.jsonl`, `.toml`, `.yaml`, `.yml` and `.txt` files (plus `.gitkeep`). No `conftest`, no executable bit, no symlinks, no unreadable directories. |
 | `tests/test_network.py` | The offline guarantee above: the block itself, the effective configuration, the opt-out scan, and that no plugin is autoloaded. |
+| `tests/test_docs.py` | Every ADR in `docs/decisions/` follows `.claude/skills/adr/SKILL.md`: numbered without gaps (at least six), the skill's sections in order, an allowed status, an ISO date, a date on every source, at most 600 words outside the yaml block and the sources. The README says what the project shows, with milestones, and what it does not. |
+| `tests/test_embedding_config.py` | `app/config/embedding.py` agrees with the yaml block in ADR 0005, field by field. `DIM` and `MAX_TOKENS` match the model's own `config.json` (committed as `app/config/embedding_model_config.json`), whose sha256 is in `FILES`. The revision is a 40-hex commit; `FILES` holds 64-hex digests, no pickle formats, and cannot be changed at runtime. |
+| `tests/test_lock.py` | `uv.lock` records the 7-day span (`P7D`); every package except the project comes from PyPI; every file has a sha256 and an upload time; no upload lies inside the 7-day window before the test run (ADR 0006). |
 | `tests/test_repo_files.py` | The shared file lister ignores `GIT_*` variables (as set inside a git hook) and shows git's error on failure. |
 | `tests/guardrails/test_block_secrets.py` | The secret hook in `.claude/hooks/` blocks what it must and allows the rest. |
 
