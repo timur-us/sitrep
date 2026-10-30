@@ -1,0 +1,4 @@
+# The eval gate (`make evals`). min_cases equals the number of committed cases in
+# cases/: tests/runners/test_runner_gate.py fails when they differ, so a case cannot be
+# dropped silently. Raised with every case that lands (M1).
+min_cases = 0

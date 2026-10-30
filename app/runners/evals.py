@@ -1,4 +1,4 @@
-"""`make evals`: the eval gate, offline (scaffold, PR 4 commit 1)."""
+"""`make evals`: the eval gate, offline. See app/runners/corpus.py for what M0 checks."""
 
 from __future__ import annotations
 

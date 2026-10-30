@@ -22,7 +22,7 @@ TARGET_COMMANDS = {
         "uv run python -P -m pytest --ignore=tests/web",
     ],
     "audit": [
-        "uv lock --check",
+        "uv lock --check --refresh",
         "uv export --format requirements.txt --locked --no-emit-project --all-groups",
         "uv run pip-audit -r",
         "--require-hashes",
