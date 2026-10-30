@@ -1,0 +1,143 @@
+"""The page in a real browser: it loads, carries the CSP, takes its title from branding,
+and makes no request to another origin.
+
+Service workers are blocked and WebSockets are listened for. Playwright may not see a
+request that the CSP blocks, so `securitypolicyviolation` events are collected as well.
+Controls show that each listener sees what it is meant to catch, and that the browser
+cannot resolve a name or reach an address other than 127.0.0.1.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from urllib.parse import urlsplit
+
+import pytest
+from playwright.sync_api import Browser, BrowserContext, Page
+from playwright.sync_api import Error as PlaywrightError
+
+from app.config import branding
+
+LISTEN_FOR_VIOLATIONS = """
+window.__violations = [];
+document.addEventListener("securitypolicyviolation", (event) => {
+  window.__violations.push(event.effectiveDirective);
+});
+"""
+
+
+def directive(csp: str, name: str) -> list[str]:
+    """The sources of one CSP directive, or [] if it is absent."""
+    for part in csp.split(";"):
+        tokens = part.split()
+        if tokens and tokens[0] == name:
+            return tokens[1:]
+    return []
+
+
+def origin(url: str) -> tuple[str, str]:
+    parts = urlsplit(url)
+    return parts.scheme, parts.netloc
+
+
+class Recorder:
+    def __init__(self, context: BrowserContext) -> None:
+        self.requests: list[str] = []
+        self.websockets: list[str] = []
+        context.on("request", lambda request: self.requests.append(request.url))
+        context.on("page", self._watch)
+
+    def _watch(self, page: Page) -> None:
+        page.on("websocket", lambda websocket: self.websockets.append(websocket.url))
+
+
+def _context(browser: Browser, *, bypass_csp: bool) -> BrowserContext:
+    context = browser.new_context(service_workers="block", bypass_csp=bypass_csp)
+    context.add_init_script(LISTEN_FOR_VIOLATIONS)
+    return context
+
+
+@pytest.fixture
+def context(browser: Browser) -> Iterator[BrowserContext]:
+    context = _context(browser, bypass_csp=False)
+    yield context
+    context.close()
+
+
+@pytest.fixture
+def context_without_csp(browser: Browser) -> Iterator[BrowserContext]:
+    context = _context(browser, bypass_csp=True)
+    yield context
+    context.close()
+
+
+def test_smoke(context: BrowserContext, app_url: str) -> None:
+    recorder = Recorder(context)
+    page = context.new_page()
+    response = page.goto(app_url + "/")
+    assert response is not None and response.status == 200, response
+    csp = response.header_value("content-security-policy") or ""
+    assert directive(csp, "img-src") == ["'self'"], csp
+    assert page.title() == f"{branding.PRODUCT.name} — {branding.BANK.display_name}"
+
+    assert page.evaluate("window.__violations") == []
+    assert app_url + "/" in recorder.requests, recorder.requests  # non-vacuity
+    foreign = [url for url in recorder.requests if origin(url) != origin(app_url)]
+    assert foreign == [], foreign
+    assert recorder.websockets == [], recorder.websockets
+
+
+def test_control_a_blocked_inline_script_is_a_violation(
+    context: BrowserContext, app_url: str
+) -> None:
+    page = context.new_page()
+    page.goto(app_url + "/")
+    page.evaluate(
+        "() => { const s = document.createElement('script');"
+        " s.textContent = 'window.ran = 1'; document.head.appendChild(s); }"
+    )
+    page.wait_for_function("window.__violations.length > 0", timeout=5000)
+    assert page.evaluate("window.__violations") == ["script-src-elem"]
+    assert page.evaluate("window.ran") is None
+
+
+def test_control_a_foreign_origin_request_is_recorded(
+    context_without_csp: BrowserContext, app_url: str, unused_port: int
+) -> None:
+    # With the CSP bypassed, an image on another loopback port is requested (and fails:
+    # nothing listens there). Another origin, no name to resolve, no egress.
+    recorder = Recorder(context_without_csp)
+    page = context_without_csp.new_page()
+    page.goto(app_url + "/")
+    elsewhere = f"http://127.0.0.1:{unused_port}/pixel.png"
+    with page.expect_event("requestfailed", timeout=5000):
+        page.evaluate("(url) => { const i = new Image(); i.src = url; }", elsewhere)
+    foreign = [url for url in recorder.requests if origin(url) != origin(app_url)]
+    assert foreign == [elsewhere], recorder.requests
+
+
+def test_control_names_do_not_resolve(context: BrowserContext, unused_port: int) -> None:
+    # localhost resolves without DNS, so only the resolver rules can make it fail: without
+    # them this is ERR_CONNECTION_REFUSED. Nothing leaves by DNS either.
+    page = context.new_page()
+    with pytest.raises(PlaywrightError, match="ERR_NAME_NOT_RESOLVED"):
+        page.goto(f"http://localhost:{unused_port}/", timeout=5000)
+
+
+def test_control_a_websocket_is_recorded(
+    context_without_csp: BrowserContext, app_url: str, unused_port: int
+) -> None:
+    recorder = Recorder(context_without_csp)
+    page = context_without_csp.new_page()
+    page.goto(app_url + "/")
+    url = f"ws://127.0.0.1:{unused_port}/"
+    with page.expect_event("websocket", timeout=5000):
+        page.evaluate("(url) => { window.ws = new WebSocket(url); }", url)
+    assert recorder.websockets == [url], recorder.websockets
+
+
+def test_control_other_addresses_are_unreachable(context: BrowserContext) -> None:
+    # The resolver rules map IP literals too; only 127.0.0.1 is excluded (TEST-NET-1 here).
+    page = context.new_page()
+    with pytest.raises(PlaywrightError, match="ERR_NAME_NOT_RESOLVED"):
+        page.goto("http://192.0.2.1/", timeout=5000)

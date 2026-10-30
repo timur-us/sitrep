@@ -10,7 +10,7 @@ export UV_LOCKED := 1
 # The local image tag. The smoke test publishes on 127.0.0.1 only, on a free port.
 IMAGE := sitrep:local
 
-.PHONY: help lint fmt test docker-build
+.PHONY: help lint fmt test lint-test audit docker-build web-deps web-test evals redteam
 
 help: ## List the targets
 	@grep -E '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -24,6 +24,35 @@ fmt: ## Format the code with ruff
 
 test: lint ## Lint, then run the offline tests (all of tests/ except tests/web)
 	uv run python -P -m pytest --ignore=tests/web
+
+# CI runs one target per job (.github/workflows/ci.yml); tests/ci/ pins both sides.
+
+lint-test: test ## CI's lint-test job: make test, which also scans the branch's commits for secrets
+
+# Re-resolving the lock catches a hand edit that the hashes do not cover (ADR 0006).
+# --refresh: without it, uv answers from its cache and misses a backdated upload-time.
+# The audit reads an export of the lock with hashes, so pip-audit installs nothing.
+audit: ## Re-resolve the lock, then pip-audit it with hashes (needs the network)
+	uv lock --check --refresh
+	@set -eu; \
+	req="$$(mktemp)"; \
+	trap 'rm -f "$$req"' EXIT; \
+	uv export --format requirements.txt --locked --no-emit-project --all-groups --quiet -o "$$req"; \
+	uv run pip-audit -r "$$req" --require-hashes --disable-pip --progress-spinner off
+
+# No --with-deps: it runs apt as root. The runner image is trusted to carry the libraries.
+web-deps: ## Download Chromium for Playwright (from Playwright's CDN, not hash-pinned)
+	uv run playwright install chromium
+
+# pytest exits 5 when it collects nothing, and make fails on it.
+web-test: web-deps ## The browser smoke test (tests/web) against the app on 127.0.0.1
+	uv run python -P -m pytest tests/web
+
+evals: ## The eval gate, offline: check the corpus against evals/gate.toml (no scoring in M0)
+	uv run python -P -m app.runners.evals
+
+redteam: ## The red-team gate, offline: check the attacks against redteam/gate.toml (no scoring in M0)
+	uv run python -P -m app.runners.redteam
 
 docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-root, plaintext refused
 	docker build -t $(IMAGE) .

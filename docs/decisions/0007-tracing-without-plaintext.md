@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (M0 PR 3; accepted with the merge).
+Accepted (Timur, 2026-10-29).
 
 ## Date
 

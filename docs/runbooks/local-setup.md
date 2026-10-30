@@ -1,6 +1,6 @@
 # Local setup
 
-M0, PR 1 and PR 3. SITREP (situation report) builds and tests locally with uv and make, offline, with no `.env` and no API key. Later PRs add the database and the browser test; each one extends this runbook in the same PR. `tests/test_runbook.py` fails when the Makefile and this file drift apart.
+M0, PRs 1, 3 and 4. SITREP (situation report) builds and tests locally with uv and make, offline, with no `.env` and no API key. Every CI gate is a make target, so it runs here the same way. Later PRs add the database; each one extends this runbook in the same PR. `tests/test_runbook.py` fails when the Makefile and this file drift apart.
 
 ## Prerequisites
 
@@ -8,6 +8,7 @@ M0, PR 1 and PR 3. SITREP (situation report) builds and tests locally with uv an
 - **GNU make** and **git**.
 - **Python 3.12** is not a prerequisite: uv installs the version in `.python-version` on first use.
 - **Docker** (Docker Desktop on macOS; Engine 28 or later on Linux), `curl` and `seq`, for `make docker-build` only. `make test` does not need them.
+- **The network**, for `make audit` (PyPI and the vulnerability data), `make web-deps` (Chromium, about 100 MB, from Playwright's CDN) and `make docker-build` (the base images).
 
 ## Commands
 
@@ -17,7 +18,13 @@ M0, PR 1 and PR 3. SITREP (situation report) builds and tests locally with uv an
 | `make test` | Runs `make lint`, then pytest over `tests/` without `tests/web`. Offline. |
 | `make lint` | `ruff check` and `ruff format --check`. |
 | `make fmt` | `ruff format`. |
+| `make lint-test` | CI's lint-test job: `make test`. Its `tests/test_secret_history.py` scans the branch's commits for secrets. |
+| `make audit` | Re-resolves the lock against PyPI (`uv lock --check --refresh`), then runs pip-audit over an export of the lock with hashes. Needs the network. |
 | `make docker-build` | Builds the image `sitrep:local`, then smoke-tests it (below). Needs Docker and the network for the base images. |
+| `make web-deps` | Downloads Chromium for Playwright, without `--with-deps` (no apt, no root). |
+| `make web-test` | `make web-deps`, then the browser smoke test in `tests/web` (below). |
+| `make evals` | The eval gate, offline (below). |
+| `make redteam` | The red-team gate, offline (below). |
 
 The first `make test` creates `.venv/` from `uv.lock`.
 
@@ -55,9 +62,34 @@ The bases are pinned by digest: `python:3.12.16-slim-trixie` and `ghcr.io/astral
 ## How the toolchain is pinned
 
 - **Lock.** `uv.lock` pins every package with hashes. The Makefile exports `UV_LOCKED=1`, so uv fails instead of rewriting the lock when it disagrees with `pyproject.toml`. After a dependency change, run `uv lock` and commit both files.
-- **Minimum release age: 7 days.** `exclude-newer = "7 days"` in `[tool.uv]`: nothing uploaded to PyPI in the last 7 days is resolved. uv records the span in the lock (`exclude-newer-span = "P7D"`), not a timestamp, so the lock does not go stale as days pass. uv 0.13.5 and 0.13.6 both accept it. The policy does not cover the build backend `uv_build`, which the lock never resolves; the exact uv pin is the control there (ADR 0006). It is in place in the Dockerfile (PR 3; the image build does not download `uv_build`) and arrives in CI with PR 4.
+- **Minimum release age: 7 days.** `exclude-newer = "7 days"` in `[tool.uv]`: nothing uploaded to PyPI in the last 7 days is resolved. uv records the span in the lock (`exclude-newer-span = "P7D"`), not a timestamp, so the lock does not go stale as days pass. uv 0.13.5 and 0.13.6 both accept it. The policy does not cover the build backend `uv_build`, which the lock never resolves; the exact uv pin is the control there (ADR 0006). It is in place in the Dockerfile (PR 3; the image build does not download `uv_build`) and in CI (setup-uv `version: 0.13.5`, PR 4); a test keeps the two equal.
 - **`sys.path`.** pytest runs as `python -P -m pytest`, so the working directory is not put in front of the standard library. The editable install still appends the repository root (its `.pth` file, a consequence of `module-root = ""`), so `evals`, `redteam` and `data` are importable as namespace packages. `tests/test_data_dirs.py` is what keeps the data in them inert.
 - **pytest plugins load by name only.** `--disable-plugin-autoload -p pytest_socket`: an installed package's `pytest11` entry point (platformdirs, a dependency of pip-audit, declares one) does not run.
+
+## CI
+
+`.github/workflows/ci.yml` runs six jobs on every pull request and every push to `main`: `lint-test`, `pip-audit`, `docker-build`, `web-test`, `evals`, `redteam`. Each one is a checkout pinned by commit SHA (no persisted credentials), setup-uv pinned the same way with uv 0.13.5 and its cache off, and one `make` target. The token is read-only; there are no secrets, no cloud login and no service containers. On a pull request a new push cancels the running checks; on `main` it does not. `tests/ci/` pins the workflow, the Dependabot config and the targets. The job ids are the check names the ruleset requires.
+
+`lint-test` checks out the full history (`fetch-depth: 0`) for the history scan; a shallow clone fails it. The tests run as a non-root user, so the unreadable-directory case in `tests/test_data_dirs.py` runs instead of skipping.
+
+Dependabot (`.github/dependabot.yml`) proposes updates for actions, the uv lock and the Docker images: weekly, grouped, and only for releases at least 7 days old.
+
+## Evals and red team in M0
+
+`make evals` and `make redteam` run `python -P -m app.runners.evals` and `…redteam` over `evals/` and `redteam/`. Each suite has a `gate.toml` (`min_cases`), a case directory (`evals/cases`, `redteam/attacks`, one `<name>.json` per case) and `recorded/<version>/<case id>.json`. In M0 the runners check the corpus and score nothing:
+
+- an empty corpus passes and prints `evals: no cases (min_cases=0)`; a corpus with cases fails closed until scoring arrives in M1;
+- a stray file or symlink, invalid JSON, a duplicate key or id, an orphan recording, or a recording with an `authorization`, `proxy-authorization`, `x-api-key`, `api-key`, `ocp-apim-subscription-key`, `cookie` or `set-cookie` header fails, as a key or as a value (HAR-style name/value pairs). Header values are not scanned here; `tests/test_no_secrets.py` scans every committed file, recordings included;
+- text is read as NFKC, with ideographic dots as `.` and without invisible format characters (zero-width, tags), before the rules below;
+- cases name the cast, the bank, the product and the domains only through placeholders such as `{advisor.<id>}`, `{email.<id>}`, `{domain.attacker}` and `{mandate.demo}`, resolved from `app/config/branding.py`; a literal name or an unknown placeholder fails;
+- after resolution, every host in a URL (a scheme with one or more slashes or backslashes, or `//`; tab, CR and LF before a dot are dropped, as browsers do), an e-mail address or a bare name must end in the label `example`. IP literals, `localhost`, `xn--` and non-ASCII labels fail. A bare file name such as `report.pdf` reads as a host: put it inside a URL, or write it without the dot;
+- `--live` needs `--yes`, and live runs are refused in M0.
+
+Errors name the file (escaped unless it is a plain name, so no file name can start a GitHub workflow command), the JSON path and the rule, never the text. `min_cases` must equal the committed case count (`tests/runners/test_runner_gate.py`), so deleting a case alone fails; deleting it and lowering `min_cases` in the same change passes, and the ask on `gate.toml` and the review are the control for that.
+
+## The browser smoke test
+
+`make web-test` starts the app as `python -P -m app` on `127.0.0.1` and a free port, from an empty directory with an environment built from scratch, and opens `/` in headless Chromium. Chromium gets an environment built from scratch as well. Its host-resolver rules answer "not found" for every name and every address except `127.0.0.1`, so the browser reaches nothing else; WebRTC may use proxied UDP only, and there is no proxy (that flag is not tested). The test checks the status, the CSP's exact `img-src`, the title from branding, that no request leaves the page's origin (service workers blocked, WebSockets watched) and that no CSP violation fires. Controls show each listener works and the rules hold: a blocked inline script raises a violation, a request to another loopback port and a WebSocket are recorded, and `localhost` and `192.0.2.1` do not resolve.
 
 ## Offline tests
 
@@ -84,7 +116,7 @@ Later PRs keep those offline through loopback-only URLs and scrubbed environment
 | `tests/test_branding.py` | `app/config/branding.py` is the only file outside prose, `.claude/` and recordings that names the product, the bank, a domain, a cast member or the demo mandate. Infrastructure files that cannot import Python may carry the slug. The values match `CLAUDE.md`. |
 | `tests/test_no_secrets.py` | In any file git sees, none of these shapes: an Anthropic key, an AWS access key id, a GitHub token, a private-key block, an Azure storage `AccountKey=`, a password in a URL, or a JWT. Other secret shapes are not detected. The only allowed match is the fake key in `tests/guardrails/test_block_secrets.py`, pinned by its fingerprint (16 hex digits of the match's sha256); any other match in that file is reported. Findings show file, line and pattern. The text is never shown, and the fingerprint is not either, because the fingerprint of a URL password can be reversed with a dictionary. To allowlist a match on purpose, compute its fingerprint locally with `find_secrets()`. |
 | `tests/test_runbook.py` | Every Makefile target is documented here, has a `##` comment, is phony and is listed by `make help`; every `make` command here exists. |
-| `tests/test_data_dirs.py` | `evals/cases`, `evals/recorded`, `redteam/attacks`, `redteam/recorded`, `data/synthetic/templates` and `data/synthetic/out` hold only `.json`, `.jsonl`, `.toml`, `.yaml`, `.yml` and `.txt` files (plus `.gitkeep`). No `conftest`, no executable bit, no symlinks, no unreadable directories. |
+| `tests/test_data_dirs.py` | `evals/cases`, `evals/recorded`, `redteam/attacks`, `redteam/recorded`, `data/synthetic/templates` and `data/synthetic/out` hold only `.json`, `.jsonl`, `.toml`, `.yaml`, `.yml` and `.txt` files (plus `.gitkeep`); the report directories `evals/results` and `redteam/results` hold only `.md`. No `conftest`, no executable bit, no symlinks, no unreadable directories. The first four exist with a `.gitkeep` in git, so the check cannot pass on an empty tree. |
 | `tests/test_network.py` | The offline guarantee above: the block itself, the effective configuration, the opt-out scan, and that no plugin is autoloaded. |
 | `tests/test_docs.py` | Every ADR in `docs/decisions/` follows `.claude/skills/adr/SKILL.md`: numbered without gaps (at least six), the skill's sections in order, an allowed status, a valid ISO date, a date on every source (one `- ` item per source, continuation lines indented), the product name spelled out exactly once, at most 600 words outside fenced blocks and the sources. Any other file in `docs/decisions/` is reported. The README says what the project shows, with milestones, and what it does not. |
 | `tests/test_embedding_config.py` | `app/config/embedding.py` agrees with the yaml block in ADR 0005, field by field. `DIM` and `MAX_TOKENS` match the model's own `config.json` (committed as `app/config/embedding_model_config.json`), whose sha256 is in `FILES`. The revision is a 40-hex commit; `FILES` holds plain relative paths to `.json` and `.onnx` files only, with 64-hex digests, and cannot be changed at runtime. Only `config.json` is hashed here; the ONNX digests are Hugging Face LFS oids, and the model download step in M1 checks their bytes. `.gitattributes` keeps git from converting the config's line endings. |
@@ -96,5 +128,10 @@ Later PRs keep those offline through loopback-only URLs and scrubbed environment
 | `tests/test_import_allowlist.py` | The modules `app/` imports equal a reviewed list. HTTP clients, sockets, `subprocess`, `importlib`, `logging.handlers`, `opentelemetry.exporter`, `__import__`, `eval`, `os.system`, `os.exec*`, `RedirectResponse` and connection or server calls are reported, by dotted name, with planted cases. The scan reads names in the syntax tree, not strings. |
 | `tests/test_dockerfile.py` | Bases pinned by digest; every `--from=` names an earlier stage; the uv image tag equals the floor of `required-version`; `uv sync --locked --no-dev`, the last one `--no-editable`; no `ADD`, `curl` or `pip install`; uid 10001; `CMD ["python","-P","-m","app"]`; a deny-by-default `.dockerignore`. |
 | `tests/guardrails/test_block_secrets.py` | The secret hook in `.claude/hooks/` blocks what it must and allows the rest. |
+| `tests/test_secret_history.py` | Every line the branch's commits add since the merge base with `main`, each new path and every commit message, against the patterns and the allowlist of `tests/test_no_secrets.py`. Patches are read as text, binary files included; renames count as added lines; a merge counts with the lines its conflict resolution adds. A key added and removed again is reported. Findings show commit, path, line and pattern (a path with a key shows as `<path>`). A shallow clone fails. On `main` the range is empty by design. A finding means rotating the key: the commits stay reachable through the pull request. |
+| `tests/ci/test_workflow.py` | The six jobs, their triggers, read-only permissions, PR-only cancelling, timeouts and runner; the steps (checkout pinned, without credentials; setup-uv with the Dockerfile's uv and no cache; one make target); no `if`, `continue-on-error`, services, containers (one digest-pinned Playwright fallback is allowed on `web-test`), expressions in `run`, secrets or cloud logins. Dependabot: three ecosystems, weekly, grouped, 7-day cooldown. Planted cases for each rule. |
+| `tests/ci/test_make_targets.py` | `make -n` of each CI target shows its key commands; `web-deps` uses no `--with-deps`, sudo or apt; no recipe ignores a failure (a leading `-`, `\|\| true`, `; true`, `.IGNORE`, `MAKEFLAGS` with `-i`); pytest still blocks sockets. |
+| `tests/ci/test_ci_user.py` | The tests do not run as root. |
+| `tests/runners/` | The runners above: exit codes, messages, the gate ratchet, stray files, ids, recordings, placeholders, literals, hosts, live refusal, and no connection attempted with a dummy key set. |
 
 Scans cover tracked files and untracked files that are not ignored (`git ls-files --cached --others --exclude-standard`), so a new file is checked before it is committed. The data-directory check walks the file system instead, so ignored output counts too.

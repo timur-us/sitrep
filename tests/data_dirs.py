@@ -28,6 +28,11 @@ DATA_DIRS: tuple[str, ...] = (
 # Read only with json, tomllib or yaml.safe_load, or as plain text.
 DATA_SUFFIXES: frozenset[str] = frozenset({".json", ".jsonl", ".toml", ".yaml", ".yml", ".txt"})
 
+# Run reports, written by the eval-run and redteam-run skills from M1 on. They quote
+# untrusted model output, so they are data too, and Markdown only. Not committed in M0.
+REPORT_DIRS: tuple[str, ...] = ("evals/results", "redteam/results")
+REPORT_SUFFIXES: frozenset[str] = frozenset({".md"})
+
 # Allowed by exact name: keeps an empty directory in git.
 ALLOWED_NAMES = frozenset({".gitkeep"})
 
@@ -42,7 +47,8 @@ def violations(root: Path) -> list[str]:
     def unreadable(error: OSError) -> None:
         found.append(f"{Path(error.filename).relative_to(root).as_posix()}: unreadable")
 
-    for rel_dir in DATA_DIRS:
+    for rel_dir in DATA_DIRS + REPORT_DIRS:
+        suffixes = REPORT_SUFFIXES if rel_dir in REPORT_DIRS else DATA_SUFFIXES
         base = root / rel_dir
         # Any component may be a link, not only the last: redteam -> elsewhere.
         parts = Path(rel_dir).parts
@@ -69,8 +75,6 @@ def violations(root: Path) -> list[str]:
                     found.append(f"{rel}: executable")
                 if name.startswith("conftest"):
                     found.append(f"{rel}: conftest")
-                elif (
-                    name not in ALLOWED_NAMES | FINDER_METADATA and path.suffix not in DATA_SUFFIXES
-                ):
+                elif name not in ALLOWED_NAMES | FINDER_METADATA and path.suffix not in suffixes:
                     found.append(f"{rel}: not a declared data extension")
     return list(dict.fromkeys(found))  # a linked parent is reported once
