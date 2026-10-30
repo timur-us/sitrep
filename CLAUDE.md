@@ -21,6 +21,11 @@ Tagline: *Know your client before the call.*
 
 - `make up` / `make down` — Postgres with pgvector via Docker Compose
 - `make test` — ruff check, ruff format --check, pytest (offline)
+- `make lint-test` — what CI's lint-test job runs: `make test`, which also scans the branch's commits for secrets
+- `make audit` — re-resolve the lock, then pip-audit over it with hashes (needs the network)
+- `make docker-build` — build the image and smoke-test it (non-root, 127.0.0.1 only, plaintext refused)
+- `make web-test` — the Playwright smoke test in Chromium; `make web-deps` installs Chromium first
+- `uv run python -P -m app` — run the app on 127.0.0.1:8000
 - `make evals` — evals against recorded runs (offline); live runs only by hand with `--live --yes` after a cost estimate
 - `make redteam` — red-team cases against recorded runs (offline); live runs as above
 - `make data` — regenerate the synthetic corpus (fixed seed) into `data/synthetic/out/` (git-ignored)

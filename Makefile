@@ -10,7 +10,7 @@ export UV_LOCKED := 1
 # The local image tag. The smoke test publishes on 127.0.0.1 only, on a free port.
 IMAGE := sitrep:local
 
-.PHONY: help lint fmt test docker-build
+.PHONY: help lint fmt test lint-test audit docker-build web-deps web-test evals redteam
 
 help: ## List the targets
 	@grep -E '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -24,6 +24,24 @@ fmt: ## Format the code with ruff
 
 test: lint ## Lint, then run the offline tests (all of tests/ except tests/web)
 	uv run python -P -m pytest --ignore=tests/web
+
+lint-test: ## Scaffold (PR 4 commit 1)
+	@echo "scaffold"; exit 1
+
+audit: ## Scaffold (PR 4 commit 1)
+	@echo "scaffold"; exit 1
+
+web-deps: ## Scaffold (PR 4 commit 1)
+	@echo "scaffold"; exit 1
+
+web-test: ## Scaffold (PR 4 commit 1)
+	@echo "scaffold"; exit 1
+
+evals: ## Scaffold (PR 4 commit 1)
+	@echo "scaffold"; exit 1
+
+redteam: ## Scaffold (PR 4 commit 1)
+	@echo "scaffold"; exit 1
 
 docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-root, plaintext refused
 	docker build -t $(IMAGE) .

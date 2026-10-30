@@ -1,0 +1,14 @@
+# Scaffold (PR 4 commit 1): never runs on a push or a pull request. The next commit
+# replaces it with the six gates.
+name: ci
+
+on: workflow_dispatch
+
+permissions: {}
+
+jobs:
+  placeholder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: echo "scaffold"

@@ -5,9 +5,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import data_dirs
 import pytest
 from data_dirs import DATA_DIRS, DATA_SUFFIXES, violations
-from repo_files import ROOT
+from repo_files import ROOT, list_files
+
+# Committed in PR 4 with a .gitkeep each; data/synthetic/ follows in PR 8.
+COMMITTED = ("evals/cases", "evals/recorded", "redteam/attacks", "redteam/recorded")
 
 
 def test_data_dirs_are_declared() -> None:
@@ -17,12 +21,24 @@ def test_data_dirs_are_declared() -> None:
     assert DATA_SUFFIXES == {".json", ".jsonl", ".toml", ".yaml", ".yml", ".txt"}, (
         f"declared suffixes: {sorted(DATA_SUFFIXES)}"
     )
+    # Run reports (the eval-run and redteam-run skills) are Markdown and nothing else.
+    reports = getattr(data_dirs, "REPORT_DIRS", ())
+    assert set(reports) == {"evals/results", "redteam/results"}, f"report dirs: {reports}"
+    assert getattr(data_dirs, "REPORT_SUFFIXES", None) == {".md"}
 
 
 def test_data_dirs_are_inert() -> None:
-    # In PR 1 none of these directories exists yet: PR 4 adds evals/ and redteam/,
-    # PR 8 adds data/synthetic/. Until then this pins the empty state.
     assert not violations(ROOT), "\n".join(violations(ROOT))
+
+
+def test_committed_data_dirs_exist() -> None:
+    # Non-vacuity: a missing directory has no violations, so the check above could
+    # pass on an empty tree. These four exist from PR 4 on.
+    files = list_files(ROOT)
+    for rel in COMMITTED:
+        path = ROOT / rel
+        assert path.is_dir() and not path.is_symlink(), f"{rel} is not a plain directory"
+        assert f"{rel}/.gitkeep" in files, f"{rel}/.gitkeep is not in git"
 
 
 def _plant(root: Path, rel: str, mode: int = 0o644) -> Path:
@@ -38,12 +54,16 @@ def test_planted_violations_are_caught(tmp_path: Path) -> None:
     _plant(tmp_path, "redteam/attacks/.gitkeep")
     _plant(tmp_path, "data/synthetic/templates/de/kyc.txt")
     _plant(tmp_path, "evals/cases/.DS_Store")
+    _plant(tmp_path, "evals/results/v1.md")
+    _plant(tmp_path, "redteam/results/.gitkeep")
 
     _plant(tmp_path, "evals/cases/evil.py")
     _plant(tmp_path, "evals/cases/upper.PY")  # own stem: macOS file systems ignore case
     _plant(tmp_path, "evals/cases/notes.md")
     _plant(tmp_path, "evals/recorded/nested/deep.py")
     _plant(tmp_path, "redteam/recorded/conftest.json")
+    _plant(tmp_path, "redteam/results/run.py")
+    _plant(tmp_path, "evals/results/v1.json")
     _plant(tmp_path, "data/synthetic/out/run.json", mode=0o755)
     _plant(tmp_path, "evals/recorded/.DS_Store", mode=0o755)
     (tmp_path / "redteam/attacks/link.json").symlink_to(clean)
@@ -55,12 +75,14 @@ def test_planted_violations_are_caught(tmp_path: Path) -> None:
         "evals/cases/evil.py: not a declared data extension",
         "evals/cases/notes.md: not a declared data extension",
         "evals/cases/upper.PY: not a declared data extension",
+        "evals/results/v1.json: not a declared data extension",
         "evals/recorded/.DS_Store: executable",
         "evals/recorded/nested/deep.py: not a declared data extension",
         "redteam/attacks/dangling.json: symlink",
         "redteam/attacks/dir: symlink",
         "redteam/attacks/link.json: symlink",
         "redteam/recorded/conftest.json: conftest",
+        "redteam/results/run.py: not a declared data extension",
     ]
 
 
