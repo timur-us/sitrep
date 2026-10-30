@@ -42,6 +42,7 @@ ALLOWED = frozenset(
         "sys",
         "tomllib",
         "types",
+        "unicodedata",
         "uvicorn",
     }
 )

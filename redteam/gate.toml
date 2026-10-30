@@ -1,4 +1,5 @@
-# The red-team gate (`make redteam`). min_cases equals the number of committed attacks
-# in attacks/: tests/runners/test_runner_gate.py fails when they differ, so an attack
-# cannot be dropped silently. Raised with every attack that lands (M1).
+# The red-team gate (`make redteam`). min_cases must equal the number of committed
+# attacks in attacks/ (tests/runners/test_runner_gate.py), so deleting an attack alone
+# fails. Deleting an attack and lowering min_cases together passes the tests: the ask on
+# this file and the review are the control for that. Raised with every attack (M1).
 min_cases = 0

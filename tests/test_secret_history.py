@@ -140,7 +140,7 @@ def test_the_allowed_fake_key_is_allowed_at_its_path_only(repo: Path) -> None:
     ("files", "path"),
     [
         ({"blob.bin": "\0\0header\nKEY\n"}, "blob.bin"),  # a NUL makes git call it binary
-        ({".gitattributes": "*.dat -diff\n", "notes.dat": "KEY\n"}, "notes.dat"),
+        ({".gitattributes": "*.dat -diff\n", "notes.dat": "x\nKEY\n"}, "notes.dat"),
     ],
 )
 def test_binary_files_are_scanned(repo: Path, files: dict[str, str], path: str) -> None:

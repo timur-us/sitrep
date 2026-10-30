@@ -16,7 +16,7 @@ Date: 2026-10-27. These are layer-3 controls: they hold for every token, includi
 Day 1, before the first agent session:
 
 - [ ] Name `main-protected`, enforcement **Active**, target branch: default branch.
-- [ ] Rules: **Restrict deletions**, **Block force pushes**, **Require a pull request before merging** (0 required approvals is fine; the gate is the checks).
+- [ ] Rules: **Restrict deletions**, **Block force pushes**, **Require a pull request before merging** (0 required approvals). The checks are not the whole gate: a `pull_request` run uses the PR's own `ci.yml` and the PR's own tests, so a PR can weaken a gate and still pass it. The merge gate is Timur's explicit yes (CLAUDE.md rule 3), with the `gh pr merge` ask in `.claude/settings.json`; the review rule for gate paths is what reads such a change.
 - [ ] **No** "Require status checks to pass" yet: a required check that no workflow reports blocks every merge, and `ci.yml` only exists after the CI pull request.
 - [ ] Bypass list: **empty**. Claude Code works with your admin token; a bypass for you is a bypass for the agent. Emergency path: set the ruleset to Disabled, merge, set it back to Active (the agent cannot do this: `gh api *rulesets*` is denied).
 
@@ -45,7 +45,7 @@ After the CI pull request is merged:
 ## Local
 
 - [ ] `.claude/settings.local.json` (git-ignored) sets `AZURE_CONFIG_DIR` to an empty folder, so the agent has no Azure login in M0 to M2. How the agent reaches Azure in M3 is decided in an ADR (ADR number: next free after 0009).
-- [ ] `.claude/settings.json` asks before every edit to a file that defines CI: `Edit(Makefile)`, `Edit(pyproject.toml)`, `Edit(evals/gate.toml)`, `Edit(redteam/gate.toml)`, next to `Edit(CLAUDE.md)`, `Edit(.claude/agents/**)`, `Edit(.claude/skills/**)` and `Edit(.github/workflows/**)`. Writes made through Bash are not covered; the review rule for gate paths catches those.
+- [ ] `.claude/settings.json` asks before an edit to `Makefile`, `pyproject.toml`, `evals/gate.toml` and `redteam/gate.toml`, next to `CLAUDE.md`, `.claude/agents/**`, `.claude/skills/**` and `.github/workflows/**`. Other files that shape CI are not asked for: `.github/dependabot.yml`, `tests/ci/**`, `app/runners/**`, the scanners in `tests/`. Writes made through Bash are not covered either. The review rule for gate paths catches both.
 - [ ] Before starting Claude Code: `ANTHROPIC_API_KEY` is not set in your shell, otherwise Claude Code offers to bill the session to that key.
 - [ ] Never choose "Yes, and don't ask again" on a prompt; allow once.
 - [ ] On the first start, accept the trust dialog for this folder; project hooks run only in a trusted folder. Check with `/hooks` that both hooks are listed.

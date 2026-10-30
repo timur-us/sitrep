@@ -44,7 +44,8 @@ TOP_LEVEL = {"name", "on", "permissions", "concurrency", "jobs"}
 JOB_KEYS = {"runs-on", "timeout-minutes", "steps"}
 STEP_KEYS = {"uses", "with", "run"}
 PINNED = re.compile(r"(?P<action>[\w.-]+/[\w.-]+)@[0-9a-f]{40}")
-VERSION_COMMENT = re.compile(r"uses:\s*(?P<ref>\S+)\s+#\s*v\d+\.\d+\.\d+\s*$")
+USES = re.compile(r"uses:\s*(?P<ref>\S+)")
+VERSION_COMMENT = re.compile(r"uses:\s*\S+\s+#\s*v\d+\.\d+\.\d+\s*$")
 BANNED_TEXT = (
     "secrets.",
     "id-token",
@@ -101,6 +102,8 @@ def _keys(node: Any) -> list[str]:
 def _step_problems(job: str, steps: Any, uv_version: str) -> list[str]:
     if not isinstance(steps, list) or len(steps) != 3:
         return [f"{job}: steps are not exactly checkout, setup-uv and one run"]
+    if not all(isinstance(step, dict) for step in steps):
+        return [f"{job}: a step is not a mapping"]
     problems = []
     checkout, setup_uv, run = steps
     for step in steps:
@@ -116,8 +119,9 @@ def _step_problems(job: str, steps: Any, uv_version: str) -> list[str]:
         problems.append(f"{job}: step 1 is not actions/checkout pinned to a commit")
     if checkout.get("with") != want_checkout:
         problems.append(f"{job}: checkout with {checkout.get('with')}, expected {want_checkout}")
-    if not str(setup_uv.get("uses", "")).startswith("astral-sh/setup-uv@"):
-        problems.append(f"{job}: step 2 is not astral-sh/setup-uv")
+    uses = str(setup_uv.get("uses", ""))
+    if PINNED.fullmatch(uses) is None or not uses.startswith("astral-sh/setup-uv@"):
+        problems.append(f"{job}: step 2 is not astral-sh/setup-uv pinned to a commit")
     want_uv = {"version": uv_version, "enable-cache": False}
     if setup_uv.get("with") != want_uv:
         problems.append(f"{job}: setup-uv with {setup_uv.get('with')}, expected {want_uv}")
@@ -166,7 +170,7 @@ def problems(
             found.append(f"{name}: timeout-minutes {job.get('timeout-minutes')!r}")
         found += _step_problems(name, job.get("steps"), uv_version)
         for step in job.get("steps") or []:
-            if "${{" in str(step.get("run", "")):
+            if isinstance(step, dict) and "${{" in str(step.get("run", "")):
                 found.append(f"{name}: an expression inside run")
 
     found += [
@@ -178,9 +182,11 @@ def problems(
     for number, line in enumerate(raw.splitlines(), start=1):
         if "uses:" not in line or line.lstrip().startswith("#"):
             continue
-        match = VERSION_COMMENT.search(line)
-        if not match or not PINNED.fullmatch(match["ref"]):
-            found.append(f"line {number}: uses without a commit SHA and a version comment")
+        ref = USES.search(line)
+        if not ref or not PINNED.fullmatch(ref["ref"]):
+            found.append(f"line {number}: uses without a commit SHA")
+        if not VERSION_COMMENT.search(line):
+            found.append(f"line {number}: uses without a version comment")
     return found
 
 
@@ -311,10 +317,13 @@ def test_planted_raw_text_is_caught(line: str, needle: str) -> None:
 
 
 ECOSYSTEMS = {"github-actions", "uv", "docker"}
+UPDATE_KEYS = {"package-ecosystem", "directory", "schedule", "cooldown", "groups"}
 
 
 def dependabot_problems(config: dict[str, Any]) -> list[str]:
     found = []
+    if set(config) != {"version", "updates"}:
+        found.append(f"top-level keys {sorted(config)}")
     if config.get("version") != 2:
         found.append(f"version {config.get('version')!r}")
     updates = config.get("updates") or []
@@ -323,6 +332,10 @@ def dependabot_problems(config: dict[str, Any]) -> list[str]:
         found.append(f"ecosystems {ecosystems}, expected {sorted(ECOSYSTEMS)}")
     for update in updates:
         name = update.get("package-ecosystem")
+        if set(update) != UPDATE_KEYS:
+            found.append(
+                f"{name}: keys {sorted(set(update) - UPDATE_KEYS)} beyond the reviewed set"
+            )
         if update.get("directory") != "/":
             found.append(f"{name}: directory {update.get('directory')!r}")
         if update.get("schedule") != {"interval": "weekly"}:

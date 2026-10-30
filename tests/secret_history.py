@@ -2,12 +2,18 @@
 
 The tree scan (tests/test_no_secrets.py) misses a key that one commit adds and a later
 one removes; the pull request still carries it. This scan reads the commits between
-the merge base with main (origin/main, else main) and HEAD, merges excluded. Each
-commit's patch is read with renames off, so a moved file counts as added lines, and
-with no external diff or text conversion. The PR 1 patterns and allowlist apply.
+the merge base with main (origin/main, else main) and HEAD. Each commit's patch is
+read as text (`--text`: binary files and `-diff` attributes do not hide lines), with
+renames off, so a moved file counts as added lines, and with no external diff or text
+conversion. A merge is read as a remerge diff: the lines its conflict resolution adds,
+not the lines it brings in from main. The PR 1 patterns and allowlist apply, to the
+lines, to each new path and to the commit message. On main (a push run) the range is
+empty by design: the pull request's run read those commits.
 
-A finding is "<commit>:<path>:<line>: <pattern>", with `<message>` as the path for a
-commit message. It never carries the matched text or a fingerprint.
+A finding is "<commit>:<path>:<line>: <pattern>", with `<message>` for a commit message
+and `<path>` for a path that itself matches a pattern (line 0 is the path). It never
+carries the matched text or a fingerprint. A finding means rotating the key: the
+commits stay reachable on GitHub through the pull request's refs.
 """
 
 from __future__ import annotations
@@ -52,7 +58,7 @@ def branch_range(root: Path) -> tuple[str, str]:
 
 
 def commits(root: Path, base: str, head: str) -> list[str]:
-    out = git(root, "rev-list", "--no-merges", "--reverse", f"{base}..{head}")
+    out = git(root, "rev-list", "--reverse", f"{base}..{head}")
     return out.decode().split()
 
 
@@ -65,6 +71,8 @@ def added_lines(root: Path, commit: str) -> Iterator[tuple[str, int, str]]:
         "show",
         "--format=",
         "--patch",
+        "--text",
+        "--remerge-diff",
         "--unified=0",
         "--no-color",
         "--no-ext-diff",
@@ -97,10 +105,18 @@ def added_lines(root: Path, commit: str) -> Iterator[tuple[str, int, str]]:
 def scan(root: Path, base: str, head: str) -> list[Finding]:
     found: list[Finding] = []
     for commit in commits(root, base, head):
+        seen_paths: set[str] = set()
         for path, number, text in added_lines(root, commit):
+            shown = "<path>" if find_secrets(path) else path
+            if path not in seen_paths:
+                seen_paths.add(path)
+                found += [
+                    Finding(commit, shown, 0, hit.pattern, hit.fingerprint)
+                    for hit in find_secrets(path)
+                ]
             allowed = ALLOWLIST[path].fingerprints if path in ALLOWLIST else frozenset()
             found += [
-                Finding(commit, path, number, hit.pattern, hit.fingerprint)
+                Finding(commit, shown, number, hit.pattern, hit.fingerprint)
                 for hit in find_secrets(text)
                 if (hit.pattern, hit.fingerprint) not in allowed
             ]

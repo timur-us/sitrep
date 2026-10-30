@@ -7,14 +7,15 @@ checks structure and scores nothing:
 - an empty corpus passes when `min_cases` is 0; any case at all fails closed, because
   nothing scores it before M1;
 - a stray file, a symlink, invalid JSON, a duplicate key or id, an orphan recording,
-  or a recording that carries a credential header fails;
-- case text names the cast, the bank, the product and the domains only through
+  or a recording that carries a credential header (as a key or a value) fails;
+- case text is read as NFKC, with ideographic dots as "." and without invisible format
+  characters. It names the cast, the bank, the product and the domains only through
   placeholders (`{advisor.<id>}`, `{domain.attacker}`, `{mandate.demo}` ...), resolved
   from branding. After resolution every host must end in the label `example`;
 - `--live` needs `--yes`, and live runs are not available in M0.
 
-Files are read with `json` and `tomllib` only. Errors name the file, the JSON path and
-the rule, never the text: corpus text is untrusted (CLAUDE.md rule 9) and recordings
+Files are read with `json` and `tomllib` only. Errors name the file (escaped unless
+it is a plain name), the JSON path and the rule, never the text: corpus text is untrusted (CLAUDE.md rule 9) and recordings
 may carry what they must not. No network is used and no key is read.
 """
 
@@ -26,6 +27,7 @@ import json
 import re
 import sys
 import tomllib
+import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,9 +41,21 @@ VERSION = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 IGNORED = frozenset({".gitkeep", ".DS_Store"})
 GATE_KEYS = frozenset({"min_cases"})
 # Never in a recording, request or response, at any depth.
+# As a key, or as a value (HAR-style {"name": ..., "value": ...} and [name, value] pairs).
 CREDENTIAL_HEADERS = frozenset(
-    {"authorization", "proxy-authorization", "x-api-key", "cookie", "set-cookie"}
+    {
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "ocp-apim-subscription-key",
+        "cookie",
+        "set-cookie",
+    }
 )
+# A file name is printed as it is only if it is plain; otherwise escaped, so that a
+# newline in a name cannot start a GitHub workflow command ("::error ...") in the log.
+PLAIN_NAME = re.compile(r"[A-Za-z0-9 ._-]{1,128}")
 # A JSON key is printed in a path only if it looks like a field name.
 FIELD = re.compile(r"[a-z_][a-z0-9_]{0,31}")
 
@@ -97,12 +111,18 @@ def _literals() -> list[tuple[str, re.Pattern[str]]]:
 
 LITERALS = _literals()
 
-# Hosts: in URLs (any scheme, or none: `//host`, with slashes or backslashes), after an
-# `@`, and bare names whose last label has two letters or more ("z.B." is not a host).
-URL = re.compile(r"(?:[a-z][a-z0-9+.-]*:)?[/\\]{2}([^\s/\\?#<>\"'()]*)", re.IGNORECASE)
+# Hosts: in URLs, after an `@`, and bare names whose last label has two letters or more
+# ("z.B." is not a host). A URL is what a browser reads as one: a scheme and one or more
+# slashes or backslashes, or `//` alone. Browsers drop tab, CR and LF inside a URL, so
+# the host goes on across them when a dot follows (`a.example<TAB>.evil.test`).
+_AUTHORITY = r"(?:[^\s/\\?#<>\"'()]|[\t\r\n]+(?=\.))*"
+_URL_START = r"(?:[a-z][a-z0-9+.-]*:[/\\]+|[/\\]{2})"
+URL = re.compile(rf"{_URL_START}({_AUTHORITY})", re.IGNORECASE)
 EMAIL = re.compile(r"[\w.+-]+@([\w.-]+)")
 # A whole URL, removed before bare names are looked for: `?file=report.pdf` is a path.
-URL_SPAN = re.compile(r"(?:[a-z][a-z0-9+.-]*:)?[/\\]{2}\S*", re.IGNORECASE)
+URL_SPAN = re.compile(rf"{_URL_START}(?:\S|[\t\r\n]+(?=\.))*", re.IGNORECASE)
+# Dots that are not ASCII after NFKC: ideographic and halfwidth ideographic full stops.
+DOTS = str.maketrans({"\u3002": ".", "\uff61": "."})
 BARE_HOST = re.compile(r"(?<![\w.@/\\-])((?:[\w-]+\.)+[^\W\d_]{2}[\w-]*)\.?(?![\w-])")
 BARE_IPV4 = re.compile(r"(?<![\w.])\d{1,3}(?:\.\d{1,3}){3}(?![\w.])")
 HOST_MESSAGES = {
@@ -144,8 +164,15 @@ def host_problem(host: str) -> str | None:
     return None
 
 
+def normalize(text: str) -> str:
+    """What a reader or a browser sees: NFKC (fullwidth forms, compatibility dots),
+    ideographic dots as ".", and no invisible format characters (zero-width, tags)."""
+    folded = unicodedata.normalize("NFKC", text).translate(DOTS)
+    return "".join(char for char in folded if unicodedata.category(char) != "Cf")
+
+
 def _authority_host(authority: str) -> str:
-    host = authority.rpartition("@")[2]
+    host = re.sub(r"[\t\r\n]", "", authority).rpartition("@")[2]
     if host.startswith("["):
         return host.partition("]")[0] + "]"
     return host.partition(":")[0]
@@ -163,6 +190,7 @@ def hosts(text: str) -> list[str]:
 
 def text_problems(text: str) -> list[str]:
     """The rules one string breaks: placeholders, literals, then hosts after resolution."""
+    text = normalize(text)
     found: list[str] = []
     for namespace, key in PLACEHOLDER.findall(text):
         if namespace in NAMESPACES and f"{namespace}.{key}" not in PLACEHOLDERS:
@@ -216,6 +244,10 @@ def _load_json(path: Path, rel: str, problems: list[str]) -> object | None:
         return None
 
 
+def _shown(name: str) -> str:
+    return name if PLAIN_NAME.fullmatch(name) else ascii(name)
+
+
 def _entries(directory: Path) -> list[Path]:
     return sorted(path for path in directory.iterdir() if path.name not in IGNORED)
 
@@ -247,7 +279,7 @@ def _load_cases(suite: Suite, directory: Path, problems: list[str]) -> set[str]:
         return set()
     ids: set[str] = set()
     for path in _entries(base):
-        rel = f"{suite.case_dir}/{path.name}"
+        rel = f"{suite.case_dir}/{_shown(path.name)}"
         if path.is_symlink():
             problems.append(f"{rel}: symlink")
             continue
@@ -273,6 +305,8 @@ def _load_cases(suite: Suite, directory: Path, problems: list[str]) -> set[str]:
 
 
 def _credential_header(node: object) -> bool:
+    if isinstance(node, str):
+        return node.strip().lower() in CREDENTIAL_HEADERS
     if isinstance(node, dict):
         return any(
             key.lower() in CREDENTIAL_HEADERS or _credential_header(value)
@@ -289,12 +323,12 @@ def _check_recordings(directory: Path, case_ids: set[str], problems: list[str]) 
         problems.append("recorded/ is missing")
         return
     for version in _entries(base):
-        rel_version = f"recorded/{version.name}"
+        rel_version = f"recorded/{_shown(version.name)}"
         if version.is_symlink() or not version.is_dir() or not VERSION.fullmatch(version.name):
             problems.append(f"{rel_version}: stray entry (recorded/ holds <version>/ directories)")
             continue
         for path in _entries(version):
-            rel = f"{rel_version}/{path.name}"
+            rel = f"{rel_version}/{_shown(path.name)}"
             if path.is_symlink() or not path.is_file() or path.suffix != ".json":
                 problems.append(f"{rel}: stray entry (recordings are <case id>.json files)")
                 continue

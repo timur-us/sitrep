@@ -40,7 +40,7 @@ SWALLOWED = re.compile(
     r"\|\|\s*(?:true\b|:(?!\S)|exit 0\b)|;\s*true\b|--suppress-no-test-exit-code"
 )
 IGNORING = re.compile(
-    r"\.IGNORE\b.*|\s*(?:export\s+)?MAKEFLAGS\b.*(?:\s-\w*[ik]|--ignore-errors|--keep-going).*"
+    r"\.IGNORE\b.*|\s*(?:(?:export|override)\s+)*MAKEFLAGS\b.*(?:[\s=]-\w*[ik]|--ignore-errors|--keep-going).*"
 )
 
 

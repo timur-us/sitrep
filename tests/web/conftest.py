@@ -23,6 +23,9 @@ from playwright.sync_api import Browser, sync_playwright
 
 START_TIMEOUT = 20.0
 NO_NAMES = "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"
+# WebRTC sends UDP that neither the resolver rules nor Playwright's events see. This
+# policy allows only proxied UDP, and there is no proxy (not verified by a test).
+NO_WEBRTC_UDP = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
 
 
 def free_port() -> int:
@@ -73,8 +76,8 @@ def app_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         deadline = time.monotonic() + START_TIMEOUT
         while not _healthy(port):
             if server.poll() is not None:
-                tail = log.read_text(errors="replace")[-2000:]
-                pytest.fail(f"the app exited with {server.returncode}:\n{tail}")
+                # The exit code only: from M1 a crash could carry prompt text (rule 10).
+                pytest.fail(f"the app exited with {server.returncode} (stderr: {log})")
             if time.monotonic() > deadline:
                 pytest.fail(f"the app did not answer /health within {START_TIMEOUT} s")
             time.sleep(0.1)
@@ -89,9 +92,12 @@ def app_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
 
 
 @pytest.fixture(scope="session")
-def browser() -> Iterator[Browser]:
+def browser(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Browser]:
+    # Chromium gets an environment built from scratch too: no proxy, token or key from
+    # the shell or the runner.
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path_factory.mktemp("browser"))}
     with sync_playwright() as playwright:
-        chromium = playwright.chromium.launch(args=[NO_NAMES])
+        chromium = playwright.chromium.launch(args=[NO_NAMES, NO_WEBRTC_UDP], env=env)
         try:
             yield chromium
         finally:

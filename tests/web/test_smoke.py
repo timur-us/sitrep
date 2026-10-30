@@ -116,11 +116,12 @@ def test_control_a_foreign_origin_request_is_recorded(
     assert foreign == [elsewhere], recorder.requests
 
 
-def test_control_names_do_not_resolve(context: BrowserContext) -> None:
-    # The resolver rules answer "not found" for any name, so nothing leaves by DNS.
+def test_control_names_do_not_resolve(context: BrowserContext, unused_port: int) -> None:
+    # localhost resolves without DNS, so only the resolver rules can make it fail: without
+    # them this is ERR_CONNECTION_REFUSED. Nothing leaves by DNS either.
     page = context.new_page()
     with pytest.raises(PlaywrightError, match="ERR_NAME_NOT_RESOLVED"):
-        page.goto(f"http://{branding.DOMAINS.canary}/", timeout=5000)
+        page.goto(f"http://localhost:{unused_port}/", timeout=5000)
 
 
 def test_control_a_websocket_is_recorded(
