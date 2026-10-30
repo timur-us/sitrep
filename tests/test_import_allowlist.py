@@ -34,6 +34,8 @@ ALLOWED = frozenset(
         "json",
         "logging",
         "opentelemetry",
+        # app/db/connect.py reads os.environ; os.system, os.exec* and the like stay banned.
+        "os",
         "pathlib",
         # The database driver (ADR 0008). It connects on its own, so this scan does not
         # see where; app/db/connect.py is the only place that opens a connection.

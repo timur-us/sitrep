@@ -17,12 +17,13 @@ help: ## List the targets
 
 # The database (compose.yaml, ADR 0008): PostgreSQL 17 with pgvector on 127.0.0.1:55432,
 # trust auth, synthetic data only. db/init runs on an empty data directory only, so
-# `down` deletes the data and the next `up` starts from db/init again.
+# `down` deletes the data and the next `up` starts from db/init again. -f names
+# compose.yaml alone, so no override file and no COMPOSE_FILE is merged in.
 up: ## Start PostgreSQL with pgvector on 127.0.0.1:55432 and wait until it answers
-	docker compose up -d --wait
+	docker compose -f compose.yaml up -d --wait
 
 down: ## Stop PostgreSQL and delete its data
-	docker compose down --volumes
+	docker compose -f compose.yaml down --volumes
 
 migrate: ## Apply db/migrations as the migration role (after make up)
 	uv run python -P -m app.db.migrate
@@ -34,8 +35,9 @@ lint: ## Check lint and formatting with ruff
 fmt: ## Format the code with ruff
 	uv run ruff format
 
-# tests/db needs `make up` and `make migrate` first; it fails, never skips, without them.
-test: lint ## Lint, then run the offline tests (all of tests/ except tests/web)
+# Offline means no network beyond loopback: tests/db needs `make up` and `make migrate`
+# first, and fails, never skips, without them.
+test: lint ## Lint, then run the offline tests (all of tests/ except tests/web; needs make up, make migrate)
 	uv run python -P -m pytest --ignore=tests/web
 
 # CI runs one target per job (.github/workflows/ci.yml); tests/ci/ pins both sides.

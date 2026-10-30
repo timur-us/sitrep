@@ -6,7 +6,8 @@ ROLE (SQLSTATE 42501), and the superuser is not the migrator. Every applied file
 recorded in the meta schema with its sha256 and with session_user and current_user, so
 the record shows who ran it. Before any new file runs, every recorded file must still
 be on disk with the same sha256; a changed or missing one stops the run with no DDL.
-All new files run in one transaction, under a lock on the record table.
+All new files run in one transaction, under a lock on the record table; a file that ends
+that transaction or changes the role or search_path is refused (see apply()).
 
 The runner's own SQL is built from app/db/names.py with psycopg.sql, never from input.
 """
@@ -23,6 +24,7 @@ from typing import Any
 
 import psycopg
 from psycopg import sql
+from psycopg.pq import TransactionStatus
 
 from app.config.settings import Settings
 from app.db import names
@@ -50,6 +52,7 @@ BOOTSTRAP = (
     ).format(_RECORD),
     sql.SQL("REVOKE ALL ON {} FROM PUBLIC").format(_RECORD),
 )
+SESSION = "SELECT session_user, current_user, current_setting('search_path')"
 LOCK_RECORD = sql.SQL("LOCK TABLE {} IN EXCLUSIVE MODE").format(_RECORD)
 SELECT_APPLIED = sql.SQL("SELECT version, file_name, sha256 FROM {}").format(_RECORD)
 INSERT_APPLIED = sql.SQL(
@@ -116,19 +119,35 @@ def run(url: str, directory: Path = MIGRATIONS) -> list[str]:
             for statement in BOOTSTRAP:
                 conn.execute(statement)
         with conn.transaction():
+            session = conn.execute(SESSION).fetchone()
             conn.execute(LOCK_RECORD)
             rows = conn.execute(SELECT_APPLIED).fetchall()
             check_applied({version: (name, sha) for version, name, sha in rows}, migrations)
             done = {version for version, _, _ in rows}
             new = [migration for migration in migrations if migration.version not in done]
             for migration in new:
-                apply(conn, migration)
+                apply(conn, migration, session)
     return [migration.file_name for migration in new]
 
 
-def apply(conn: psycopg.Connection[Any], migration: Migration) -> None:
+def apply(conn: psycopg.Connection[Any], migration: Migration, session: tuple[Any, ...]) -> None:
+    """Run one file, check it stayed inside the run, then record it.
+
+    A file is trusted, reviewed SQL, but it can still leave the run: a COMMIT or ROLLBACK
+    ends the runner's transaction (what it committed stays: detected, not prevented), and
+    RESET ROLE or SET search_path changes what later files run as. Each is refused
+    before the file is recorded, and the rest of the run rolls back.
+    """
     # No parameters: psycopg sends the file as one simple query, statements and all.
     conn.execute(migration.sql)
+    name = migration.file_name
+    if conn.info.transaction_status != TransactionStatus.INTRANS:
+        raise MigrationError(f"{name} ended the runner's transaction; it is not recorded")
+    now = conn.execute(SESSION).fetchone()
+    if now[:2] != session[:2]:
+        raise MigrationError(f"{name} changed session_user, current_user to {now[:2]}")
+    if now[2] != session[2]:
+        raise MigrationError(f"{name} changed the search_path")
     conn.execute(INSERT_APPLIED, (migration.version, migration.file_name, migration.sha256))
 
 

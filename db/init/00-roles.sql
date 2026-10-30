@@ -30,6 +30,10 @@ CREATE EXTENSION vector SCHEMA public;
 -- migrations create. PUBLIC keeps USAGE on it (for the vector type), and has no CREATE.
 ALTER SCHEMA public OWNER TO postgres;
 
+-- Large objects need no privilege to create, sit outside row-level security, and belong
+-- to whoever creates them: the creating functions are closed to PUBLIC.
+REVOKE EXECUTE ON FUNCTION lo_create(oid), lo_creat(integer), lo_from_bytea(oid, bytea) FROM PUBLIC;
+
 -- No CONNECT and no TEMPORARY for PUBLIC; CONNECT for the two login roles only.
 REVOKE ALL ON DATABASE sitrep FROM PUBLIC;
 GRANT CONNECT ON DATABASE sitrep TO sitrep_app, sitrep_migrator;

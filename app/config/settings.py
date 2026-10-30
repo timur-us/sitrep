@@ -7,17 +7,18 @@ entry point, `python -m app`, passes `_env_file=".env"`; tests and offline runne
 Flags are typed `str` and are on only for exactly "1": "true", "yes", " 1" and "01"
 are off, so a typo fails closed.
 
-Database URLs name one host, exactly 127.0.0.1, and nothing beyond user, host, port and
-database: no password, no hostaddr, no options, no service (ADR 0008). They are parsed
-by libpq itself, so the check reads them as the connection will. A rejected value is
-not echoed in the error.
+Database URLs name one host, exactly 127.0.0.1, an explicit port, a user and a database,
+and nothing else: no password, no hostaddr, no options, no service (ADR 0008). A missing
+parameter would come from libpq's environment, so all four are required. Each field
+names its own role and the app's database. URLs are parsed by libpq itself, so the
+check reads them as the connection will. A rejected value is not echoed in the error.
 """
 
 from __future__ import annotations
 
 from psycopg import ProgrammingError
 from psycopg.conninfo import conninfo_to_dict
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.db import names
@@ -28,7 +29,9 @@ DATABASE_PORT = 55432
 
 # The libpq parameters a database URL may set.
 URL_KEYS = frozenset({"user", "host", "port", "dbname"})
-URL_REQUIRED = frozenset({"user", "host", "dbname"})
+URL_REQUIRED = URL_KEYS
+# The role each URL must log in as.
+URL_ROLES = {"database_url": names.APP_ROLE, "migration_database_url": names.MIGRATOR_ROLE}
 
 
 def flag(value: str) -> bool:
@@ -53,7 +56,7 @@ def check_database_url(url: str) -> str:
         raise ValueError(f"missing {missing}: libpq would take them from the environment")
     if params["host"] != LOOPBACK:
         raise ValueError(f"host must be exactly {LOOPBACK}: one host, no name, no socket")
-    port = str(params.get("port", DATABASE_PORT))
+    port = params["port"]
     if not (port.isascii() and port.isdigit() and 0 < int(port) < 65536):
         raise ValueError("port must be one number from 1 to 65535")
     return url
@@ -78,8 +81,14 @@ class Settings(BaseSettings):
 
     @field_validator("database_url", "migration_database_url")
     @classmethod
-    def _loopback_only(cls, value: str) -> str:
-        return check_database_url(value)
+    def _loopback_only(cls, value: str, info: ValidationInfo) -> str:
+        params = conninfo_to_dict(check_database_url(value))
+        role = URL_ROLES[info.field_name]
+        if params["user"] != role:
+            raise ValueError(f"must log in as {role}")
+        if params["dbname"] != names.DATABASE:
+            raise ValueError(f"database must be {names.DATABASE}")
+        return value
 
     @property
     def dev_auth_on(self) -> bool:
