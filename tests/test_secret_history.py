@@ -59,7 +59,15 @@ def _commit(repo: Path, message: str, files: dict[str, str | None]) -> str:
 
 
 @pytest.fixture
-def repo(tmp_path: Path) -> Path:
+def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # No global git config: a CI runner has no user identity, and this machine's
+    # settings must not make a test pass here that fails there.
+    home = tmp_path / "home"
+    home.mkdir()
+    # Never guess an identity from the host name (this machine can, a runner cannot).
+    (home / ".gitconfig").write_text("[user]\n\tuseConfigOnly = true\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     path = tmp_path / "repo"
     path.mkdir()
     git(path, "init", "-q", "-b", "main")
@@ -152,10 +160,18 @@ def test_binary_files_are_scanned(repo: Path, files: dict[str, str], path: str) 
     assert f"{sha[:12]}:{path}:2:" in "\n".join(lines), lines
 
 
-def _git_unchecked(repo: Path, *args: str) -> None:
-    """A git command that may fail on purpose (a merge with a conflict)."""
+IDENTITY = ("-c", "user.name=test", "-c", "user.email=test@test.invalid")
+
+
+def _merge_with_conflict(repo: Path, branch: str) -> None:
+    """Start a merge that stops on a conflict; fail with git's message if it does not."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    subprocess.run(["git", "-C", str(repo), *args], env=env, capture_output=True, check=False)
+    env["LC_ALL"] = "C"
+    args = [*IDENTITY, "-c", "core.hooksPath=/dev/null", "merge", "-q", branch]
+    result = subprocess.run(
+        ["git", "-C", str(repo), *args], env=env, capture_output=True, text=True, check=False
+    )
+    assert (repo / ".git" / "MERGE_HEAD").is_file(), f"no merge in progress: {result.stderr}"
 
 
 def test_a_key_added_while_resolving_a_merge_is_reported(repo: Path) -> None:
@@ -164,7 +180,7 @@ def test_a_key_added_while_resolving_a_merge_is_reported(repo: Path) -> None:
     git(repo, "checkout", "-q", "main")
     _commit(repo, "main side", {"f.txt": "main\n"})
     git(repo, "checkout", "-q", "feature")
-    _git_unchecked(repo, "-c", "core.hooksPath=/dev/null", "merge", "-q", "main")
+    _merge_with_conflict(repo, "main")
     merge = _commit(repo, "merge main", {"f.txt": f"resolved\n{OTHER_KEY}\n"})
     assert len(git(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()) == 3, "no merge"
     base, head = secret_history.branch_range(repo)
