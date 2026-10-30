@@ -13,11 +13,12 @@
       "Edit(CLAUDE.md)",
       "Edit(.claude/agents/**)",
       "Edit(.claude/skills/**)",
-      "Edit(.github/workflows/**)",
       "Edit(Makefile)",
       "Edit(pyproject.toml)",
       "Edit(evals/gate.toml)",
-      "Edit(redteam/gate.toml)"
+      "Edit(redteam/gate.toml)",
+      "Edit(.github/**)",
+      "Edit(tests/ci/**)"
     ],
     "deny": [
       "Bash(az deployment group create *)",
