@@ -26,7 +26,5 @@ def applied(superuser: Connection) -> list[tuple[Any, ...]]:
     return superuser.execute(query).fetchall()
 
 
-def column(
-    conn: Connection, query: str | sql.Composable, params: tuple[Any, ...] = ()
-) -> list[Any]:
+def column(conn: Connection, query: str | sql.Composable, params: Any = ()) -> list[Any]:
     return [row[0] for row in conn.execute(query, params).fetchall()]

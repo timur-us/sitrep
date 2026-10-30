@@ -172,9 +172,11 @@ def test_proxy_environment_is_clean(settings: Settings) -> None:
     proxies = {name.lower() for name in PROXY_VARIABLES}
     leaked = sorted(name for name in os.environ if name.lower() in proxies)
     otel = sorted(name for name in os.environ if name.upper().startswith("OTEL_"))
+    libpq = sorted(name for name in os.environ if name.startswith("PG"))
     no_proxy = (os.environ.get("NO_PROXY"), os.environ.get("no_proxy"))
     assert not leaked, f"proxy variables visible to tests: {leaked}"
     assert not otel, f"OpenTelemetry variables visible to tests: {otel}"
+    assert not libpq, f"libpq variables visible to tests: {libpq}"
     assert no_proxy == ("*", "*"), f"NO_PROXY, no_proxy: {no_proxy}"
     defaults = (settings.host, settings.port, settings.dev_auth, settings.trace_plaintext)
     assert defaults == ("127.0.0.1", 8000, "0", "0"), defaults
@@ -187,6 +189,7 @@ def test_proxy_variables_are_scrubbed() -> None:
     env |= dict.fromkeys(PROXY_VARIABLES, LOOPBACK_PROXY)
     env |= {"Https_Proxy": LOOPBACK_PROXY, "OTEL_SDK_DISABLED": "true"}
     env |= {"Host": ALL_INTERFACES, "PORT": "9", "DEV_AUTH": "1", "TRACE_PLAINTEXT": "1"}
+    env |= {"PGHOSTADDR": "192.0.2.1", "PGPORT": "5432", "PGOPTIONS": "-c x=y", "PGTZ": "UTC"}
     probe = f"{Path(__file__).relative_to(ROOT).as_posix()}::test_proxy_environment_is_clean"
     result = subprocess.run(
         [sys.executable, "-P", "-m", "pytest", "-q", "-p", "no:cacheprovider", probe],

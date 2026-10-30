@@ -173,7 +173,12 @@ def test_import_allowlist() -> None:
         for path in sorted(APP.rglob("*.py"))
     }
     assert len(sources) >= 10, f"only {len(sources)} files scanned"
-    for required in ("app/main.py", "app/__main__.py", "app/observability/tracing.py"):
+    for required in (
+        "app/main.py",
+        "app/__main__.py",
+        "app/observability/tracing.py",
+        "app/db/connect.py",
+    ):
         assert required in sources, f"{required} was not scanned"
     modules, problems = check(sources)
     assert not problems, "\n".join(problems)

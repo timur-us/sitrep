@@ -1,8 +1,13 @@
-"""The server is PostgreSQL 17, and pgvector 0.8.7 is installed in the app's database."""
+"""The server is PostgreSQL 17, and pgvector is installed in the app's database, at the
+version compose.yaml's image tag names (a Dependabot bump moves both together).
+"""
 
 from __future__ import annotations
 
+import re
+
 import pytest
+from repo_files import ROOT
 
 from app.config.settings import Settings
 from app.db.connect import connect
@@ -16,7 +21,11 @@ def test_vector_extension(settings: Settings) -> None:
             "SELECT extversion, extnamespace::regnamespace::text FROM pg_extension"
             " WHERE extname = 'vector'"
         ).fetchall()
-        assert found == [("0.8.7", "public")], f"vector in pg_extension: {found}"
+        tag = re.search(
+            r"pgvector/pgvector:(\d+\.\d+\.\d+)-pg17-", (ROOT / "compose.yaml").read_text()
+        )
+        assert tag, "compose.yaml names no pgvector image"
+        assert found == [(tag.group(1), "public")], f"vector in pg_extension: {found}"
         # The app role can use the type through its search_path.
         assert app.execute("SELECT '[1,2,3]'::vector::text").fetchone() == ("[1,2,3]",)
         major = app.execute("SELECT current_setting('server_version_num')::int / 10000")

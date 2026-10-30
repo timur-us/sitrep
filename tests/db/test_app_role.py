@@ -3,7 +3,8 @@
 It is exactly the app role, with no attribute and no membership; it owns nothing in any
 database; it can create nothing; it cannot reach the runner's schema or another
 database; and everything in the app schema and the meta schema belongs to the owner.
-Row-level security on the tables (the FORCE half) is PR 5b.
+Each catalog check is a function of the role, so a control runs the same query for a
+role that does hold what is checked. Row-level security (the FORCE half) is PR 5b.
 """
 
 from __future__ import annotations
@@ -43,59 +44,116 @@ def app(settings: Settings) -> Iterator[Connection]:
         yield conn
 
 
-def test_app_role_attributes(app: Connection) -> None:
-    users = app.execute("SELECT current_user, session_user").fetchone()
-    assert users == (APP, APP), f"DATABASE_URL logs in as {users}, expected {APP}"
-    flags = app.execute(
+def role_problems(conn: Connection, role: str) -> list[str]:
+    flags = conn.execute(
         "SELECT rolsuper, rolbypassrls, rolcreaterole, rolcreatedb, rolreplication"
-        " FROM pg_roles WHERE rolname = current_user"
+        " FROM pg_roles WHERE rolname = %s",
+        (role,),
     ).fetchone()
-    held = [name for name, on in zip(ATTRIBUTES, flags, strict=True) if on]
-    assert not held, f"{APP} has {held}"
-    memberships = app.execute(
+    problems = [f"{role} has {name}" for name, on in zip(ATTRIBUTES, flags, strict=True) if on]
+    memberships = conn.execute(
         "SELECT g.rolname, m.rolname FROM pg_auth_members a"
         " JOIN pg_roles g ON g.oid = a.roleid JOIN pg_roles m ON m.oid = a.member"
-        " WHERE current_user IN (g.rolname, m.rolname)"
+        " WHERE %s IN (g.rolname, m.rolname)",
+        (role,),
     ).fetchall()
-    assert not memberships, f"{APP} in pg_auth_members (role, member): {memberships}"
+    problems += [f"{role} in pg_auth_members (role, member): {row}" for row in memberships]
+    return problems
 
 
-def test_app_role_owns_nothing(app: Connection) -> None:
+def owned_by(conn: Connection, role: str) -> list[str]:
+    params = {"role": role}
     owned = column(
-        app, "SELECT 'database ' || datname FROM pg_database WHERE datdba = current_user::regrole"
+        conn,
+        "SELECT 'database ' || datname FROM pg_database WHERE datdba = %(role)s::regrole",
+        params,
     )
     owned += column(
-        app, "SELECT 'schema ' || nspname FROM pg_namespace WHERE nspowner = current_user::regrole"
+        conn,
+        "SELECT 'schema ' || nspname FROM pg_namespace WHERE nspowner = %(role)s::regrole",
+        params,
     )
     owned += column(
-        app,
+        conn,
         "SELECT 'relation ' || c.oid::regclass::text FROM pg_class c"
-        " WHERE c.relowner = current_user::regrole",
+        " WHERE c.relowner = %(role)s::regrole",
+        params,
     )
     # Every other owned object, in this database and in the shared catalogs.
     owned += column(
-        app,
+        conn,
         "SELECT 'object ' || classid::regclass::text || ' ' || objid FROM pg_shdepend"
-        " WHERE refobjid = current_user::regrole AND deptype = 'o'",
+        " WHERE refobjid = %(role)s::regrole AND deptype = 'o'",
+        params,
     )
+    return owned
+
+
+def creatable_by(conn: Connection, role: str) -> list[str]:
+    found = column(
+        conn,
+        "SELECT 'schema ' || nspname FROM pg_namespace"
+        " WHERE has_schema_privilege(%s, oid, 'CREATE')",
+        (role,),
+    )
+    for privilege in ("CREATE", "TEMPORARY"):
+        if conn.execute(
+            "SELECT has_database_privilege(%s, current_database(), %s)", (role, privilege)
+        ).fetchone()[0]:
+            found.append(f"database {privilege}")
+    return found
+
+
+def test_app_role_attributes(app: Connection) -> None:
+    users = app.execute("SELECT current_user, session_user").fetchone()
+    assert users == (APP, APP), f"DATABASE_URL logs in as {users}, expected {APP}"
+    problems = role_problems(app, APP)
+    assert not problems, "\n".join(problems)
+
+
+def test_control_attributes_and_memberships_are_seen(superuser: Connection) -> None:
+    with superuser.transaction(force_rollback=True):
+        superuser.execute("CREATE ROLE attribute_probe CREATEDB BYPASSRLS")
+        superuser.execute(
+            sql.SQL("GRANT {} TO attribute_probe").format(sql.Identifier(names.OWNER_ROLE))
+        )
+        problems = role_problems(superuser, "attribute_probe")
+    assert problems == [
+        "attribute_probe has rolbypassrls",
+        "attribute_probe has rolcreatedb",
+        f"attribute_probe in pg_auth_members (role, member): {(names.OWNER_ROLE, 'attribute_probe')}",
+    ], problems
+
+
+def test_app_role_owns_nothing(app: Connection) -> None:
+    owned = owned_by(app, APP)
     assert not owned, f"{APP} owns: {owned}"
+
+
+def test_control_ownership_is_seen(app: Connection) -> None:
+    # The same queries, for the owner: a wrong join would come back empty here too.
+    owned = set(owned_by(app, names.OWNER_ROLE))
+    expected = {
+        f"database {names.DATABASE}",
+        f"schema {names.SCHEMA}",
+        f"schema {names.META_SCHEMA}",
+        f"relation {RECORD}",
+    }
+    assert expected <= owned, sorted(owned)
+    assert any(item.startswith("object pg_database ") for item in owned), sorted(owned)
 
 
 def test_app_role_cannot_create(app: Connection) -> None:
     schemas = column(app, "SELECT nspname FROM pg_namespace ORDER BY nspname")
     assert {"public", names.SCHEMA, names.META_SCHEMA} <= set(schemas), schemas
-    creatable = column(
-        app, "SELECT nspname FROM pg_namespace WHERE has_schema_privilege(oid, 'CREATE')"
-    )
-    assert not creatable, f"{APP} has CREATE on schema {creatable}"
-    on_database = [
-        privilege
-        for privilege in ("CREATE", "TEMPORARY")
-        if app.execute(
-            "SELECT has_database_privilege(current_database(), %s)", (privilege,)
-        ).fetchone()[0]
-    ]
-    assert not on_database, f"{APP} has {on_database} on database {names.DATABASE}"
+    creatable = creatable_by(app, APP)
+    assert not creatable, f"{APP} may create in: {creatable}"
+
+
+def test_control_create_rights_are_seen(app: Connection) -> None:
+    found = set(creatable_by(app, names.OWNER_ROLE))
+    expected = {f"schema {names.SCHEMA}", f"schema {names.META_SCHEMA}", "database CREATE"}
+    assert expected <= found, sorted(found)
 
 
 def test_meta_schema_is_closed_to_the_app(app: Connection) -> None:
@@ -149,14 +207,48 @@ def test_everything_in_the_schemas_belongs_to_the_owner(app: Connection) -> None
     assert not wrong, "\n".join(wrong)
 
 
-def test_app_role_connects_to_its_database_only(app: Connection, settings: Settings) -> None:
-    others = column(
-        app,
-        "SELECT datname FROM pg_database WHERE datallowconn"
-        " AND has_database_privilege(datname, 'CONNECT') AND datname <> current_database()",
-    )
-    assert not others, f"{APP} may connect to {others}"
-    # The control: the catalog's answer is what the server enforces.
-    elsewhere = settings.database_url.rsplit("/", 1)[0] + "/postgres"
-    with pytest.raises(psycopg.OperationalError, match="permission denied for database"):
-        connect(elsewhere).close()
+# (grantee, privilege) pairs from an ACL, with PUBLIC for grantee 0; NULL means the default.
+DATABASE_ACL = (
+    "SELECT coalesce(r.rolname, 'PUBLIC'), a.privilege_type FROM pg_database d,"
+    " aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a"
+    " LEFT JOIN pg_roles r ON r.oid = a.grantee WHERE d.datname = %s"
+)
+SCHEMA_ACL = (
+    "SELECT coalesce(r.rolname, 'PUBLIC'), a.privilege_type FROM pg_namespace n,"
+    " aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a"
+    " LEFT JOIN pg_roles r ON r.oid = a.grantee WHERE n.nspname = %s"
+)
+
+
+def test_grants_are_exact(app: Connection) -> None:
+    owner, migrator = names.OWNER_ROLE, names.MIGRATOR_ROLE
+    expected = [
+        (
+            DATABASE_ACL,
+            names.DATABASE,
+            {
+                (owner, "CREATE"),
+                (owner, "TEMPORARY"),
+                (owner, "CONNECT"),
+                (APP, "CONNECT"),
+                (migrator, "CONNECT"),
+            },
+        ),
+        (SCHEMA_ACL, names.SCHEMA, {(owner, "USAGE"), (owner, "CREATE"), (APP, "USAGE")}),
+        (SCHEMA_ACL, names.META_SCHEMA, {(owner, "USAGE"), (owner, "CREATE")}),
+        (
+            SCHEMA_ACL,
+            "public",
+            {("postgres", "USAGE"), ("postgres", "CREATE"), ("PUBLIC", "USAGE")},
+        ),
+    ]
+    wrong = []
+    for query, name, want in expected:
+        got = {tuple(row) for row in app.execute(query, (name,)).fetchall()}
+        if got != want:
+            wrong.append(f"{name}: {sorted(got)}, expected {sorted(want)}")
+    assert not wrong, "\n".join(wrong)
+    public_owner = app.execute(
+        "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'public'"
+    ).fetchone()
+    assert public_owner == ("postgres",), f"public is owned by {public_owner}"

@@ -19,6 +19,31 @@ COMPOSE = ROOT / "compose.yaml"
 IMAGE = re.compile(r"pgvector/pgvector:\d+\.\d+\.\d+-pg17-bookworm@sha256:[0-9a-f]{64}")
 INIT_MOUNT = "./db/init:/docker-entrypoint-initdb.d:ro"
 TRUST = ("POSTGRES_HOST_AUTH_METHOD", "trust")
+TOP_LEVEL = {"name", "services"}
+DB_KEYS = {"image", "environment", "ports", "volumes", "healthcheck"}
+# Over TCP, as the app role, so "healthy" means the server is up and the roles exist.
+HEALTHCHECK = [
+    "CMD",
+    "psql",
+    "-h",
+    "127.0.0.1",
+    "-U",
+    names.APP_ROLE,
+    "-d",
+    names.DATABASE,
+    "-c",
+    "select 1",
+]
+# Files docker compose would read besides compose.yaml, unless -f names it alone.
+OTHER_COMPOSE_FILES = (
+    "compose.yml",
+    "compose.override.yaml",
+    "compose.override.yml",
+    "docker-compose.yaml",
+    "docker-compose.yml",
+    "docker-compose.override.yaml",
+    "docker-compose.override.yml",
+)
 
 
 def _environment(service: dict[str, Any]) -> dict[str, str]:
@@ -49,6 +74,8 @@ def _port_problems(name: str, ports: Any) -> list[str]:
 
 def problems(compose: dict[str, Any], raw: str) -> list[str]:
     found = []
+    if set(compose) != TOP_LEVEL:
+        found.append(f"top-level keys {sorted(compose)}, expected {sorted(TOP_LEVEL)}")
     services = compose.get("services") or {}
     if set(services) != {"db"}:
         found.append(f"services {sorted(services)}, expected ['db']")
@@ -59,6 +86,12 @@ def problems(compose: dict[str, Any], raw: str) -> list[str]:
         if TRUST in _environment(service).items() and name != "db":
             found.append(f"{name}: trust auth outside db")
     db = services.get("db") or {}
+    # Deny by default: privileged, pid, command, entrypoint, extends, networks and the
+    # rest are not reviewed in.
+    if set(db) - DB_KEYS:
+        found.append(f"db: keys {sorted(set(db) - DB_KEYS)} beyond {sorted(DB_KEYS)}")
+    if (db.get("healthcheck") or {}).get("test") != HEALTHCHECK:
+        found.append(f"db: healthcheck {(db.get('healthcheck') or {}).get('test')!r}")
     if not IMAGE.fullmatch(str(db.get("image", ""))):
         found.append(f"db: image {db.get('image')!r} is not pgvector on pg17 pinned by digest")
     if db.get("volumes") != [INIT_MOUNT]:
@@ -85,10 +118,13 @@ def test_compose() -> None:
     # Non-vacuity: the port, the trust setting and the healthcheck were there to check.
     assert db["ports"] == ["127.0.0.1:55432:5432"], db["ports"]
     assert TRUST in _environment(db).items(), db.get("environment")
-    # The healthcheck logs in over TCP as the app role, so "healthy" means the roles exist.
-    healthcheck = db["healthcheck"]["test"]
-    expected = ["CMD", "psql", "-h", "127.0.0.1", "-U", names.APP_ROLE, "-d", names.DATABASE]
-    assert healthcheck[: len(expected)] == expected, healthcheck
+
+
+def test_no_other_compose_file() -> None:
+    # An override file is merged into compose.yaml by default and could publish on
+    # 0.0.0.0; the Makefile also names compose.yaml alone with -f.
+    present = [name for name in OTHER_COMPOSE_FILES if (ROOT / name).exists()]
+    assert not present, f"other compose files: {present}"
 
 
 def _planted(change: Any) -> list[str]:
@@ -119,6 +155,20 @@ PLANTED = [
         "trust auth outside db",
     ),
     (lambda c: c["services"].update(app={"image": "x"}), "services"),
+    (lambda c: c["services"]["db"].update(privileged=True), "keys ['privileged']"),
+    (lambda c: c["services"]["db"].update(networks=["host"]), "keys ['networks']"),
+    (lambda c: c["services"]["db"].update(command=["postgres"]), "keys ['command']"),
+    (lambda c: c.update(include=["other.yaml"]), "top-level keys"),
+    (
+        lambda c: c["services"]["db"].update(healthcheck={"test": ["CMD", "pg_isready"]}),
+        "healthcheck",
+    ),
+    (
+        lambda c: c["services"]["db"].update(
+            image="pgvector/pgvector:0.8.7-pg16-bookworm@sha256:" + "0" * 64
+        ),
+        "image",
+    ),
 ]
 
 
