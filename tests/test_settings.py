@@ -72,11 +72,20 @@ def test_port_must_be_a_port(monkeypatch: pytest.MonkeyPatch, port: str) -> None
 
 
 def test_env_example_is_safe() -> None:
-    # The file a developer copies: every flag off, the bind on loopback, and the
-    # variables Settings does not know (the API key, the database URL) ignored.
-    example = Settings(_env_file=ROOT / ".env.example")
+    # The file a developer copies: every flag off, the bind on loopback, both database
+    # URLs written out and equal to the defaults, and the variables Settings does not
+    # know (the API key, the model) ignored.
+    path = ROOT / ".env.example"
+    example = Settings(_env_file=path)
     assert (example.host, example.port) == ("127.0.0.1", 8000)
     assert (example.trace_plaintext_on, example.dev_auth_on) == (False, False)
+    names = {line.split("=", 1)[0] for line in path.read_text().splitlines() if "=" in line}
+    assert {"DATABASE_URL", "MIGRATION_DATABASE_URL"} <= names, sorted(names)
+    defaults = Settings(_env_file=None)
+    assert (example.database_url, example.migration_database_url) == (
+        defaults.database_url,
+        defaults.migration_database_url,
+    )
 
 
 def test_plaintext_needs_console_and_loopback(monkeypatch: pytest.MonkeyPatch) -> None:

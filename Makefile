@@ -10,10 +10,22 @@ export UV_LOCKED := 1
 # The local image tag. The smoke test publishes on 127.0.0.1 only, on a free port.
 IMAGE := sitrep:local
 
-.PHONY: help lint fmt test lint-test audit docker-build web-deps web-test evals redteam
+.PHONY: help up down migrate lint fmt test lint-test audit docker-build web-deps web-test evals redteam
 
 help: ## List the targets
 	@grep -E '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-13s %s\n", $$1, $$2}'
+
+# The database (compose.yaml, ADR 0008): PostgreSQL 17 with pgvector on 127.0.0.1:55432,
+# trust auth, synthetic data only. db/init runs on an empty data directory only, so
+# `down` deletes the data and the next `up` starts from db/init again.
+up: ## Start PostgreSQL with pgvector on 127.0.0.1:55432 and wait until it answers
+	docker compose up -d --wait
+
+down: ## Stop PostgreSQL and delete its data
+	docker compose down --volumes
+
+migrate: ## Apply db/migrations as the migration role (after make up)
+	uv run python -P -m app.db.migrate
 
 lint: ## Check lint and formatting with ruff
 	uv run ruff check
@@ -22,12 +34,14 @@ lint: ## Check lint and formatting with ruff
 fmt: ## Format the code with ruff
 	uv run ruff format
 
+# tests/db needs `make up` and `make migrate` first; it fails, never skips, without them.
 test: lint ## Lint, then run the offline tests (all of tests/ except tests/web)
 	uv run python -P -m pytest --ignore=tests/web
 
 # CI runs one target per job (.github/workflows/ci.yml); tests/ci/ pins both sides.
+# Prerequisites run in order: the database is up and migrated before pytest starts.
 
-lint-test: test ## CI's lint-test job: make test, which also scans the branch's commits for secrets
+lint-test: up migrate test ## CI's lint-test job: up, migrate, then make test (which also scans the branch's commits for secrets)
 
 # Re-resolving the lock catches a hand edit that the hashes do not cover (ADR 0006).
 # --refresh: without it, uv answers from its cache and misses a backdated upload-time.

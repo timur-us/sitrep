@@ -8,6 +8,7 @@ dependencies = [
     "opentelemetry-api==1.45.1",
     "opentelemetry-instrumentation-fastapi==0.66b1",
     "opentelemetry-sdk==1.45.1",
+    "psycopg[binary]==3.3.6",
     "pydantic==2.14.1",
     "pydantic-settings==2.16.1",
     "starlette==1.9.0",
