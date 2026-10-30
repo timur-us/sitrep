@@ -1,24 +1,29 @@
 # Local setup
 
-M0, PRs 1, 3 and 4. SITREP (situation report) builds and tests locally with uv and make, offline, with no `.env` and no API key. Every CI gate is a make target, so it runs here the same way. Later PRs add the database; each one extends this runbook in the same PR. `tests/test_runbook.py` fails when the Makefile and this file drift apart.
+M0, PRs 1, 3, 4 and 5a. SITREP (situation report) builds and tests locally with uv, make and a PostgreSQL container, offline, with no `.env` and no API key. Every CI gate is a make target, so it runs here the same way. Each PR extends this runbook in the same PR. `tests/test_runbook.py` fails when the Makefile and this file drift apart.
 
 ## Prerequisites
 
 - **uv** 0.13.5 or later, below 0.14 (`required-version` in `pyproject.toml`). Update with `uv self update`.
 - **GNU make** and **git**.
 - **Python 3.12** is not a prerequisite: uv installs the version in `.python-version` on first use.
-- **Docker** (Docker Desktop on macOS; Engine 28 or later on Linux), `curl` and `seq`, for `make docker-build` only. `make test` does not need them.
-- **The network**, for `make audit` (PyPI and the vulnerability data), `make web-deps` (Chromium, about 100 MB, from Playwright's CDN) and `make docker-build` (the base images).
+- **Docker** with Compose v2 (Docker Desktop on macOS; Engine 28 or later on Linux, because earlier engines expose localhost-published ports to the local network segment), for the database (`make up`) and `make docker-build`. `make test` needs the database.
+- **`curl` and `seq`**, for `make docker-build`.
+- **Port 55432 free on 127.0.0.1**, for the database. It is not 5432, so a native PostgreSQL there never answers in its place.
+- **The network**, for `make audit` (PyPI and the vulnerability data), `make web-deps` (Chromium, about 100 MB, from Playwright's CDN), `make docker-build` (the base images) and the first `make up` (the pgvector image).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `make help` | Lists the targets. |
-| `make test` | Runs `make lint`, then pytest over `tests/` without `tests/web`. Offline. |
+| `make up` | Starts PostgreSQL with pgvector (`compose.yaml`) on `127.0.0.1:55432` and waits until it answers (below). |
+| `make down` | Stops it and deletes its data. |
+| `make migrate` | Applies `db/migrations` as the migration role (below). |
+| `make test` | Runs `make lint`, then pytest over `tests/` without `tests/web`. Offline. `tests/db` needs `make up` and `make migrate` first, and fails, never skips, without them. |
 | `make lint` | `ruff check` and `ruff format --check`. |
 | `make fmt` | `ruff format`. |
-| `make lint-test` | CI's lint-test job: `make test`. Its `tests/test_secret_history.py` scans the branch's commits for secrets. |
+| `make lint-test` | CI's lint-test job: `make up`, `make migrate`, then `make test`. Its `tests/test_secret_history.py` scans the branch's commits for secrets. |
 | `make audit` | Re-resolves the lock against PyPI (`uv lock --check --refresh`), then runs pip-audit over an export of the lock with hashes. Needs the network. |
 | `make docker-build` | Builds the image `sitrep:local`, then smoke-tests it (below). Needs Docker and the network for the base images. |
 | `make web-deps` | Downloads Chromium for Playwright, without `--with-deps` (no apt, no root). |
@@ -26,7 +31,44 @@ M0, PRs 1, 3 and 4. SITREP (situation report) builds and tests locally with uv a
 | `make evals` | The eval gate, offline (below). |
 | `make redteam` | The red-team gate, offline (below). |
 
-The first `make test` creates `.venv/` from `uv.lock`.
+The first `make test` creates `.venv/` from `uv.lock`. From a fresh clone:
+
+```sh
+make up
+make migrate
+make test
+```
+
+## The database
+
+`compose.yaml` runs one service, `db`: `pgvector/pgvector:0.8.7-pg17-bookworm`, pinned by digest (PostgreSQL 17.11). It publishes on `127.0.0.1:55432` only and mounts `db/init` read-only. There are no variables and no env file.
+
+- **Trust auth.** The container trusts every connection into it, and is reachable only through that 127.0.0.1 publish. It is a local convenience for synthetic data: any local process can connect as any role, the superuser included. Azure is Entra-only from M3.
+- **Roles** (`db/init/00-roles.sql`, run once when the data directory is created; ADR 0008):
+  - `sitrep_owner`: NOLOGIN; owns the database, the schemas and everything in them;
+  - `sitrep_migrator`: LOGIN; holds `sitrep_owner` `WITH INHERIT FALSE`, so it has the owner's rights only after `SET ROLE`;
+  - `sitrep_app`: LOGIN; no attributes and no memberships; owns nothing, can create nothing, and can connect to `sitrep` only.
+
+  `vector` is installed in `public`, and `public` belongs to the superuser.
+- **URLs.** `DATABASE_URL` (the app role) and `MIGRATION_DATABASE_URL` (the migrator) default to `127.0.0.1:55432` (`.env.example`).
+  - Each one must name one host, exactly `127.0.0.1`, and nothing beyond user, host, port and database: no password, `hostaddr`, `options` or `service`. Otherwise `Settings()` refuses it, without echoing the value.
+  - `app/db/connect.py` is the only place that opens a connection. It pins `hostaddr` and `options`, so `PGHOSTADDR` and `PGOPTIONS` in your shell change nothing.
+- **`make migrate`** runs `python -P -m app.db.migrate`:
+  - it connects as the migrator, runs `SET ROLE sitrep_owner`, and refuses any other login;
+  - it records each file's sha256, `session_user` and `current_user` in `sitrep_meta.schema_migrations`;
+  - it stops before any DDL if an applied file changed or is missing;
+  - new files run in one transaction.
+
+  Files are `db/migrations/NNNN_name.sql`, numbered without gaps and forward only: a fix is a new file.
+- **`make down`** deletes the data, and the next `make up` runs `db/init` again. After a change to `db/init`, run `make down`, `make up` and `make migrate`.
+
+Check it by hand:
+
+```sh
+docker compose port db 5432                                      # 127.0.0.1:55432
+docker compose exec db psql -U postgres -d sitrep -c '\du'       # the three roles and their attributes
+docker compose exec db psql -U postgres -d sitrep -c 'SELECT version()'
+```
 
 ## Running the app
 
@@ -72,7 +114,9 @@ The bases are pinned by digest: `python:3.12.16-slim-trixie` and `ghcr.io/astral
 
 `lint-test` checks out the full history (`fetch-depth: 0`) for the history scan; a shallow clone fails it. The tests run as a non-root user, so the unreadable-directory case in `tests/test_data_dirs.py` runs instead of skipping.
 
-Dependabot (`.github/dependabot.yml`) proposes updates for actions, the uv lock and the Docker images: weekly, grouped, and only for releases at least 7 days old.
+`lint-test` starts the database with `make up` (the same `compose.yaml`, on the runner's Docker) and migrates it before the tests. It is not a service container.
+
+Dependabot (`.github/dependabot.yml`) proposes updates for actions, the uv lock, the Docker images and the image in `compose.yaml`: weekly, grouped, and only for releases at least 7 days old.
 
 ## Evals and red team in M0
 
@@ -124,14 +168,20 @@ Later PRs keep those offline through loopback-only URLs and scrubbed environment
 | `tests/test_repo_files.py` | The shared file lister ignores `GIT_*` variables (as set inside a git hook) and shows git's error on failure. |
 | `tests/test_app.py` | `/health` and its `X-Trace-Id`; the exact security headers on `/`, `/health`, a 404 and two 500s (one from an exception that refuses attributes), each with its span's trace id; headers a route sets are replaced; the page title from branding; no 3xx and no `Location` for any route, with and without a trailing slash, nor for open-redirect shapes such as `//host/`, under eight methods, a foreign Host and forwarding headers; no inbound trace context or trace state adopted, sampled, unsampled or malformed; the default exporter chain; the global tracer provider stays unset. |
 | `tests/test_no_plaintext.py` | A real uvicorn server from `server_config()`, with a canary in the method, query, Host, custom, authorization, forwarding and trace-context headers, user agent, cookie, referrer, body, a 404 path and an exception message, and with OpenTelemetry's header-capture, raw-method and resource variables switched on: the canary is in no span, log record, stdout or stderr, and each response's `X-Trace-Id` is its span's. A control runs the same requests with an unfiltered exporter and uvicorn's default logging, where the canary does leak. Also: `redact()` on a hand-built span; the allowlists equal the reviewed ones; trace ids from `secrets`; `LOG_CONFIG` names only this project's classes; the formatter redacts any logger; a failed log write prints no exception text. |
-| `tests/test_settings.py` | Flags on only for exactly `1`, each on its own; ports in range; `.env.example` safe; `TRACE_PLAINTEXT=1` only with the console exporter on `127.0.0.1`; the entry point exits 2 otherwise, from the environment or a `.env`, and starts on loopback with plaintext or on `0.0.0.0` without it; `Settings()` ignores a `.env`; the environment scrub (proxies in any case, `OTEL_*`, the settings' variables), checked in a pytest subprocess started with all of them set. |
-| `tests/test_import_allowlist.py` | The modules `app/` imports equal a reviewed list. HTTP clients, sockets, `subprocess`, `importlib`, `logging.handlers`, `opentelemetry.exporter`, `__import__`, `eval`, `os.system`, `os.exec*`, `RedirectResponse` and connection or server calls are reported, by dotted name, with planted cases. The scan reads names in the syntax tree, not strings. |
+| `tests/test_settings.py` | Flags on only for exactly `1`, each on its own; ports in range; `.env.example` safe, with both database URLs equal to the defaults; `TRACE_PLAINTEXT=1` only with the console exporter on `127.0.0.1`; the entry point exits 2 otherwise, from the environment or a `.env`, and starts on loopback with plaintext or on `0.0.0.0` without it; `Settings()` ignores a `.env`; the environment scrub (proxies in any case, `OTEL_*`, the settings' variables), checked in a pytest subprocess started with all of them set. |
+| `tests/test_import_allowlist.py` | The modules `app/` imports equal a reviewed list. HTTP clients, sockets, `subprocess`, `importlib`, `logging.handlers`, `opentelemetry.exporter`, `__import__`, `eval`, `os.system`, `os.exec*`, `RedirectResponse` and connection or server calls are reported, by dotted name, with planted cases. A `.connect` outside `app/db/connect.py` is reported too. The scan reads names in the syntax tree, not strings. |
 | `tests/test_dockerfile.py` | Bases pinned by digest; every `--from=` names an earlier stage; the uv image tag equals the floor of `required-version`; `uv sync --locked --no-dev`, the last one `--no-editable`; no `ADD`, `curl` or `pip install`; uid 10001; `CMD ["python","-P","-m","app"]`; a deny-by-default `.dockerignore`. |
 | `tests/guardrails/test_block_secrets.py` | The secret hook in `.claude/hooks/` blocks what it must and allows the rest. |
 | `tests/test_secret_history.py` | Every line the branch's commits add since the merge base with `main`, each new path and every commit message, against the patterns and the allowlist of `tests/test_no_secrets.py`. Patches are read as text, binary files included; renames count as added lines; a merge counts with the lines its conflict resolution adds. A key added and removed again is reported. Findings show commit, path, line and pattern (a path with a key shows as `<path>`). A shallow clone fails. On `main` the range is empty by design. A finding means rotating the key: the commits stay reachable through the pull request. |
-| `tests/ci/test_workflow.py` | The six jobs, their triggers, read-only permissions, PR-only cancelling, timeouts and runner; the steps (checkout pinned, without credentials; setup-uv with the Dockerfile's uv and no cache; one make target); no `if`, `continue-on-error`, services, containers (one digest-pinned Playwright fallback is allowed on `web-test`), expressions in `run`, secrets or cloud logins. Dependabot: three ecosystems, weekly, grouped, 7-day cooldown. Planted cases for each rule. |
-| `tests/ci/test_make_targets.py` | `make -n` of each CI target shows its key commands; `web-deps` uses no `--with-deps`, sudo or apt; no recipe ignores a failure (a leading `-`, `\|\| true`, `; true`, `.IGNORE`, `MAKEFLAGS` with `-i`); pytest still blocks sockets. |
+| `tests/ci/test_workflow.py` | The six jobs, their triggers, read-only permissions, PR-only cancelling, timeouts and runner; the steps (checkout pinned, without credentials; setup-uv with the Dockerfile's uv and no cache; one make target); no `if`, `continue-on-error`, services, containers (one digest-pinned Playwright fallback is allowed on `web-test`), expressions in `run`, secrets or cloud logins. Dependabot: four ecosystems (`docker-compose` included), weekly, grouped, 7-day cooldown. Planted cases for each rule. |
+| `tests/ci/test_make_targets.py` | `make -n` of each CI target shows its key commands; `lint-test` starts and migrates the database before pytest; `make down` deletes the data; `web-deps` uses no `--with-deps`, sudo or apt; no recipe ignores a failure (a leading `-`, `\|\| true`, `; true`, `.IGNORE`, `MAKEFLAGS` with `-i`); pytest still blocks sockets. |
 | `tests/ci/test_ci_user.py` | The tests do not run as root. |
+| `tests/db/test_app_role.py` | Through `DATABASE_URL`: the login is `sitrep_app`, with no superuser, BYPASSRLS, CREATEROLE, CREATEDB or REPLICATION and no `pg_auth_members` row. It owns no database, schema, relation or other object (`pg_shdepend`). It has CREATE on no schema and neither CREATE nor TEMPORARY on the database, no privilege on `sitrep_meta` or its table, and can connect to no other database. The database and everything in `sitrep` and `sitrep_meta` belong to `sitrep_owner`. |
+| `tests/db/test_migration_role.py` | Every applied file is recorded with its sha256, `session_user` migrator and `current_user` owner. The three roles' attributes and the one membership (owner to migrator; inherit off, set on, admin off) are exact. The migrator without `SET ROLE` creates nothing. The runner refuses the app role (42501) and the superuser, applies nothing twice, and stops with no DDL on a changed or missing applied file. The app role can create a table in no schema (qualified, unqualified or temporary) and cannot `SET ROLE` to the owner, the migrator or the superuser. |
+| `tests/db/test_vector_extension.py` | PostgreSQL 17; `vector` 0.8.7 in `public`, usable by the app role. |
+| `tests/db/test_connect.py` | `PGHOSTADDR` and `PGOPTIONS` take effect on a plain connect (the controls) and not through `connect()`; `connect()` checks the URL before libpq runs. |
+| `tests/db/test_compose.py` | One service; ports on `127.0.0.1:` only; no `network_mode`; trust on `db` only; the image pgvector on pg17 by digest; `db/init` read-only; no `env_file` and no variables; the healthcheck logs in over TCP as the app role. Planted cases for each rule. |
+| `tests/db/test_database_urls.py` | Both URLs refuse a non-loopback, named, IPv6, second or socket host, a bad port, `options`, `hostaddr`, `service`, `sslmode`, a password, and a missing user, host or database, without the value in the error. Loopback URLs and the keyword form are accepted. |
 | `tests/runners/` | The runners above: exit codes, messages, the gate ratchet, stray files, ids, recordings, placeholders, literals, hosts, live refusal, and no connection attempted with a dummy key set. |
 
 Scans cover tracked files and untracked files that are not ignored (`git ls-files --cached --others --exclude-standard`), so a new file is checked before it is committed. The data-directory check walks the file system instead, so ignored output counts too.
