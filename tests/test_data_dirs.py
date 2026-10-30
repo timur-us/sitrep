@@ -8,7 +8,7 @@ from pathlib import Path
 import data_dirs
 import pytest
 from data_dirs import DATA_DIRS, DATA_SUFFIXES, violations
-from repo_files import ROOT, list_files
+from repo_files import ROOT, git
 
 # Committed in PR 4 with a .gitkeep each; data/synthetic/ follows in PR 8.
 COMMITTED = ("evals/cases", "evals/recorded", "redteam/attacks", "redteam/recorded")
@@ -34,11 +34,11 @@ def test_data_dirs_are_inert() -> None:
 def test_committed_data_dirs_exist() -> None:
     # Non-vacuity: a missing directory has no violations, so the check above could
     # pass on an empty tree. These four exist from PR 4 on.
-    files = list_files(ROOT)
     for rel in COMMITTED:
         path = ROOT / rel
         assert path.is_dir() and not path.is_symlink(), f"{rel} is not a plain directory"
-        assert f"{rel}/.gitkeep" in files, f"{rel}/.gitkeep is not in git"
+        tracked = git(ROOT, "ls-files", "--", f"{rel}/.gitkeep").decode().strip()
+        assert tracked == f"{rel}/.gitkeep", f"{rel}/.gitkeep is not tracked by git"
 
 
 def _plant(root: Path, rel: str, mode: int = 0o644) -> Path:

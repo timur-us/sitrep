@@ -112,24 +112,44 @@ def test_broken_gate_fails(
 
 
 @pytest.mark.parametrize(
-    ("suite", "where", "rel"),
+    ("suite", "where", "rel", "reported"),
     [
-        ("evals", "cases", "notes.txt"),
-        ("evals", "cases", "nested/case.json"),
-        ("redteam", "attacks", "attack.yaml"),
-        ("redteam", "recorded", "loose.json"),
-        ("evals", "recorded", "v1/notes.md"),
-        ("redteam", "recorded", "v1/deeper/a.json"),
-        ("evals", "recorded", "Bad Version/a.json"),
+        ("evals", "cases", "notes.txt", "cases/notes.txt"),
+        ("evals", "cases", "nested/case.json", "cases/nested"),
+        ("redteam", "attacks", "attack.yaml", "attacks/attack.yaml"),
+        ("redteam", "recorded", "loose.json", "recorded/loose.json"),
+        ("evals", "recorded", "v1/notes.md", "recorded/v1/notes.md"),
+        ("redteam", "recorded", "v1/deeper/a.json", "recorded/v1/deeper"),
+        ("evals", "recorded", "Bad Version/a.json", "recorded/Bad Version"),
     ],
 )
 def test_stray_file_fails(
-    suite: str, where: str, rel: str, tmp_path: Path, capsys: pytest.CaptureFixture
+    suite: str,
+    where: str,
+    rel: str,
+    reported: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture,
 ) -> None:
     directory = make_suite(tmp_path, suite)
     _write(directory / where / rel, "{}")
     assert run(suite, directory) == 1
-    assert "stray" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert f"{suite}: {reported}: stray" in err, err
+
+
+def test_a_file_name_cannot_start_a_workflow_command(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # GitHub reads "::error ...::" at the start of a log line as a command. A name with
+    # a newline must not put one there.
+    directory = make_suite(tmp_path, "evals")
+    _write(directory / "cases" / "a\n::error file=x::forged.json", "{}")
+    assert run("evals", directory) == 1
+    err = capsys.readouterr().err
+    lines = err.splitlines()
+    assert lines and all(line.startswith("evals: ") for line in lines), err
+    assert "\\n::error" in err, err  # shown escaped
 
 
 def test_missing_case_directory_fails(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
@@ -208,6 +228,10 @@ def test_orphan_recording_fails(tmp_path: Path, capsys: pytest.CaptureFixture) -
         {"request": {"headers": {"x-api-key": "abc"}}},
         {"turns": [{"request": {"headers": {"X-Api-Key": "abc"}}}]},
         {"response": {"headers": {"set-cookie": "s=abc"}}},
+        {"request": {"headers": [{"name": "Authorization", "value": "Bearer abc"}]}},
+        {"request": {"headers": [["x-api-key", "abc"]]}},
+        {"request": {"headers": {"api-key": "abc"}}},
+        {"request": {"headers": {"Ocp-Apim-Subscription-Key": "abc"}}},
     ],
 )
 def test_recording_with_a_credential_header_fails(
@@ -286,6 +310,11 @@ def test_a_dummy_key_causes_no_connection(tmp_path: Path, monkeypatch: pytest.Mo
     assert attempts == [], attempts
 
 
+def fullwidth(text: str) -> str:
+    """ASCII letters as their fullwidth forms, which NFKC maps back."""
+    return "".join(chr(ord(char) + 0xFEE0) if "!" <= char <= "~" else char for char in text)
+
+
 # Placeholders and literals. Strings are built from branding, so this file names no
 # cast member or domain itself.
 ADVISOR = next(person for person in branding.CAST if person.id == branding.DEMO_MANDATE.advisor_id)
@@ -302,6 +331,8 @@ ATTACKER = next(person for person in branding.CAST if person.role is branding.Ro
         (f"write to {ADVISOR.email}", "literal domain"),
         (f"{branding.BANK.display_name} says", "literal bank name"),
         (f"{branding.PRODUCT.name} says", "literal product name"),
+        (f"Hello {fullwidth(ADVISOR.name)}", "literal cast name"),
+        (f"Hello {ADVISOR.name[0]}\u200b{ADVISOR.name[1:]}", "literal cast name"),
         ("{advisor.nobody} or {domain.elsewhere}", "unknown placeholder"),
         (f"{{advisor.{ATTACKER.id}}}", "unknown placeholder"),
     ],

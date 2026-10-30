@@ -239,6 +239,8 @@ DELETE = object()
 LINT = ("jobs", "lint-test")
 WEB = ("jobs", "web-test")
 DIGEST = "@sha256:" + "0" * 64
+PLAYWRIGHT_REPO = "mcr.microsoft.com/playwright/python"
+PLAYWRIGHT = locked_version("playwright")
 
 PLANTED = [
     (("on",), {"pull_request_target": None, "push": {"branches": ["main"]}}, "triggers"),
@@ -266,6 +268,9 @@ PLANTED = [
     ((*LINT, "steps", 1, "with", "version"), "latest", "setup-uv with"),
     ((*LINT, "steps", 1, "with", "enable-cache"), True, "setup-uv with"),
     ((*LINT, "steps", 0, "uses"), "actions/checkout@v7", "pinned to a commit"),
+    ((*LINT, "steps", 1, "uses"), "astral-sh/setup-uv@v10.3.2", "setup-uv pinned to a commit"),
+    ((*LINT, "steps", 2), "make lint-test", "not a mapping"),
+    ((*LINT, "container"), f"{PLAYWRIGHT_REPO}:v{PLAYWRIGHT}-noble{DIGEST}", "allowed fallback"),
     (("jobs", "deploy"), {"runs-on": "ubuntu-24.04"}, "jobs"),
     (("jobs", "redteam"), DELETE, "jobs"),
 ]
@@ -289,8 +294,9 @@ def test_the_fallback_container_is_allowed_on_web_test_only() -> None:
 @pytest.mark.parametrize(
     ("line", "needle"),
     [
-        ("      - uses: actions/checkout@v7.0.1\n", "commit SHA"),
-        ("      - uses: actions/checkout@" + "a" * 40 + "\n", "version comment"),
+        ("      - uses: actions/checkout@v7.0.1\n", "without a commit SHA"),
+        ("      - uses: astral-sh/setup-uv@v10.3.2 # v10.3.2\n", "without a commit SHA"),
+        ("      - uses: actions/checkout@" + "a" * 40 + "\n", "without a version comment"),
         ("# run: echo ${{ secrets.X }}\n", "secrets."),
         ("# permissions: id-token: write\n", "id-token"),
         ("#      - uses: azure/login@x\n", "azure/"),
@@ -333,6 +339,22 @@ def test_dependabot() -> None:
     config = yaml.safe_load(DEPENDABOT.read_text(encoding="utf-8"))
     found = dependabot_problems(config)
     assert not found, "dependabot.yml:\n" + "\n".join(found)
+
+
+def test_ci_yml_is_the_only_workflow() -> None:
+    # Another workflow could report a check under one of the six names, or run with
+    # other permissions; tests/ci/ reads ci.yml only.
+    names = sorted(path.name for path in WORKFLOW.parent.iterdir())
+    assert names == ["ci.yml"], names
+
+
+def test_dependabot_takes_no_other_keys() -> None:
+    good = yaml.safe_load(DEPENDABOT.read_text(encoding="utf-8"))
+    extra_top = dict(good, registries={"x": {"type": "python-index", "url": "https://x.test"}})
+    entry = dict(good["updates"][0], ignore=[{"dependency-name": "*"}])
+    extra_entry = dict(good, updates=[entry, *good["updates"][1:]])
+    assert any("top-level keys" in line for line in dependabot_problems(extra_top))
+    assert any("keys ['ignore']" in line for line in dependabot_problems(extra_entry))
 
 
 def test_planted_dependabot_configs_are_caught() -> None:

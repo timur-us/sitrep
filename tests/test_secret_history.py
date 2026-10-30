@@ -9,6 +9,8 @@ pattern, never the text and never a fingerprint.
 
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -90,13 +92,16 @@ def test_key_in_a_commit_message_is_reported(repo: Path) -> None:
 
 
 def test_deleted_and_renamed_files(repo: Path) -> None:
-    _commit(repo, "add", {"docs/a.txt": f"{OTHER_KEY}\n", "keep.txt": "k\n"})
+    added = _commit(repo, "add", {"docs/a.txt": f"{OTHER_KEY}\n", "keep.txt": "k\n"})
     moved = _commit(repo, "move", {"docs/a.txt": None, "docs/b.txt": f"{OTHER_KEY}\n"})
     _commit(repo, "drop", {"docs/b.txt": None})
     base, head = secret_history.branch_range(repo)
     lines = secret_history.report(secret_history.scan(repo, base, head))
     # A rename counts as new lines, so the move is reported too; the deletion adds nothing.
-    assert len(lines) == 2 and lines[1] == f"{moved[:12]}:docs/b.txt:1: github-token", lines
+    assert lines == [
+        f"{added[:12]}:docs/a.txt:1: github-token",
+        f"{moved[:12]}:docs/b.txt:1: github-token",
+    ], lines
 
 
 def test_the_allowed_fake_key_stays_allowed(repo: Path) -> None:
@@ -115,6 +120,67 @@ def test_the_allowed_fake_key_stays_allowed(repo: Path) -> None:
     base, head = secret_history.branch_range(repo)
     lines = secret_history.report(secret_history.scan(repo, base, head))
     assert lines == [f"{other[:12]}:{HOOK_TESTS}:2: anthropic-key"], lines
+
+
+def test_the_allowed_fake_key_is_allowed_at_its_path_only(repo: Path) -> None:
+    text = (ROOT / HOOK_TESTS).read_text(encoding="utf-8")
+    allowed = ALLOWLIST[HOOK_TESTS].fingerprints
+    fake = next(
+        match.group(0)
+        for match in PATTERNS["anthropic-key"].finditer(text)
+        if ("anthropic-key", fingerprint(match.group(0))) in allowed
+    )
+    sha = _commit(repo, "copied", {"tests/elsewhere.py": f"x = '{fake}'\n"})
+    base, head = secret_history.branch_range(repo)
+    lines = secret_history.report(secret_history.scan(repo, base, head))
+    assert lines == [f"{sha[:12]}:tests/elsewhere.py:1: anthropic-key"], lines
+
+
+@pytest.mark.parametrize(
+    ("files", "path"),
+    [
+        ({"blob.bin": "\0\0header\nKEY\n"}, "blob.bin"),  # a NUL makes git call it binary
+        ({".gitattributes": "*.dat -diff\n", "notes.dat": "KEY\n"}, "notes.dat"),
+    ],
+)
+def test_binary_files_are_scanned(repo: Path, files: dict[str, str], path: str) -> None:
+    files = {rel: text.replace("KEY", OTHER_KEY) for rel, text in files.items()}
+    sha = _commit(repo, "binary", files)
+    _commit(repo, "gone", {path: None})
+    base, head = secret_history.branch_range(repo)
+    lines = secret_history.report(secret_history.scan(repo, base, head))
+    assert f"{sha[:12]}:{path}:2:" in "\n".join(lines), lines
+
+
+def _git_unchecked(repo: Path, *args: str) -> None:
+    """A git command that may fail on purpose (a merge with a conflict)."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    subprocess.run(["git", "-C", str(repo), *args], env=env, capture_output=True, check=False)
+
+
+def test_a_key_added_while_resolving_a_merge_is_reported(repo: Path) -> None:
+    # A strict ruleset makes "update branch" merges routine; their resolutions add lines.
+    _commit(repo, "feature side", {"f.txt": "feature\n"})
+    git(repo, "checkout", "-q", "main")
+    _commit(repo, "main side", {"f.txt": "main\n"})
+    git(repo, "checkout", "-q", "feature")
+    _git_unchecked(repo, "-c", "core.hooksPath=/dev/null", "merge", "-q", "main")
+    merge = _commit(repo, "merge main", {"f.txt": f"resolved\n{OTHER_KEY}\n"})
+    assert len(git(repo, "rev-list", "--parents", "-n", "1", "HEAD").split()) == 3, "no merge"
+    base, head = secret_history.branch_range(repo)
+    lines = secret_history.report(secret_history.scan(repo, base, head))
+    assert lines == [f"{merge[:12]}:f.txt:2: github-token"], lines
+
+
+def test_a_key_in_a_path_is_reported_without_the_path(repo: Path) -> None:
+    sha = _commit(repo, "named", {f"{OTHER_KEY}.txt": f"{FAKE_KEY}\n"})
+    base, head = secret_history.branch_range(repo)
+    lines = secret_history.report(secret_history.scan(repo, base, head))
+    assert lines == [
+        f"{sha[:12]}:<path>:0: github-token",
+        f"{sha[:12]}:<path>:1: anthropic-key",
+    ], lines
+    assert OTHER_KEY not in "\n".join(lines)
 
 
 def test_merge_base_is_the_start(repo: Path) -> None:
@@ -140,7 +206,8 @@ def test_this_branch_adds_no_secret() -> None:
     base, head = secret_history.branch_range(ROOT)
     shas = secret_history.commits(ROOT, base, head)
     head_sha = git(ROOT, "rev-parse", "HEAD").decode().strip()
-    # Non-vacuity: off main, the range holds the branch's commits.
+    # Non-vacuity: off main, the range holds the branch's commits. On main (a push run)
+    # the range is empty by design: the pull request's run already read those commits.
     if base != head_sha:
         assert shas, f"no commits between {base[:12]} and HEAD"
     lines = secret_history.report(secret_history.scan(ROOT, base, head))

@@ -63,6 +63,16 @@ def test_hosts_under_example_pass(host: str) -> None:
         ("http://[::1]/", "host is an IP literal"),
         ("https://xn--80ak6aa92e.example/", "host has a punycode label"),
         ("https://bücher.example/", "host is non-ASCII"),
+        # Shapes a browser reads as a URL to evil.test (WHATWG URL parsing).
+        ("![x](https:/evil.test/p)", "host not under .example"),
+        ("https:\\evil.test/p", "host not under .example"),
+        ("https://a.example\t.evil.test/p", "host not under .example"),
+        ("https://a.example\n.evil.test/p", "host not under .example"),
+        # Dots and invisible characters that NFKC or a browser folds away.
+        ("see evil\u3002test", "host not under .example"),
+        ("see evil\uff0etest", "host not under .example"),
+        ("see evil\u200b.test", "host not under .example"),
+        ("see evil\U000e0041.test", "host not under .example"),
     ],
 )
 def test_text_with_a_bad_host(text: str, problem: str) -> None:
@@ -79,6 +89,7 @@ def test_text_with_a_bad_host(text: str, problem: str) -> None:
         "https://a.example/download?file=report.pdf",
         "z.B. 1.250.000,00 EUR, Nr. 3, u.a. bzw. d.h.",
         "version 1.64.1 of the tool",
+        "Link: https://{domain.canary}\nBitte klicken. Ende.\nNächste Zeile",
     ],
 )
 def test_text_without_a_bad_host(text: str) -> None:

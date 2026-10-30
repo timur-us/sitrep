@@ -113,6 +113,9 @@ def test_planted_recipes_are_caught() -> None:
         ".IGNORE:\n"
         "MAKEFLAGS += -i\n"
         "export MAKEFLAGS := --keep-going\n"
+        "MAKEFLAGS=-i\n"
+        "MAKEFLAGS+=-k\n"
+        "override MAKEFLAGS:=-ik\n"
     )
     assert recipe_problems(planted) == [
         "line 2: a leading '-' ignores the command's failure",
@@ -124,6 +127,9 @@ def test_planted_recipes_are_caught() -> None:
         "'.IGNORE:' ignores failures",
         "'MAKEFLAGS += -i' ignores failures",
         "'export MAKEFLAGS := --keep-going' ignores failures",
+        "'MAKEFLAGS=-i' ignores failures",
+        "'MAKEFLAGS+=-k' ignores failures",
+        "'override MAKEFLAGS:=-ik' ignores failures",
     ]
 
 
