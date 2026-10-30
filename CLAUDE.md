@@ -19,9 +19,9 @@ Tagline: *Know your client before the call.*
 
 ## Commands
 
-- `make up` / `make down` — Postgres with pgvector via Docker Compose
-- `make test` — ruff check, ruff format --check, pytest (offline)
-- `make lint-test` — what CI's lint-test job runs: `make test`, which also scans the branch's commits for secrets
+- `make up` / `make down` — Postgres with pgvector via Docker Compose, on 127.0.0.1:55432; `make migrate` — apply db/migrations as the migration role
+- `make test` — ruff check, ruff format --check, pytest (offline; tests/db needs `make up` and `make migrate` first)
+- `make lint-test` — what CI's lint-test job runs: `make up`, `make migrate`, then `make test`, which also scans the branch's commits for secrets
 - `make audit` — re-resolve the lock, then pip-audit over it with hashes (needs the network)
 - `make docker-build` — build the image and smoke-test it (non-root, 127.0.0.1 only, plaintext refused)
 - `make web-test` — the Playwright smoke test in Chromium; `make web-deps` installs Chromium first

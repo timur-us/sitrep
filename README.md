@@ -8,6 +8,10 @@
 
 Status: M0 in progress. See `docs/brief.md`, `docs/threat-model.md`, `docs/discovery.md` and `redteam/SCOPE.md`. Decisions are recorded in `docs/decisions/` (ADRs).
 
+## Local database
+
+`make up` starts PostgreSQL 17 with pgvector in Docker Compose, `make migrate` applies `db/migrations` as the migration role, and `make test` needs both. The database uses trust auth for all connections into the container, reachable only through a 127.0.0.1 publish (port 55432): a local convenience for synthetic data. Azure is Entra-only from M3. On Linux, use Docker Engine 28 or later; earlier engines expose localhost-published ports to the local network segment. To see the server, run `docker compose exec db psql -U postgres -d sitrep -c 'SELECT version()'` (PostgreSQL 17.11). Roles and migrations: ADR 0008 and `docs/runbooks/local-setup.md`.
+
 ## What this project shows, and what it does not
 
 This section is a promise for the finished project. Each item names the milestone that delivers it; until then it is a plan, not a result.

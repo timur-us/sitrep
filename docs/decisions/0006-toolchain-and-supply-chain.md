@@ -28,7 +28,7 @@ SITREP (situation report) handles client data and an API key, so every dependenc
 - **Tests offline:** pytest-socket 0.8.1 with `--disable-socket --allow-hosts=127.0.0.1,::1`; plugins load by name only (`--disable-plugin-autoload -p pytest_socket`).
 - **Browser test:** Playwright for Python; `playwright install chromium` without `--with-deps`, which would run apt as root.
 - **Pins:** actions by full commit SHA (and the repository setting that requires it), images by `@sha256:` digest.
-- **Dependabot:** `github-actions`, `uv`, `docker`; weekly, grouped, `cooldown: default-days: 7` (question 7), above Dependabot's default of 3 days. Security updates are not delayed.
+- **Dependabot:** `github-actions`, `uv`, `docker`, and `docker-compose` (PR 5a); weekly, grouped, `cooldown: default-days: 7` (question 7), above Dependabot's default of 3 days. Security updates are not delayed.
 
 ## Consequences
 

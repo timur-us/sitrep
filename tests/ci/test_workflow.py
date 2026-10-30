@@ -316,7 +316,8 @@ def test_planted_raw_text_is_caught(line: str, needle: str) -> None:
     assert any(needle in item for item in found), found
 
 
-ECOSYSTEMS = {"github-actions", "uv", "docker"}
+# docker-compose: the pgvector image in compose.yaml (PR 5a).
+ECOSYSTEMS = {"github-actions", "uv", "docker", "docker-compose"}
 UPDATE_KEYS = {"package-ecosystem", "directory", "schedule", "cooldown", "groups"}
 
 
