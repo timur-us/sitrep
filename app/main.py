@@ -58,12 +58,13 @@ def create_app(
             "TRACE_PLAINTEXT=1 is allowed with the default console exporter only"
         )
 
+    # Lazy (app/db/session.py): opening the pool connects nobody, so the app starts and
+    # answers /health with the database down. The first routes to use it arrive in PR 7.
     pool = session.make_pool(settings.database_url)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # NAIVE (PR 5b, commit 1): waits for the database before serving.
-        pool.open(wait=True)
+        pool.open()
         try:
             yield
         finally:

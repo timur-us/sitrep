@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Timur, 2026-10-28, in the M0 plan; recorded and amended by its review in M0 PR 5a).
+Accepted (Timur, 2026-10-28, in the M0 plan; recorded and amended by its review in M0 PR 5a; completed in PR 5b).
 
 ## Date
 
@@ -32,11 +32,8 @@ The third option: roles and runner in PR 5a; tables, policies and pool in PR 5b.
 
   The superuser creates `vector` (not trusted) and owns `public`. PUBLIC loses CONNECT on `postgres` and `template1`, and the large-object creators. The owner's future functions and types are not PUBLIC (default privileges).
 - **Migrations:** numbered SQL files, forward only, applied by `python -P -m app.db.migrate`. The runner refuses any login but the migrator and records sha256, `session_user` and `current_user` per file. A changed or missing applied file stops the run before any DDL. New files run in one transaction, under a lock; a file that ends it, or changes role or `search_path`, is refused unrecorded (detected, not prevented).
-- **For PR 5b, decided here:**
-  - the advisor context is `SELECT set_config('app.advisor_id', %s, true)` inside a real `BEGIN`, the bindable form of `SET LOCAL`;
-  - primary keys `(advisor_id, id)`, and `advisor_id` in every unique index (closing the referential-integrity channel);
-  - the app role gets `SELECT` only in M0;
-  - pool callbacks reject any connection but the app role, attribute- and membership-free, advisor setting empty.
+- **Row-level security:** ENABLE and FORCE everywhere, one policy on `NULLIF(current_setting('app.advisor_id', true), '')`; `advisor_id` in every key and unique index (no referential-integrity channel); app role `SELECT` only in M0. The advisor: `set_config('app.advisor_id', %s, true)` in a real `BEGIN`, the bindable `SET LOCAL`.
+- **Pool:** `psycopg-pool` 3.3.3, lazy, on `connect()`'s connection class; a guard at connect and checkout closes any session but the clean app role.
 - **Local port:** 55432, not 5432, where a native PostgreSQL may answer (Timur, 2026-10-30).
 
 ## Consequences
@@ -44,8 +41,8 @@ The third option: roles and runner in PR 5a; tables, policies and pool in PR 5b.
 - **Easier:** readable SQL, checked by `tests/db/` as each role; each migration hashed and attributed.
 - **Harder:** hand-written SQL, our own runner, no down migrations. Trust auth lets any local process connect as any role, the superuser too.
 - **Watch:**
-  - placeholder settings are USERSET: SQL injection could call `set_config` (5b's residual risk);
-  - a role can `ALTER ROLE` its own defaults; 5b's checkout guard checks the session;
+  - injected SQL could still call `set_config` mid-transaction (USERSET; threat model);
+  - a self-`ALTER ROLE` makes the guard refuse all connections: an outage;
   - M3's Entra token must reach `connect()` as an allowed option, not in the URL;
   - Azure has pgvector 0.8.2, here 0.8.7;
   - pip-audit does not see CVEs in the libpq and OpenSSL that psycopg-binary bundles: treat its bumps as security updates.
@@ -56,3 +53,4 @@ The third option: roles and runner in PR 5a; tables, policies and pool in PR 5b.
 - `docs/threat-model.md`, path 2 (2026-10-27).
 - PostgreSQL 17 documentation, `GRANT` (membership options `INHERIT` and `SET`) and libpq's environment variables, https://www.postgresql.org/docs/17/. The behaviour relied on here is measured in `tests/db/` on `pgvector/pgvector:0.8.7-pg17-bookworm` (PostgreSQL 17.11) with psycopg 3.3.6 and libpq 18 (2026-10-30).
 - psycopg 3.3.6 on PyPI, uploaded 2026-09-18, https://pypi.org/project/psycopg/ (lock resolved 2026-10-30).
+- psycopg-pool 3.3.3 on PyPI, uploaded 2026-09-22, https://pypi.org/project/psycopg-pool/ (locked 2026-10-31); its `pool.py` read for how `connection_class`, `configure` and `check` are called.

@@ -16,6 +16,8 @@ DATABASE = SLUG
 SCHEMA = SLUG
 # The runner's bookkeeping, outside the app schema; the app role has no grant on it.
 META_SCHEMA = f"{SLUG}_meta"
+# Each login role's search_path in the app database, as db/init/00-roles.sql sets it.
+SEARCH_PATH = f"{SCHEMA}, public"
 
 # NOLOGIN; owns the database, the schemas and everything in them.
 OWNER_ROLE = f"{SLUG}_owner"

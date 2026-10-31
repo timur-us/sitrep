@@ -226,6 +226,24 @@ def test_app_role_cannot_put_the_advisor_setting_in_its_defaults(
         app.execute(statement)
 
 
+def test_revoke_set_on_parameter_does_not_stop_set_config(superuser: Connection) -> None:
+    # Measured on PostgreSQL 17: the residual risk in docs/threat-model.md. REVOKE leaves
+    # no ACL entry for a placeholder setting, and the app role still sets it.
+    with as_app(
+        superuser,
+        sql.SQL("REVOKE SET ON PARAMETER app.advisor_id FROM PUBLIC"),
+        sql.SQL("REVOKE ALL ON PARAMETER app.advisor_id FROM {}").format(identifier(APP)),
+    ) as conn:
+        acl = conn.execute(
+            "SELECT count(*) FROM pg_parameter_acl WHERE parname = 'app.advisor_id'"
+        ).fetchone()
+        forged = conn.execute(
+            "SELECT current_user, set_config('app.advisor_id', %s, true)", (OTHER.id,)
+        ).fetchone()
+    assert acl == (0,), acl
+    assert forged == (APP, OTHER.id), forged
+
+
 @pytest.mark.parametrize(
     "statement",
     [
