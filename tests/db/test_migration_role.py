@@ -28,6 +28,9 @@ pytestmark = pytest.mark.usefixtures("database")
 
 PROBE = f"{names.SCHEMA}.migration_probe"
 PROBE_ID = sql.Identifier(names.SCHEMA, "migration_probe")
+# The planted files take the numbers after the real migrations.
+NEXT = f"{len(migrate.load(migrate.MIGRATIONS)) + 1:04d}"
+AFTER_NEXT = f"{int(NEXT) + 1:04d}"
 
 # rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, rolreplication, rolbypassrls
 ROLES = {
@@ -110,7 +113,7 @@ def _copy_with(tmp_path: Path, **files: str) -> Path:
 
 
 def _copy_with_probe(tmp_path: Path) -> Path:
-    return _copy_with(tmp_path, **{"0002_probe.sql": f"CREATE TABLE {PROBE} (id int);\n"})
+    return _copy_with(tmp_path, **{f"{NEXT}_probe.sql": f"CREATE TABLE {PROBE} (id int);\n"})
 
 
 def _probe_absent(superuser: Connection) -> bool:
@@ -125,7 +128,7 @@ def test_migrate_refuses_the_app_role(
     before = applied(superuser)
     with pytest.raises(psycopg.errors.InsufficientPrivilege, match="permission denied to set role"):
         migrate.run(settings.database_url, _copy_with_probe(tmp_path))
-    assert _probe_absent(superuser), "0002 ran as the app role"
+    assert _probe_absent(superuser), f"{NEXT} ran as the app role"
     assert applied(superuser) == before
 
 
@@ -134,7 +137,7 @@ def test_migrate_refuses_the_superuser(tmp_path: Path, superuser: Connection) ->
     before = applied(superuser)
     with pytest.raises(migrate.MigrationError, match=f"are \\('{SUPERUSER}', "):
         migrate.run(SUPERUSER_URL, _copy_with_probe(tmp_path))
-    assert _probe_absent(superuser), "0002 ran as the superuser"
+    assert _probe_absent(superuser), f"{NEXT} ran as the superuser"
     assert applied(superuser) == before
 
 
@@ -176,7 +179,7 @@ def test_changed_applied_file_stops_the_run(
     before = applied(superuser)
     assert migrate.main(["--migrations", str(directory)]) == 1
     assert "0001_schema.sql changed after it was applied" in capsys.readouterr().err
-    assert _probe_absent(superuser), "0002 ran"
+    assert _probe_absent(superuser), f"{NEXT} ran"
     assert applied(superuser) == before
 
 
@@ -189,7 +192,7 @@ def test_missing_applied_file_stops_the_run(
     before = applied(superuser)
     assert migrate.main(["--migrations", str(directory)]) == 1
     assert "0001_schema.sql was applied and is no longer on disk" in capsys.readouterr().err
-    assert _probe_absent(superuser), "0002 ran"
+    assert _probe_absent(superuser), f"{NEXT} ran"
     assert applied(superuser) == before
 
 
@@ -200,14 +203,14 @@ def test_a_failing_file_rolls_back_the_whole_run(
     directory = _copy_with(
         tmp_path,
         **{
-            "0002_probe.sql": f"CREATE TABLE {PROBE} (id int);\n",
-            "0003_fails.sql": "SELECT 1/0;\n",
+            f"{NEXT}_probe.sql": f"CREATE TABLE {PROBE} (id int);\n",
+            f"{AFTER_NEXT}_fails.sql": "SELECT 1/0;\n",
         },
     )
     before = applied(superuser)
     assert migrate.main(["--migrations", str(directory)]) == 1
     assert "DivisionByZero" in capsys.readouterr().err
-    assert _probe_absent(superuser), "0002 stayed although 0003 failed"
+    assert _probe_absent(superuser), f"{NEXT} stayed although {AFTER_NEXT} failed"
     assert applied(superuser) == before
 
 
@@ -230,11 +233,11 @@ def test_a_file_that_escapes_the_run_is_refused(
     text: str,
     message: str,
 ) -> None:
-    directory = _copy_with(tmp_path, **{"0002_escape.sql": text + "\n"})
+    directory = _copy_with(tmp_path, **{f"{NEXT}_escape.sql": text + "\n"})
     before = applied(superuser)
     assert migrate.main(["--migrations", str(directory)]) == 1
     err = capsys.readouterr().err
-    assert f"0002_escape.sql {message}" in err, err
+    assert f"{NEXT}_escape.sql {message}" in err, err
     assert applied(superuser) == before, "the escaping file was recorded"
 
 

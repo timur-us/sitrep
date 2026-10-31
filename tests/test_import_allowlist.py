@@ -24,6 +24,7 @@ ALLOWED = frozenset(
         "app",
         "argparse",
         "collections",
+        "contextlib",
         "dataclasses",
         "enum",
         "errno",
@@ -40,6 +41,9 @@ ALLOWED = frozenset(
         # The database driver (ADR 0008). It connects on its own, so this scan does not
         # see where; app/db/connect.py is the only place that opens a connection.
         "psycopg",
+        # The connection pool (ADR 0008). It opens connections itself, through the
+        # connection class app/db/session.py gives it (tests/db/test_pool.py).
+        "psycopg_pool",
         "pydantic",
         "pydantic_settings",
         "re",
