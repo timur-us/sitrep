@@ -26,15 +26,17 @@ from contextlib import contextmanager
 import psycopg
 import pytest
 from dbtools import SUPERUSER, Connection
+from fastapi.testclient import TestClient
 from psycopg import sql
 from psycopg.pq import TransactionStatus
 from psycopg_pool import ConnectionPool, PoolTimeout
 from seed_rows import MINE, OTHER
 
-from app.auth.identity import VerifiedAdvisor
+from app.auth.identity import issue
 from app.config.settings import Settings, loopback_database_url
 from app.db import names, session
-from app.db.connect import connect
+from app.db.connect import CheckedConnection, connect
+from app.main import create_app
 
 pytestmark = pytest.mark.usefixtures("database")
 
@@ -107,7 +109,7 @@ def test_pool_rejects_wrong_role(role: str, caplog: pytest.LogCaptureFixture) ->
         caplog.at_level(logging.INFO, logger="psycopg.pool"),
         session.make_pool(url, max_size=1, timeout=REFUSED_TIMEOUT) as pool,
         pytest.raises(PoolTimeout),
-        session.advisor_transaction(pool, VerifiedAdvisor(MINE.id)) as conn,
+        session.advisor_transaction(pool, issue(MINE.id)) as conn,
     ):
         who = conn.execute("SELECT current_user").fetchone()[0]
         pytest.fail(f"pool accepted a {who} connection")
@@ -163,6 +165,29 @@ PLANTED = [
         [sql.SQL("SELECT set_config('app.advisor_id', {}, false)").format(sql.Literal(OTHER.id))],
         "app.advisor_id is set outside an advisor transaction",
     ),
+    # Review findings test-7 and sec-3.
+    (
+        "a default for all roles",
+        [sql.SQL("ALTER ROLE ALL SET statement_timeout = 0")],
+        f"role settings of {APP} differ from db/init/00-roles.sql",
+    ),
+    (
+        "a default for this database",
+        [alter("ALTER DATABASE {} SET statement_timeout = 0", names.DATABASE)],
+        f"role settings of {APP} differ from db/init/00-roles.sql",
+    ),
+    ("replication", [alter("ALTER ROLE {} REPLICATION", APP)], f"{APP} has REPLICATION"),
+    (
+        "another session-level setting",
+        [sql.SQL("SELECT set_config('row_security', 'off', false)")],
+        "session-level settings: row_security",
+    ),
+    (
+        "a held cursor",
+        [sql.SQL("DECLARE guard_probe CURSOR WITH HOLD FOR SELECT 1")],
+        "open cursors: 1",
+    ),
+    ("an advisory lock", [sql.SQL("SELECT pg_advisory_lock(4242)")], "advisory locks held: 1"),
 ]
 
 
@@ -192,6 +217,17 @@ def test_guard_reports_a_foreign_search_path(superuser: Connection) -> None:
     assert found == [f"search_path is not {names.SCHEMA}, public"], found
 
 
+def test_guard_reports_a_session_that_switched_role(superuser: Connection) -> None:
+    # session_user and current_user are compared both (review finding test-7).
+    with superuser.transaction(force_rollback=True):
+        superuser.execute(sql.SQL("SET LOCAL ROLE {}").format(identifier(APP)))
+        superuser.execute(
+            sql.SQL("SET LOCAL search_path = {}, public").format(identifier(names.SCHEMA))
+        )
+        found = session.problems(superuser)
+    assert found == [f"session_user {SUPERUSER}, current_user {APP}, expected {APP}"], found
+
+
 @pytest.mark.parametrize("role", [SUPERUSER, names.MIGRATOR_ROLE])
 def test_guard_reports_another_login(role: str) -> None:
     with connect(loopback_database_url(role), autocommit=True) as conn:
@@ -199,15 +235,52 @@ def test_guard_reports_another_login(role: str) -> None:
     assert f"session_user {role}, current_user {role}, expected {APP}" in found, found
 
 
-def test_guard_sees_the_app_roles_own_alter_role(settings: Settings) -> None:
-    # What SQL injection as the app role could do to every later connection.
+@pytest.mark.parametrize("scope", ["", " IN DATABASE {db}"], ids=["all databases", "this database"])
+@pytest.mark.parametrize(
+    "setting", ["search_path = public", "row_security = off", "statement_timeout = 1000"]
+)
+def test_guard_sees_the_app_roles_own_alter_role(
+    settings: Settings, scope: str, setting: str
+) -> None:
+    # What SQL injection as the app role could do to every later connection: measured,
+    # the role may change these defaults of its own.
+    statement = sql.SQL("ALTER ROLE {app}" + scope + " SET " + setting).format(
+        app=identifier(APP), db=identifier(names.DATABASE)
+    )
     with (
         connect(settings.database_url, autocommit=True) as app,
         app.transaction(force_rollback=True),
     ):
-        app.execute(alter("ALTER ROLE {} SET search_path = public", APP))
+        app.execute(statement)
         found = session.problems(app)
     assert found == [f"role settings of {APP} differ from db/init/00-roles.sql"], found
+
+
+@pytest.mark.parametrize(
+    ("statements", "problem"),
+    [
+        (["LISTEN guard_probe"], "listening on channels: 1"),
+        (["SELECT pg_advisory_lock(4243)"], "advisory locks held: 1"),
+        (
+            ["BEGIN", "DECLARE guard_probe CURSOR WITH HOLD FOR SELECT 1", "COMMIT"],
+            "open cursors: 1",
+        ),
+        (
+            ["SELECT set_config('statement_timeout', '1000', false)"],
+            "session-level settings: statement_timeout",
+        ),
+    ],
+    ids=["listen", "advisory lock", "held cursor", "session-level setting"],
+)
+def test_guard_sees_session_state_of_the_app_role(
+    settings: Settings, statements: list[str], problem: str
+) -> None:
+    # State that outlives a transaction (review finding sec-3), left by the app role.
+    with connect(settings.database_url, autocommit=True) as app:
+        for statement in statements:
+            app.execute(statement)
+        found = session.problems(app)
+    assert found == [problem], found
 
 
 @pytest.mark.parametrize("scope", ["", " IN DATABASE {db}"])
@@ -245,18 +318,34 @@ def test_revoke_set_on_parameter_does_not_stop_set_config(superuser: Connection)
 
 
 @pytest.mark.parametrize(
-    "statement",
+    "statements",
     [
-        sql.SQL("SELECT set_config('app.advisor_id', {}, false)").format(sql.Literal(OTHER.id)),
-        sql.SQL("SET search_path = public"),
+        [sql.SQL("SELECT set_config('app.advisor_id', {}, false)").format(sql.Literal(OTHER.id))],
+        [sql.SQL("SET search_path = public")],
+        [sql.SQL("SELECT set_config('row_security', 'off', false)")],
+        [sql.SQL("LISTEN guard_probe")],
+        [sql.SQL("SELECT pg_advisory_lock(4244)")],
+        [
+            sql.SQL("BEGIN"),
+            sql.SQL("DECLARE guard_probe CURSOR WITH HOLD FOR SELECT 1"),
+            sql.SQL("COMMIT"),
+        ],
     ],
-    ids=["session-level advisor setting", "session-level search_path"],
+    ids=[
+        "session-level advisor setting",
+        "session-level search_path",
+        "session-level row_security",
+        "listen",
+        "advisory lock",
+        "held cursor",
+    ],
 )
 def test_session_level_change_is_rejected_at_checkout(
-    app_pool: ConnectionPool, statement: sql.Composable
+    app_pool: ConnectionPool, statements: list[sql.Composable]
 ) -> None:
     with app_pool.connection() as conn:
-        conn.execute(statement)
+        for statement in statements:
+            conn.execute(statement)
         first, pid = conn, conn.info.backend_pid
     with app_pool.connection() as conn:
         again = conn.info.backend_pid
@@ -267,7 +356,7 @@ def test_session_level_change_is_rejected_at_checkout(
 
 
 def test_advisor_transaction_is_a_real_transaction(app_pool: ConnectionPool) -> None:
-    with session.advisor_transaction(app_pool, VerifiedAdvisor(MINE.id)) as conn:
+    with session.advisor_transaction(app_pool, issue(MINE.id)) as conn:
         status = conn.info.transaction_status
         inside = conn.execute(SETTING).fetchone()[0]
         pid = conn.info.backend_pid
@@ -295,7 +384,69 @@ def test_advisor_transaction_takes_an_idle_connection_only(settings: Settings) -
         conn.execute("BEGIN")
         with (
             pytest.raises(session.GuardError, match="not idle"),
-            session.advisor_transaction(OneConnection(conn), VerifiedAdvisor(MINE.id)),
+            session.advisor_transaction(OneConnection(conn), issue(MINE.id)),
         ):
             pytest.fail("the advisor transaction ran inside another transaction")
         conn.execute("ROLLBACK")
+
+
+# check() itself (review finding test-7).
+
+
+def test_check_closes_a_connection_that_is_not_idle(settings: Settings) -> None:
+    conn = connect(settings.database_url, autocommit=True)
+    conn.execute("BEGIN")
+    with pytest.raises(session.GuardError, match="not idle"):
+        session.check(conn)
+    assert conn.closed
+
+
+def test_check_closes_a_rejected_connection() -> None:
+    conn = connect(loopback_database_url(SUPERUSER), autocommit=True)
+    with pytest.raises(session.GuardError, match=f"current_user {SUPERUSER}"):
+        session.check(conn)
+    assert conn.closed
+
+
+def test_check_closes_the_connection_when_its_query_fails(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(conn: Connection) -> list[str]:
+        raise RuntimeError("guard query failed")
+
+    monkeypatch.setattr(session, "problems", broken)
+    conn = connect(settings.database_url, autocommit=True)
+    with pytest.raises(RuntimeError, match="guard query failed"):
+        session.check(conn)
+    assert conn.closed
+
+
+def test_check_passes_a_clean_connection(settings: Settings) -> None:
+    with connect(settings.database_url, autocommit=True) as conn:
+        session.check(conn)
+        assert not conn.closed
+
+
+def test_an_error_inside_the_advisor_transaction_leaves_nothing(app_pool: ConnectionPool) -> None:
+    # Review finding test-8: the transaction rolls back, and the connection is reused clean.
+    with (
+        pytest.raises(psycopg.errors.DivisionByZero),
+        session.advisor_transaction(app_pool, issue(MINE.id)) as conn,
+    ):
+        pid = conn.info.backend_pid
+        conn.execute("SELECT 1 / 0")
+    with app_pool.connection() as conn:
+        assert conn.info.backend_pid == pid
+        assert conn.info.transaction_status == TransactionStatus.IDLE
+        assert conn.execute(SETTING).fetchone()[0] in (None, "")
+
+
+def test_the_app_opens_and_closes_its_pool(settings: Settings) -> None:
+    # Review finding test-9: the lifespan's pool works with the database up.
+    app = create_app(settings)
+    with TestClient(app):
+        pool = app.state.pool
+        with pool.connection() as conn:
+            assert conn.execute("SELECT current_user").fetchone() == (APP,)
+        assert isinstance(conn, CheckedConnection)
+    assert pool.closed

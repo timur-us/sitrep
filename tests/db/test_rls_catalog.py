@@ -14,6 +14,7 @@ for another advisor cannot be probed through a unique or foreign-key violation.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 
 import pytest
 from dbtools import Connection, column
@@ -140,55 +141,112 @@ def test_one_canonical_policy_per_table(app: Connection) -> None:
     assert not wrong, "\n".join(wrong)
 
 
-def test_grants_on_tables_are_select_only(app: Connection) -> None:
-    rows = app.execute(
-        "SELECT n.nspname || '.' || c.relname, c.relkind, c.relacl::text[]"
-        " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
-        " WHERE n.nspname = ANY(%s) AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')"
-        " ORDER BY 1",
-        ([names.SCHEMA, names.META_SCHEMA],),
-    ).fetchall()
-    tables = {name for name, kind, _ in rows if name.startswith(f"{names.SCHEMA}.")}
-    assert tables == TABLES, f"relations in {names.SCHEMA}: {sorted(tables)}"
+SCHEMAS = [names.SCHEMA, names.META_SCHEMA]
+RELATION_ACLS = (
+    "SELECT n.nspname || '.' || c.relname, c.relacl::text[]"
+    " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE n.nspname = ANY(%s) AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') ORDER BY 1"
+)
+HELD = (
+    "SELECT has_table_privilege(c.oid, %s) FROM pg_class c"
+    " JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname || '.' || c.relname = %s"
+)
+COLUMN_GRANTS = (
+    "SELECT c.relname || '.' || a.attname FROM pg_attribute a"
+    " JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE n.nspname = ANY(%s) AND a.attacl IS NOT NULL"
+)
+USABLE_SEQUENCES = (
+    "SELECT n.nspname || '.' || c.relname FROM pg_class c"
+    " JOIN pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE c.relkind = 'S' AND n.nspname NOT LIKE %s AND n.nspname <> 'information_schema'"
+    " AND (has_sequence_privilege(c.oid, 'USAGE') OR has_sequence_privilege(c.oid, 'SELECT')"
+    " OR has_sequence_privilege(c.oid, 'UPDATE'))"
+)
+EXECUTABLE = (
+    "SELECT p.oid::regprocedure::text FROM pg_proc p"
+    " JOIN pg_namespace n ON n.oid = p.pronamespace"
+    " WHERE n.nspname = ANY(%s) AND has_function_privilege(p.oid, 'EXECUTE')"
+)
+USABLE_TYPES = (
+    "SELECT t.oid::regtype::text FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace"
+    " WHERE n.nspname = ANY(%s) AND has_type_privilege(t.oid, 'USAGE')"
+)
+SECURITY_DEFINER = (
+    "SELECT p.oid::regprocedure::text FROM pg_proc p"
+    " JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.prosecdef"
+    " AND n.nspname NOT LIKE %s AND n.nspname <> 'information_schema'"
+)
+# A table's row type, and its array type, cannot be revoked (see below).
+ROW_TYPES = {table.rpartition(".")[2] for table in TABLES} | {RECORD}
+ROW_TYPES |= {f"{name}[]" for name in ROW_TYPES}
+
+
+def grant_problems(conn: Connection) -> list[str]:
+    """Grants on the schemas' relations and columns beyond SELECT on the tables, as the
+    connected role holds them."""
+    rows = conn.execute(RELATION_ACLS, (SCHEMAS,)).fetchall()
     wrong = []
-    for name, _, acl in rows:
+    for name, acl in rows:
         if name in TABLES and set(acl or []) != TABLE_ACL:
             wrong.append(f"{name}: relacl {acl}, expected {sorted(TABLE_ACL)}")
-        held = [
-            privilege
-            for privilege in TABLE_PRIVILEGES
-            if app.execute(
-                "SELECT has_table_privilege(c.oid, %s) FROM pg_class c"
-                " JOIN pg_namespace n ON n.oid = c.relnamespace"
-                " WHERE n.nspname || '.' || c.relname = %s",
-                (privilege, name),
-            ).fetchone()[0]
-        ]
+        held = [p for p in TABLE_PRIVILEGES if conn.execute(HELD, (p, name)).fetchone()[0]]
         expected = ["SELECT"] if name in TABLES else []
         if held != expected:
             wrong.append(f"{APP} holds {held} on {name}, expected {expected}")
+    wrong += [f"column-level grant: {item}" for item in column(conn, COLUMN_GRANTS, (SCHEMAS,))]
+    return wrong
+
+
+def test_grants_on_tables_are_select_only(app: Connection) -> None:
+    tables = {
+        name
+        for name, _ in app.execute(RELATION_ACLS, (SCHEMAS,)).fetchall()
+        if name.startswith(f"{names.SCHEMA}.")
+    }
+    assert tables == TABLES, f"relations in {names.SCHEMA}: {sorted(tables)}"
+    wrong = grant_problems(app)
     assert not wrong, "\n".join(wrong)
-    columns = column(
-        app,
-        "SELECT c.relname || '.' || a.attname FROM pg_attribute a"
-        " JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace"
-        " WHERE n.nspname = ANY(%s) AND a.attacl IS NOT NULL",
-        ([names.SCHEMA, names.META_SCHEMA],),
-    )
-    assert not columns, f"column-level grants: {columns}"
+
+
+@contextmanager
+def planted(superuser: Connection, *statements: str) -> Iterator[Connection]:
+    """statements run as the owner, then the session as the app role: rolled back."""
+    with superuser.transaction(force_rollback=True):
+        superuser.execute(f"SET LOCAL ROLE {OWNER}")
+        for statement in statements:
+            superuser.execute(statement)
+        superuser.execute(f"SET LOCAL ROLE {APP}")
+        superuser.execute(f"SET LOCAL search_path = {names.SCHEMA}, public")
+        yield superuser
+
+
+def test_control_extra_grants_are_seen(superuser: Connection) -> None:
+    # Review finding test-2: the grant check reports a table and a column grant.
+    mandates = f"{names.SCHEMA}.mandates"
+    with planted(
+        superuser,
+        f"GRANT UPDATE ON {mandates} TO {APP}",
+        f"GRANT INSERT (family) ON {mandates} TO {APP}",
+    ) as conn:
+        wrong = grant_problems(conn)
+    assert f"{APP} holds ['SELECT', 'UPDATE'] on {mandates}, expected ['SELECT']" in wrong, wrong
+    assert any("relacl" in item and mandates in item for item in wrong), wrong
+    assert "column-level grant: mandates.family" in wrong, wrong
 
 
 def test_no_sequence_is_usable(app: Connection) -> None:
-    usable = column(
-        app,
-        "SELECT n.nspname || '.' || c.relname FROM pg_class c"
-        " JOIN pg_namespace n ON n.oid = c.relnamespace"
-        " WHERE c.relkind = 'S' AND n.nspname NOT LIKE %s AND n.nspname <> 'information_schema'"
-        " AND (has_sequence_privilege(c.oid, 'USAGE') OR has_sequence_privilege(c.oid, 'SELECT')"
-        " OR has_sequence_privilege(c.oid, 'UPDATE'))",
-        (SYSTEM,),
-    )
+    usable = column(app, USABLE_SEQUENCES, (SYSTEM,))
     assert not usable, f"{APP} may use the sequences {usable}"
+
+
+def test_control_a_usable_sequence_is_seen(superuser: Connection) -> None:
+    sequence = f"{names.SCHEMA}.sequence_probe"
+    with planted(
+        superuser, f"CREATE SEQUENCE {sequence}", f"GRANT USAGE ON SEQUENCE {sequence} TO {APP}"
+    ) as conn:
+        found = column(conn, USABLE_SEQUENCES, (SYSTEM,))
+    assert found == [sequence], found
 
 
 def test_functions_and_types_are_not_granted(app: Connection) -> None:
@@ -196,63 +254,41 @@ def test_functions_and_types_are_not_granted(app: Connection) -> None:
     # owner's functions and types. The default does not reach a table's row type, which
     # PUBLIC may use and REVOKE cannot change; it lends no access to rows. Every other
     # type in the schemas stays closed to the app role.
-    schemas = [names.SCHEMA, names.META_SCHEMA]
-    functions = column(
-        app,
-        "SELECT p.oid::regprocedure::text FROM pg_proc p"
-        " JOIN pg_namespace n ON n.oid = p.pronamespace"
-        " WHERE n.nspname = ANY(%s) AND has_function_privilege(p.oid, 'EXECUTE')",
-        (schemas,),
-    )
+    functions = column(app, EXECUTABLE, (SCHEMAS,))
     assert not functions, f"{APP} may execute {functions}"
-    types = set(
-        column(
-            app,
-            "SELECT t.oid::regtype::text FROM pg_type t"
-            " JOIN pg_namespace n ON n.oid = t.typnamespace"
-            " WHERE n.nspname = ANY(%s) AND has_type_privilege(t.oid, 'USAGE')",
-            (schemas,),
-        )
-    )
-    row_types = {table.rpartition(".")[2] for table in TABLES} | {RECORD}
-    row_types |= {f"{name}[]" for name in row_types}
-    assert types == row_types, f"{APP} may use the types {sorted(types)}"
+    types = set(column(app, USABLE_TYPES, (SCHEMAS,)))
+    assert types == ROW_TYPES, f"{APP} may use the types {sorted(types)}"
 
 
-def test_control_a_granted_function_is_seen(superuser: Connection) -> None:
+def test_control_a_granted_function_and_type_are_seen(superuser: Connection) -> None:
     function = f"{names.SCHEMA}.grant_probe()"
-    with superuser.transaction(force_rollback=True):
-        superuser.execute(f"SET LOCAL ROLE {OWNER}")
-        superuser.execute(f"CREATE FUNCTION {function} RETURNS int LANGUAGE sql AS 'SELECT 1'")
-        superuser.execute(f"GRANT EXECUTE ON FUNCTION {function} TO {APP}")
-        superuser.execute(f"SET LOCAL ROLE {APP}")
-        superuser.execute(f"SET LOCAL search_path = {names.SCHEMA}, public")
-        found = column(
-            superuser,
-            "SELECT p.oid::regprocedure::text FROM pg_proc p"
-            " JOIN pg_namespace n ON n.oid = p.pronamespace"
-            " WHERE n.nspname = %s AND has_function_privilege(p.oid, 'EXECUTE')",
-            (names.SCHEMA,),
-        )
-    assert found == ["grant_probe()"], found
+    kind = f"{names.SCHEMA}.grant_probe_kind"
+    with planted(
+        superuser,
+        f"CREATE FUNCTION {function} RETURNS int LANGUAGE sql AS 'SELECT 1'",
+        f"GRANT EXECUTE ON FUNCTION {function} TO {APP}",
+        f"CREATE TYPE {kind} AS ENUM ('a')",
+        f"GRANT USAGE ON TYPE {kind} TO {APP}",
+    ) as conn:
+        functions = column(conn, EXECUTABLE, (SCHEMAS,))
+        types = set(column(conn, USABLE_TYPES, (SCHEMAS,)))
+    assert functions == ["grant_probe()"], functions
+    assert types - ROW_TYPES == {"grant_probe_kind", "grant_probe_kind[]"}, sorted(types)
 
 
 def test_no_security_definer_function(app: Connection) -> None:
-    found = column(
-        app,
-        "SELECT p.oid::regprocedure::text FROM pg_proc p"
-        " JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.prosecdef"
-        " AND n.nspname NOT LIKE %s AND n.nspname <> 'information_schema'",
-        (SYSTEM,),
-    )
+    found = column(app, SECURITY_DEFINER, (SYSTEM,))
     assert not found, f"SECURITY DEFINER functions: {found}"
-    # Non-vacuity: the query sees functions outside the system schemas (pgvector's).
-    total = app.execute(
-        "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
-        " WHERE n.nspname NOT LIKE %s AND n.nspname <> 'information_schema'",
-        (SYSTEM,),
-    ).fetchone()[0]
-    assert total > 0
+
+
+def test_control_a_security_definer_function_is_seen(superuser: Connection) -> None:
+    function = f"{names.SCHEMA}.definer_probe()"
+    with planted(
+        superuser,
+        f"CREATE FUNCTION {function} RETURNS int LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'",
+    ) as conn:
+        found = column(conn, SECURITY_DEFINER, (SYSTEM,))
+    assert found == ["definer_probe()"], found
 
 
 UNIQUE_INDEXES = (
@@ -276,6 +312,54 @@ def test_every_unique_index_contains_advisor_id(app: Connection) -> None:
         if "advisor_id" not in columns
     ]
     assert not wrong, "\n".join(wrong)
+
+
+# Foreign keys and exclusion constraints (review finding sec-6): a key check bypasses
+# row-level security, so each one names advisor_id, in a foreign key on both sides at the
+# same position.
+CONSTRAINTS = (
+    "SELECT c.conname, c.contype,"
+    " ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, place)"
+    "  JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum ORDER BY k.place),"
+    " ARRAY(SELECT a.attname FROM unnest(c.confkey) WITH ORDINALITY AS k(attnum, place)"
+    "  JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.attnum ORDER BY k.place)"
+    " FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace"
+    " WHERE n.nspname = %s AND c.contype IN ('f', 'x') ORDER BY 1"
+)
+
+
+def constraint_problems(rows: list[tuple]) -> list[str]:
+    wrong = []
+    for name, kind, columns, referenced in rows:
+        if "advisor_id" not in columns:
+            wrong.append(f"{name}: no advisor_id in {columns}")
+        elif kind == "f" and (
+            "advisor_id" not in referenced
+            or columns.index("advisor_id") != referenced.index("advisor_id")
+        ):
+            wrong.append(f"{name}: {columns} references {referenced}")
+    return wrong
+
+
+def test_every_key_check_contains_advisor_id(app: Connection) -> None:
+    rows = app.execute(CONSTRAINTS, (names.SCHEMA,)).fetchall()
+    foreign = [row for row in rows if row[1] == "f"]
+    assert len(foreign) == len(TABLES) - 1, f"foreign keys: {rows}"
+    wrong = constraint_problems(rows)
+    assert not wrong, "\n".join(wrong)
+
+
+def test_control_key_checks_without_advisor_id_are_seen(superuser: Connection) -> None:
+    probe = f"{names.SCHEMA}.constraint_probe"
+    with planted(
+        superuser,
+        f"CREATE TABLE {probe} (advisor_id text, other text, slot int,"
+        f" FOREIGN KEY (other) REFERENCES {names.SCHEMA}.advisors (advisor_id),"
+        " EXCLUDE USING btree (slot WITH =))",
+    ) as conn:
+        wrong = constraint_problems(conn.execute(CONSTRAINTS, (names.SCHEMA,)).fetchall())
+    assert any("constraint_probe_other_fkey: no advisor_id" in item for item in wrong), wrong
+    assert any("constraint_probe_slot_excl: no advisor_id" in item for item in wrong), wrong
 
 
 def test_every_table_has_a_required_advisor_id(app: Connection) -> None:

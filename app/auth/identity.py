@@ -13,3 +13,8 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class VerifiedAdvisor:
     advisor_id: str
+
+
+def issue(advisor_id: str) -> VerifiedAdvisor:
+    """For app/auth/ only: the advisor a verified login established."""
+    return VerifiedAdvisor(advisor_id)

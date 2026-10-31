@@ -41,7 +41,7 @@ from seed_rows import (
     table_id,
 )
 
-from app.auth.identity import VerifiedAdvisor
+from app.auth.identity import VerifiedAdvisor, issue
 from app.config.settings import Settings
 from app.db import names, queries
 from app.db.connect import connect
@@ -55,7 +55,7 @@ QUALIFIED = [f"{names.SCHEMA}.{table}" for table in FACTORIES]
 
 
 def verified(person: object) -> VerifiedAdvisor:
-    return VerifiedAdvisor(person.id)  # type: ignore[attr-defined]
+    return issue(person.id)  # type: ignore[attr-defined]
 
 
 def tables_with_factories(conn: Connection) -> list[str]:
@@ -129,6 +129,39 @@ def test_fail_closed_empty_setting_on_a_reused_connection(app_pool: ConnectionPo
             if (seen := count(conn, table))
         ]
     assert not visible, "\n".join(visible)
+
+
+def test_fail_closed_empty_advisor_id_rows_stay_hidden(superuser: Connection) -> None:
+    # Review finding test-1: rows whose advisor_id is '' stay invisible whether the setting
+    # is unset or ''. The control drops NULLIF from one policy, in the same rolled-back
+    # transaction, and the row appears: the check can fail.
+    app = sql.SQL("SET LOCAL ROLE {}").format(sql.Identifier(names.APP_ROLE))
+    problems = []
+    with superuser.transaction(force_rollback=True):
+        for table, row in rows_for("", "empty", parent="empty").items():
+            insert(superuser, f"{names.SCHEMA}.{table}", row)
+        superuser.execute(app)
+        for setting in (None, ""):
+            if setting is not None:
+                superuser.execute(SET_ADVISOR, (setting,))
+            for table in QUALIFIED:
+                if seen := count(superuser, table, ""):
+                    problems.append(
+                        f"setting {setting!r}: {seen} rows with advisor_id '' in {table}"
+                    )
+        superuser.execute("RESET ROLE")
+        superuser.execute(
+            sql.SQL(
+                "ALTER POLICY advisor_scope ON {} USING (advisor_id ="
+                " current_setting('app.advisor_id', true))"
+            ).format(table_id(QUALIFIED[0]))
+        )
+        superuser.execute(app)
+        without_nullif = count(superuser, QUALIFIED[0], "")
+    assert not problems, "\n".join(problems)
+    assert without_nullif == 1, (
+        f"control: without NULLIF the '' row is not visible ({without_nullif})"
+    )
 
 
 def test_fail_closed_owner_is_bound_by_force(owner: Connection, superuser: Connection) -> None:
@@ -269,6 +302,51 @@ def test_isolation_owner_cannot_write_for_another_advisor(owner: Connection) -> 
                         f"{outcome or changed}"
                     )
     assert not problems, "\n".join(problems)
+
+
+def test_isolation_owner_writes_its_own_rows_under_context(owner: Connection) -> None:
+    # Review finding test-4: the positive side of the owner's checks.
+    problems = []
+    with owner.transaction(force_rollback=True):
+        owner.execute(SET_ADVISOR, (MINE.id,))
+        rows = rows_for(MINE.id, "own-probe", parent="own-probe")
+        for table, row in rows.items():
+            if table == "advisors":
+                continue  # the advisor's row exists already
+            outcome, changed = attempt(owner, insert_statement(table, row), row)
+            if (outcome, changed) != (None, 1):
+                problems.append(f"insert of {MINE.name}'s own {table} row: {outcome or changed}")
+        for table, row in rows.items():
+            column, value = key_of(table, row)
+            where = sql.SQL(" WHERE advisor_id = %s AND {} = %s").format(sql.Identifier(column))
+            update = sql.SQL("UPDATE {} SET advisor_id = advisor_id").format(table_id(table))
+            outcome, changed = attempt(owner, update + where, (MINE.id, value))
+            if (outcome, changed) != (None, 1):
+                problems.append(f"update of {MINE.name}'s own {table} row: {outcome or changed}")
+        for table, row in reversed(rows.items()):
+            if table == "advisors":
+                continue
+            column, value = key_of(table, row)
+            where = sql.SQL(" WHERE advisor_id = %s AND {} = %s").format(sql.Identifier(column))
+            delete = sql.SQL("DELETE FROM {}").format(table_id(table))
+            outcome, changed = attempt(owner, delete + where, (MINE.id, value))
+            if (outcome, changed) != (None, 1):
+                problems.append(f"delete of {MINE.name}'s own {table} row: {outcome or changed}")
+    assert not problems, "\n".join(problems)
+
+
+# Review finding test-5: ids no login should produce still fail closed, and are compared
+# as exact text.
+ODD_IDS = ["nobody", "", "%", "_" + MINE.id[1:], MINE.id.upper(), MINE.id + " ", "x' OR '1'='1"]
+
+
+@pytest.mark.parametrize("advisor_id", ODD_IDS, ids=[f"odd-{n}" for n in range(len(ODD_IDS))])
+def test_isolation_odd_ids_see_nothing(app_pool: ConnectionPool, advisor_id: str) -> None:
+    with advisor_transaction(app_pool, issue(advisor_id)) as conn:
+        setting = conn.execute(SETTING).fetchone()[0]
+        seen = {table: count(conn, table) for table in tables_with_factories(conn)}
+    assert setting == advisor_id, setting
+    assert not any(seen.values()), seen
 
 
 # A forged parameter.

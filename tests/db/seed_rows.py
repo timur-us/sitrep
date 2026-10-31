@@ -5,8 +5,10 @@ row, which makes it the reference count. Each table the app role can read needs 
 factory in FACTORIES: the tests discover the readable tables from pg_catalog and fail
 on a table without one, so a new table cannot arrive without its fail-closed test.
 
-Every id starts with SEED and names its advisor, so the seed never collides with other
-data and the cleanup removes exactly what it inserted. Advisor ids come from branding.
+Every id starts with SEED and names its advisor, and the seed's advisor rows carry
+SEED_ADVISOR, so the seed never collides with other data and the cleanup removes
+exactly the seed. The rows are committed: the database tests assume one pytest process
+at a time (no xdist). Advisor ids come from branding.
 """
 
 from __future__ import annotations
@@ -24,6 +26,9 @@ from app.db import names
 from app.db.connect import connect
 
 SEED = "rls-seed"
+# The seed's advisor rows say so, so a run that was killed before its cleanup is
+# cleaned up by the next one (review finding test-12). Real rows never carry it.
+SEED_ADVISOR = "Seed advisor"
 # The advisors whose rows the tests compare: the demo mandate's advisor, and another.
 MINE = next(person for person in branding.ADVISORS if person.id == branding.DEMO_MANDATE.advisor_id)
 OTHER = next(person for person in branding.ADVISORS if person is not MINE)
@@ -61,7 +66,7 @@ def rows_for(advisor_id: str, suffix: str, parent: str = "1") -> dict[str, dict[
     rows with suffix `parent`, which the seed creates."""
     key = f"{SEED}-{advisor_id}"
     return {
-        "advisors": {"advisor_id": advisor_id, "display_name": f"Seed advisor {advisor_id}"},
+        "advisors": {"advisor_id": advisor_id, "display_name": f"{SEED_ADVISOR} {advisor_id}"},
         "mandates": {"advisor_id": advisor_id, "id": f"{key}-{suffix}-m", "family": "Seedfamily"},
         "documents": {
             "advisor_id": advisor_id,
@@ -114,13 +119,13 @@ def key_of(table: str, row: dict[str, Any]) -> tuple[str, Any]:
     return column, row[column]
 
 
-def cleanup(conn: Connection, advisors: list[str]) -> None:
-    """Delete every seeded row, children first, and the advisors the seed inserted."""
+def cleanup(conn: Connection) -> None:
+    """Delete every seeded row, children first."""
     for table in reversed(FACTORIES):
         if table == "advisors":
             conn.execute(
-                sql.SQL("DELETE FROM {} WHERE advisor_id = ANY(%s)").format(table_id(table)),
-                (advisors,),
+                sql.SQL("DELETE FROM {} WHERE display_name LIKE %s").format(table_id(table)),
+                (SEED_ADVISOR + " %",),
             )
         else:
             conn.execute(
@@ -133,18 +138,15 @@ def cleanup(conn: Connection, advisors: list[str]) -> None:
 def seeded_database() -> Iterator[None]:
     """One row per table for each advisor, committed; removed again afterwards."""
     with connect(SUPERUSER_URL, autocommit=True) as conn:
-        cleanup(conn, [])
-        inserted: list[str] = []
+        cleanup(conn)
         with conn.transaction():
             for person in branding.ADVISORS:
                 for table, row in rows_for(person.id, "1").items():
-                    count = insert(conn, f"{names.SCHEMA}.{table}", row, if_absent=True)
-                    if table == "advisors" and count:
-                        inserted.append(person.id)
+                    insert(conn, f"{names.SCHEMA}.{table}", row, if_absent=True)
         try:
             yield
         finally:
-            cleanup(conn, inserted)
+            cleanup(conn)
 
 
 def count(conn: Connection, table: str, advisor_id: str | None = None) -> int:

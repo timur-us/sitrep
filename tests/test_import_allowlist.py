@@ -220,6 +220,10 @@ PLANTED = [
     ("import psycopg\npsycopg.connect('x')\n", ".connect outside app/db/connect.py"),
     ("from psycopg import connect\n", "from psycopg import connect"),
     ("import psycopg\npsycopg.Connection.connect('x')\n", ".connect outside"),
+    # Review finding test-3 / sec-2: a pool built elsewhere skips CheckedConnection.
+    ("from psycopg_pool import ConnectionPool\n", "psycopg_pool outside app/db/session.py"),
+    ("import psycopg_pool\n", "psycopg_pool outside app/db/session.py"),
+    ("from psycopg_pool import NullConnectionPool as N\n", "psycopg_pool outside"),
 ]
 
 
@@ -240,6 +244,10 @@ def test_clean_code_is_not_reported() -> None:
     modules, problems = scan(source, "app/clean.py")
     assert problems == [], problems
     assert modules == {"logging", "re", "os", "app", "fastapi", "opentelemetry"}
+
+
+def test_the_pool_is_allowed_in_its_own_file() -> None:
+    assert scan("from psycopg_pool import ConnectionPool\n", "app/db/session.py")[1] == []
 
 
 def test_connect_is_allowed_in_its_own_file() -> None:

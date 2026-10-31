@@ -33,7 +33,9 @@ def closed_port() -> int:
 def test_app_starts_without_db(settings: Settings, restore_logging: None) -> None:
     url = f"postgresql://{names.APP_ROLE}@{LOOPBACK}:{closed_port()}/{names.DATABASE}"
     local = settings.model_copy(update={"port": 0, "database_url": url})
-    server = uvicorn.Server(server_config(local))
+    config = server_config(local)
+    pool = config.app.state.pool
+    server = uvicorn.Server(config)
     thread = threading.Thread(target=server.run, daemon=True)
     started = time.monotonic()
     thread.start()
@@ -52,6 +54,14 @@ def test_app_starts_without_db(settings: Settings, restore_logging: None) -> Non
         elapsed = time.monotonic() - started
         assert (response.status, body) == (200, b'{"status":"ok"}'), (response.status, body)
         assert elapsed < BUDGET, f"/health answered after {elapsed:.2f} s"
+        # Review finding test-9: lazy, not merely in the background. The pool is open and
+        # has not tried to connect anybody.
+        stats = pool.get_stats()
+        assert stats["pool_min"] == 0 and stats["pool_size"] == 0, stats
+        assert stats.get("connections_num", 0) == 0, stats
+        assert not pool.closed
     finally:
         server.should_exit = True
         thread.join(5.0)
+    assert not thread.is_alive(), "the server did not stop"
+    assert pool.closed, "the lifespan did not close the pool"

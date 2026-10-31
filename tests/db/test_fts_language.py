@@ -22,7 +22,7 @@ from psycopg_pool import ConnectionPool
 from repo_files import ROOT
 from seed_rows import MINE, SEED, insert, rows_for
 
-from app.auth.identity import VerifiedAdvisor
+from app.auth.identity import issue
 from app.db import names, queries
 from app.db.connect import connect
 from app.db.session import advisor_transaction
@@ -62,7 +62,7 @@ def language_documents(seeded: None) -> Iterator[None]:
 
 
 def search(pool: ConnectionPool, query: str, text: str) -> list[str]:
-    with advisor_transaction(pool, VerifiedAdvisor(MINE.id)) as conn:
+    with advisor_transaction(pool, issue(MINE.id)) as conn:
         return [row[1] for row in conn.execute(query, (text,)).fetchall()]
 
 
@@ -94,6 +94,16 @@ def test_fts_language_english_branch_skips_german_documents(app_pool: Connection
 
 
 @pytest.mark.usefixtures("database", "language_documents")
+def test_fts_language_german_branch_skips_english_documents(app_pool: ConnectionPool) -> None:
+    # Review finding test-6: the seeded English report says "portfolio" too.
+    english_report = rows_for(MINE.id, "1")["documents"]["id"]
+    assert english_report in search(app_pool, queries.SEARCH_DOCUMENTS_ENGLISH, "portfolio")
+    german = search(app_pool, queries.SEARCH_DOCUMENTS_GERMAN, "Portfolio")
+    assert document_id("german") in german
+    assert english_report not in german, f"the German branch found {german}"
+
+
+@pytest.mark.usefixtures("database", "language_documents")
 def test_fts_language_tsv_uses_the_documents_language(superuser: Connection) -> None:
     rows = dict(
         superuser.execute(
@@ -109,12 +119,15 @@ def test_fts_language_tsv_uses_the_documents_language(superuser: Connection) -> 
 
 @pytest.mark.usefixtures("database")
 @pytest.mark.parametrize(
-    ("lang", "error"),
-    [("french", psycopg.errors.CheckViolation), (None, psycopg.errors.NotNullViolation)],
+    ("lang", "error", "names_it"),
+    [
+        ("french", psycopg.errors.CheckViolation, ("constraint_name", "documents_lang_check")),
+        (None, psycopg.errors.NotNullViolation, ("column_name", "lang")),
+    ],
     ids=["french", "NULL"],
 )
 def test_fts_language_rejects_other_languages(
-    superuser: Connection, lang: str | None, error: type[Exception]
+    superuser: Connection, lang: str | None, error: type[Exception], names_it: tuple[str, str]
 ) -> None:
     row = rows_for(MINE.id, "fts-refused")["documents"] | {"lang": lang}
     with superuser.transaction(force_rollback=True):
@@ -130,8 +143,10 @@ def test_fts_language_rejects_other_languages(
             rows_for(MINE.id, "1")["mandates"],
             if_absent=True,
         )
-        with pytest.raises(error), superuser.transaction():
+        with pytest.raises(error) as refused, superuser.transaction():
             insert(superuser, DOCUMENTS, row)
+    field, value = names_it
+    assert getattr(refused.value.diag, field) == value, refused.value.diag
 
 
 # The scan.

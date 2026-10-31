@@ -10,11 +10,17 @@ scan reads names: construction through getattr() or type() is not caught.
 from __future__ import annotations
 
 import ast
+import copy
 import dataclasses
+import pickle
 
+import pydantic
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from repo_files import ROOT
 
+from app.auth import identity
 from app.auth.identity import VerifiedAdvisor
 from app.config import branding
 from app.config.settings import Settings
@@ -85,8 +91,15 @@ def test_verified_advisor_only_from_auth() -> None:
         "from app.auth.identity import VerifiedAdvisor as V\nV('x')\n",
         "VerifiedAdvisor.__new__(VerifiedAdvisor)\n",
         "object.__new__(VerifiedAdvisor)\n",
-        "import dataclasses\ndataclasses.replace(advisor, advisor_id='x')\n",
-        "from dataclasses import replace as r\nr(advisor, advisor_id='x')\n",
+        # Review findings sec-1 and test-11: an alias, a reference that is not a call,
+        # writing the slot, and the issuer used outside app/auth/.
+        "from app.auth.identity import VerifiedAdvisor\nV = VerifiedAdvisor\nV('x')\n",
+        "from app.auth.identity import VerifiedAdvisor\nadvisors = map(VerifiedAdvisor, ids)\n",
+        "object.__setattr__(advisor, '_advisor_id', 'x')\n",
+        "from app.auth.identity import issue\nissue('x')\n",
+        "from app.auth import identity\nidentity.issue('x')\n",
+        "import app.auth.identity\napp.auth.identity.issue('x')\n",
+        "from app.auth.identity import _ISSUER\n",
     ],
 )
 def test_planted_constructions_are_caught(source: str) -> None:
@@ -98,10 +111,13 @@ def test_uses_that_construct_nothing_pass() -> None:
         "from app.auth.identity import VerifiedAdvisor\n"
         "def f(advisor: VerifiedAdvisor) -> bool:\n"
         "    return isinstance(advisor, VerifiedAdvisor) and type(advisor) is VerifiedAdvisor\n"
+        "def g(advisors: list[VerifiedAdvisor]) -> VerifiedAdvisor | None:\n"
+        "    return None\n"
         "'a'.replace('a', 'b')\n"
     )
     assert constructions(source, "app/db/x.py") == []
     assert constructions("VerifiedAdvisor('x')\n", "app/auth/dev_shim.py") == []
+    assert constructions("from app.auth.identity import issue\nissue('x')\n", "app/auth/x.py") == []
 
 
 class LookAlike:
@@ -109,14 +125,10 @@ class LookAlike:
         self.advisor_id = advisor_id
 
 
-class Subclass(VerifiedAdvisor):
-    __slots__ = ()
-
-
 @pytest.mark.parametrize(
     "value",
-    [ADVISOR, {"advisor_id": ADVISOR}, LookAlike(ADVISOR), Subclass(ADVISOR), None],
-    ids=["str", "dict", "look-alike", "subclass", "None"],
+    [ADVISOR, {"advisor_id": ADVISOR}, LookAlike(ADVISOR), None],
+    ids=["str", "dict", "look-alike", "None"],
 )
 def test_advisor_transaction_takes_only_a_verified_advisor(
     settings: Settings, value: object
@@ -135,7 +147,62 @@ def test_advisor_transaction_takes_only_a_verified_advisor(
         pytest.fail(f"a {type(value).__name__} was accepted as the advisor")
 
 
-def test_verified_advisor_is_frozen() -> None:
-    advisor = VerifiedAdvisor(ADVISOR)
-    with pytest.raises(dataclasses.FrozenInstanceError):
+# At runtime (review finding sec-1): only issue() makes one, and nothing changes, copies,
+# subclasses or deserialises one.
+
+
+def test_only_issue_makes_a_verified_advisor() -> None:
+    advisor = identity.issue(ADVISOR)
+    assert type(advisor) is VerifiedAdvisor and advisor.advisor_id == ADVISOR
+    assert advisor == identity.issue(ADVISOR) and hash(advisor) == hash(identity.issue(ADVISOR))
+    assert ADVISOR in repr(advisor)
+    for forged in ((ADVISOR,), (ADVISOR, object()), (ADVISOR, None)):
+        with pytest.raises(TypeError, match="app/auth/"):
+            VerifiedAdvisor(*forged)
+
+
+@pytest.mark.parametrize("value", [123, None, b"x"], ids=["int", "None", "bytes"])
+def test_issue_takes_a_string(value: object) -> None:
+    with pytest.raises(TypeError):
+        identity.issue(value)  # type: ignore[arg-type]
+
+
+def test_verified_advisor_cannot_be_changed_or_copied() -> None:
+    advisor = identity.issue(ADVISOR)
+    with pytest.raises(AttributeError):
         advisor.advisor_id = "x"  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        del advisor.advisor_id  # type: ignore[misc]
+    for duplicate in (copy.copy, copy.deepcopy, pickle.dumps):
+        with pytest.raises(TypeError):
+            duplicate(advisor)
+    with pytest.raises(TypeError):
+        dataclasses.replace(advisor, advisor_id="x")  # type: ignore[type-var]
+    assert advisor.advisor_id == ADVISOR
+
+
+def test_verified_advisor_cannot_be_subclassed() -> None:
+    with pytest.raises(TypeError):
+        type("Subclass", (VerifiedAdvisor,), {"__slots__": ()})
+
+
+def test_pydantic_cannot_build_a_verified_advisor() -> None:
+    with pytest.raises(pydantic.PydanticSchemaGenerationError):
+        pydantic.TypeAdapter(VerifiedAdvisor)
+
+
+def test_a_route_cannot_take_a_verified_advisor_from_a_request() -> None:
+    # A route parameter typed VerifiedAdvisor would turn a request body into one.
+    app = FastAPI()
+    called = []
+
+    def handler(advisor: VerifiedAdvisor) -> str:
+        called.append(advisor)
+        return "ok"
+
+    try:
+        app.post("/probe")(handler)
+    except Exception:  # noqa: BLE001
+        return  # refused when the route is defined
+    response = TestClient(app).post("/probe", json={"advisor_id": ADVISOR})
+    assert not called, f"a request body became a VerifiedAdvisor ({response.status_code})"
