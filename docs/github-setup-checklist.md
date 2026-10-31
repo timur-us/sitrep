@@ -35,7 +35,7 @@ After the CI pull request is merged:
 
 ## Dependabot
 
-- [ ] Settings → Code security: enable Dependabot alerts and security updates; version updates come from `.github/dependabot.yml` (github-actions, uv, docker; weekly; grouped; 7-day cooldown). A bump of the uv image or of setup-uv alone fails CI on purpose: the uv pin is bumped by hand, in both places.
+- [ ] Settings → Code security: enable Dependabot alerts and security updates; version updates come from `.github/dependabot.yml` (github-actions, uv, docker, docker-compose; weekly; grouped; 7-day cooldown). A bump of the uv image or of setup-uv alone fails CI on purpose: the uv pin is bumped by hand, in both places.
 
 ## Anthropic key
 

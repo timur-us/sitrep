@@ -34,3 +34,15 @@ updates:
     groups:
       docker:
         patterns: ["*"]
+
+  # The pgvector image in compose.yaml (PR 5a). tests/db/test_compose.py pins its shape
+  # (pgvector on pg17, by digest), not its version.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      docker-compose:
+        patterns: ["*"]

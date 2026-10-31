@@ -17,6 +17,9 @@ from repo_files import ROOT
 # Key commands per target, as `make -n` prints them.
 TARGET_COMMANDS = {
     "lint-test": [
+        # -f names compose.yaml alone: no override file and no COMPOSE_FILE is merged in.
+        "docker compose -f compose.yaml up -d --wait",
+        "uv run python -P -m app.db.migrate",
         "uv run ruff check",
         "uv run ruff format --check",
         "uv run python -P -m pytest --ignore=tests/web",
@@ -67,6 +70,23 @@ def test_ci_target_runs_its_commands(target: str) -> None:
     out = dry_run(target)
     missing = [command for command in TARGET_COMMANDS[target] if command not in out]
     assert not missing, f"make -n {target} lacks {missing}:\n{out}"
+
+
+def test_lint_test_starts_and_migrates_the_database_before_pytest() -> None:
+    # The tests in tests/db fail, never skip, without a migrated database.
+    out = dry_run("lint-test")
+    steps = [
+        "docker compose -f compose.yaml up -d --wait",
+        "python -P -m app.db.migrate",
+        "-m pytest",
+    ]
+    positions = [out.find(step) for step in steps]
+    assert -1 not in positions and positions == sorted(positions), f"order {positions}:\n{out}"
+
+
+def test_down_deletes_the_data() -> None:
+    # db/init runs only on an empty data directory: `make down` must delete it.
+    assert "docker compose -f compose.yaml down --volumes" in dry_run("down")
 
 
 def test_web_deps_installs_chromium_without_root() -> None:

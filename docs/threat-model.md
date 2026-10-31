@@ -1,6 +1,6 @@
 # SITREP — threat model
 
-Date: 2026-10-27 · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
+Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
 Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the system prompt staying secret (Kerckhoffs).
 
 ## Assets
@@ -33,7 +33,7 @@ Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the
 | # | Path | Mitigation | When |
 |---|---|---|---|
 | 1 | Indirect prompt injection through an e-mail or document → exfiltration through a link, an image or a tool argument (LLM01, LLM02) | provenance wrapper, output allowlists, no auto-loaded images in the UI, recipient allowlist, canary scan over answers and tool arguments | **MVP** (M1 measured, M2 hardened) |
-| 2 | Cross-mandate leak through retrieval without scoping, or through a tool argument that names another advisor (LLM02) | row-level security: app role is not table owner, no BYPASSRLS, FORCE ROW LEVEL SECURITY, advisor id set per transaction with `SET LOCAL` from the verified login only | M1 test, M2 red-team case |
+| 2 | Cross-mandate leak through retrieval without scoping, or through a tool argument that names another advisor (LLM02) | row-level security: app role is not table owner, no BYPASSRLS, FORCE ROW LEVEL SECURITY, advisor id set per transaction with `SET LOCAL` from the verified login only; the role layout below it (ADR 0008) | M0 roles (PR 5a) and RLS (PR 5b), M1 test, M2 red-team case |
 | 3 | Forged identity header against the built-in auth | the app trusts only headers set by the platform after it strips client-supplied ones; a test proves a self-set `X-MS-CLIENT-PRINCIPAL` does nothing | M3 |
 | 4 | Tool misuse: draft addressed to Mallory, follow-up with malicious content, approval bypass (LLM06) | approval gate with server-issued, signed, single-use tokens; recipient allowlist; the model cannot mint an approval | M1–M2 |
 | 5 | Poisoning of the knowledge base (LLM04) | provenance, origin filters, eval case | M4 |
@@ -42,6 +42,14 @@ Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the
 | 8 | Cost denial of service through tool loops (LLM10) | max_turns, budget per request, rate limit per identity | M1 |
 | 9 | CI and identity: a PR workflow with cloud rights, an agent that assigns roles | no Azure login on pull requests; deploy only from the protected GitHub environment `production`; roles, identities and environments changed only by Timur; ruleset without bypass | M0 (ruleset, environment), M3 (OIDC) |
 | 10 | The coding agent itself: Claude Code reads the attack corpus, eval cases and fetched pages while it builds | that text is data, never instructions (CLAUDE.md rule 9); guardrail files denied for edits; ruleset, environment and push protection hold for the agent's token; no Azure login for the agent in M0 to M2; attack domains under `.example` never resolve | M0 |
+
+## Local database (M0)
+
+Path 2 rests on the role layout under the policies (ADR 0008, `tests/db/`):
+- **Three roles.** `sitrep_owner` (NOLOGIN) owns the database, the schemas and everything in them. `sitrep_migrator` holds the owner `WITH INHERIT FALSE` and acts as it only after `SET ROLE`. `sitrep_app` has no attribute and no membership, owns nothing, can create nothing (large objects included), and can connect to `sitrep` only. The owner's future functions and types are not granted to PUBLIC. The runner's record (`sitrep_meta`) is closed to the app role. A role can still change its own defaults with `ALTER ROLE … SET`, which no REVOKE prevents; PR 5b's checkout guard checks the session.
+- **Trust auth, for all connections into the container, reachable only through a 127.0.0.1 publish** (port 55432). Any local process can connect as any role, the superuser included. That is accepted for synthetic data on a developer machine and in CI, and is not a pattern for Azure, which is Entra-only from M3. On Linux, Docker Engine before 28 also exposes localhost-published ports to the local network segment, so Engine 28 or later is required.
+- **Connection strings.** Both URLs name exactly `127.0.0.1`, one host, an explicit port, the field's own role and `sitrep`, and nothing else. `connect()` refuses to run while any `PG*` variable is set, because libpq fills or overrides parameters from them (`PGPORT`, `PGHOSTADDR`, `PGSERVICE`, `PGOPTIONS`, `PGTZ` and others), and it takes no connection parameter as a keyword argument. It also pins `hostaddr` and `options` as a second line.
+- **Migrations** run only as the migrator, are recorded with their sha256 and roles, and a changed or missing applied file stops the run. A file that commits, rolls back, or changes the role or `search_path` is refused and not recorded; what it committed itself stays (detected, not prevented). Migration files are reviewed code.
 
 ## First red-team case: the EchoLeak pattern
 

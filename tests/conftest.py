@@ -8,7 +8,9 @@ The same fixture removes the proxy variables and sets NO_PROXY to "*": pytest-so
 allows loopback, so a proxy on 127.0.0.1 would turn an allowed connect into egress,
 for the test and for any subprocess it starts. It also removes every OTEL_* variable:
 the SDK and the instrumentation read them (disable tracing, exclude URLs, capture
-headers), and a test that needs one sets it itself.
+headers), and a test that needs one sets it itself. And it removes every PG* variable:
+libpq reads them for whatever a connection string leaves out, and app.db.connect refuses
+to connect while one is set (ADR 0008).
 """
 
 from __future__ import annotations
@@ -30,7 +32,11 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     fields = {name.lower() for name in Settings.model_fields}
     for name in list(os.environ):
         # pydantic-settings, like most proxy clients, matches names without regard to case.
-        if name.lower() in fields | PROXY_VARIABLES or name.upper().startswith("OTEL_"):
+        if (
+            name.lower() in fields | PROXY_VARIABLES
+            or name.upper().startswith("OTEL_")
+            or name.startswith("PG")
+        ):
             monkeypatch.delenv(name)
     monkeypatch.setenv("NO_PROXY", "*")
     monkeypatch.setenv("no_proxy", "*")

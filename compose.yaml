@@ -1,0 +1,29 @@
+# PostgreSQL 17 with pgvector, for local development and CI (ADR 0008). Synthetic data only.
+#
+# Trust auth for every connection into the container, which is reachable only through
+# the 127.0.0.1 publish below (host port 55432, so a native PostgreSQL on 5432 never
+# answers in its place): a local convenience. Any local process can connect as any
+# role, the superuser included. Azure is Entra-only from M3. On Linux, Docker Engine
+# before 28 also exposes localhost-published ports to the local network segment.
+#
+# db/init runs once, when the data directory is created; `make down` deletes the data,
+# so the next `make up` runs it again. No variables and no env file: what is written
+# here is what runs. tests/db/test_compose.py pins this file.
+name: sitrep
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.7-pg17-bookworm@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    # Over TCP, as the app role: during init the server listens on its socket only, so
+    # this answers once the real server is up and the roles exist.
+    healthcheck:
+      test: ["CMD", "psql", "-h", "127.0.0.1", "-U", "sitrep_app", "-d", "sitrep", "-c", "select 1"]
+      interval: 1s
+      timeout: 5s
+      retries: 60

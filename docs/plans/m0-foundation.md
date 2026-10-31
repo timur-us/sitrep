@@ -63,6 +63,10 @@ The PR 1 review (#3) left four handovers for later PRs. Timur accepted them on 2
 | A history scan of the PR's commits for secrets; the test job runs as non-root | PR 4 | Files, tests |
 | Data-directory non-vacuity once the directories exist (and whether `redteam/results/` joins the catalogue) | PR 4, PR 8 | Tests |
 
+### Amendment (Timur, 2026-10-30)
+
+While PR 5a was built, a native PostgreSQL turned out to listen on `*:5432` on the development machine. Timur chose host port **55432** for the compose database, so a native server can never answer in its place. The PR 5a lines below say 55432; the evidence uses `docker compose exec`, which needs no local `psql`.
+
 ## Defaults that shape every PR
 
 - **Python tooling.**
@@ -498,7 +502,7 @@ The PR 1 review (#3) left four handovers for later PRs. Timur accepted them on 2
 
 **Files.**
 - `compose.yaml`:
-  - `db` on `pgvector/pgvector:0.8.7-pg17-bookworm@sha256:ac08…a75d`, `ports: ["127.0.0.1:5432:5432"]`, `POSTGRES_HOST_AUTH_METHOD=trust`;
+  - `db` on `pgvector/pgvector:0.8.7-pg17-bookworm@sha256:ac08…a75d`, `ports: ["127.0.0.1:55432:5432"]` (amendment of 2026-10-30), `POSTGRES_HOST_AUTH_METHOD=trust`;
   - `./db/init` mounted read-only;
   - a TCP healthcheck: `psql -h 127.0.0.1 -U sitrep_app -d sitrep -c 'select 1'`;
   - no `${…}` and no `env_file:`.
@@ -518,7 +522,7 @@ The PR 1 review (#3) left four handovers for later PRs. Timur accepted them on 2
 - `app/db/names.py`.
 - Settings: `DATABASE_URL` and `MIGRATION_DATABASE_URL` must be loopback, single-host, with no `options`.
 - `Makefile`: `up` (`docker compose up -d --wait`), `down`, `migrate`; `lint-test` = `up migrate test`. These are gate paths, under the ask entry.
-- `.env.example`: `+MIGRATION_DATABASE_URL=postgresql://sitrep_migrator@127.0.0.1:5432/sitrep`.
+- `.env.example`: `+MIGRATION_DATABASE_URL=postgresql://sitrep_migrator@127.0.0.1:55432/sitrep`.
 - `.github/dependabot.yml`: `+docker-compose`, with Timur's yes.
 - `docs/decisions/0008-data-access.md`: the whole data-access design, decided here and implemented in 5a and 5b:
   - psycopg 3 and SQL migrations;
@@ -551,8 +555,8 @@ The PR 1 review (#3) left four handovers for later PRs. Timur accepted them on 2
 - `test_database_urls_are_loopback`: a non-loopback host, multiple hosts or `options` are rejected.
 
 **Evidence Timur can run.**
-- `docker compose port db 5432` → `127.0.0.1:5432`.
-- `psql -h 127.0.0.1 -U postgres sitrep -c '\du'` shows the three roles and their attributes.
+- `docker compose port db 5432` → `127.0.0.1:55432`.
+- `docker compose exec db psql -U postgres -d sitrep -c '\du'` shows the three roles and their attributes.
 - The check history shows commit 1 red with property messages.
 
 **Open questions.** None (9 and 10 answered).

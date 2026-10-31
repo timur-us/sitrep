@@ -28,12 +28,18 @@ ALLOWED = frozenset(
         "enum",
         "errno",
         "fastapi",
+        "hashlib",
         "html",
         "ipaddress",
         "json",
         "logging",
         "opentelemetry",
+        # app/db/connect.py reads os.environ; os.system, os.exec* and the like stay banned.
+        "os",
         "pathlib",
+        # The database driver (ADR 0008). It connects on its own, so this scan does not
+        # see where; app/db/connect.py is the only place that opens a connection.
+        "psycopg",
         "pydantic",
         "pydantic_settings",
         "re",
@@ -42,6 +48,7 @@ ALLOWED = frozenset(
         "sys",
         "tomllib",
         "types",
+        "typing",
         "unicodedata",
         "uvicorn",
     }
@@ -93,6 +100,9 @@ BANNED_ATTRIBUTES = frozenset(
         "urlopen",
     }
 )
+# Opening a database connection: only here, where the URL is checked and libpq's
+# environment overrides are pinned (ADR 0008).
+DB_CONNECT_FILE = "app/db/connect.py"
 # On the os module only: running or replacing a program.
 OS_PROGRAM = re.compile(r"system|popen|startfile|fork\w*|exec\w*|spawn\w*|posix_spawn\w*")
 
@@ -124,6 +134,12 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
                 dotted.add(module)
                 dotted.update(f"{module}.{alias.name}" for alias in node.names)
             for alias in node.names:
+                if (
+                    alias.name == "connect"
+                    and module.startswith("psycopg")
+                    and rel != DB_CONNECT_FILE
+                ):
+                    problems.append(f"{rel}:{node.lineno}: from {module} import connect")
                 if alias.name in BANNED_ATTRIBUTES or (
                     module == "os" and OS_PROGRAM.fullmatch(alias.name)
                 ):
@@ -132,6 +148,8 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
             on_os = isinstance(node.value, ast.Name) and node.value.id in os_names
             if node.attr in BANNED_ATTRIBUTES or (on_os and OS_PROGRAM.fullmatch(node.attr)):
                 problems.append(f"{rel}:{node.lineno}: .{node.attr}")
+            if node.attr == "connect" and rel != DB_CONNECT_FILE:
+                problems.append(f"{rel}:{node.lineno}: .connect outside {DB_CONNECT_FILE}")
         elif isinstance(node, ast.Name) and node.id in BANNED_NAMES:
             problems.append(f"{rel}:{node.lineno}: {node.id}")
     banned = {entry for name in dotted if (entry := banned_module(name))}
@@ -157,7 +175,12 @@ def test_import_allowlist() -> None:
         for path in sorted(APP.rglob("*.py"))
     }
     assert len(sources) >= 10, f"only {len(sources)} files scanned"
-    for required in ("app/main.py", "app/__main__.py", "app/observability/tracing.py"):
+    for required in (
+        "app/main.py",
+        "app/__main__.py",
+        "app/observability/tracing.py",
+        "app/db/connect.py",
+    ):
         assert required in sources, f"{required} was not scanned"
     modules, problems = check(sources)
     assert not problems, "\n".join(problems)
@@ -190,6 +213,9 @@ PLANTED = [
     ("import os as o\no.execv('x', ['x'])\n", ".execv"),
     ("from os import popen\n", "from os import popen"),
     ("eval('1')\n", ":1: eval"),
+    ("import psycopg\npsycopg.connect('x')\n", ".connect outside app/db/connect.py"),
+    ("from psycopg import connect\n", "from psycopg import connect"),
+    ("import psycopg\npsycopg.Connection.connect('x')\n", ".connect outside"),
 ]
 
 
@@ -210,3 +236,9 @@ def test_clean_code_is_not_reported() -> None:
     modules, problems = scan(source, "app/clean.py")
     assert problems == [], problems
     assert modules == {"logging", "re", "os", "app", "fastapi", "opentelemetry"}
+
+
+def test_connect_is_allowed_in_its_own_file() -> None:
+    source = "import psycopg\npsycopg.connect('x')\n"
+    assert scan(source, "app/db/connect.py")[1] == []
+    assert scan(source, "app/db/session.py")[1] != []
