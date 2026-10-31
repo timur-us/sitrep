@@ -4,7 +4,8 @@ It is exactly the app role, with no attribute and no membership; it owns nothing
 database; it can create nothing; it cannot reach the runner's schema or another
 database; and everything in the app schema and the meta schema belongs to the owner.
 Each catalog check is a function of the role, so a control runs the same query for a
-role that does hold what is checked. Row-level security (the FORCE half) is PR 5b.
+role that does hold what is checked. Row-level security (the FORCE half) is in
+test_rls_catalog.py and test_rls_rows.py.
 """
 
 from __future__ import annotations

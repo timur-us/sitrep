@@ -24,6 +24,7 @@ ALLOWED = frozenset(
         "app",
         "argparse",
         "collections",
+        "contextlib",
         "dataclasses",
         "enum",
         "errno",
@@ -40,6 +41,9 @@ ALLOWED = frozenset(
         # The database driver (ADR 0008). It connects on its own, so this scan does not
         # see where; app/db/connect.py is the only place that opens a connection.
         "psycopg",
+        # The connection pool (ADR 0008), in app/db/session.py only. It opens connections
+        # itself, through the connection class session.py gives it (tests/db/test_pool.py).
+        "psycopg_pool",
         "pydantic",
         "pydantic_settings",
         "re",
@@ -103,6 +107,9 @@ BANNED_ATTRIBUTES = frozenset(
 # Opening a database connection: only here, where the URL is checked and libpq's
 # environment overrides are pinned (ADR 0008).
 DB_CONNECT_FILE = "app/db/connect.py"
+# Building a pool: only here, where its connections go through app/db/connect.py and
+# the guard (review finding test-3 of PR 5b).
+POOL_FILE = "app/db/session.py"
 # On the os module only: running or replacing a program.
 OS_PROGRAM = re.compile(r"system|popen|startfile|fork\w*|exec\w*|spawn\w*|posix_spawn\w*")
 
@@ -152,6 +159,8 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
                 problems.append(f"{rel}:{node.lineno}: .connect outside {DB_CONNECT_FILE}")
         elif isinstance(node, ast.Name) and node.id in BANNED_NAMES:
             problems.append(f"{rel}:{node.lineno}: {node.id}")
+    if "psycopg_pool" in modules and rel != POOL_FILE:
+        problems.append(f"{rel}: psycopg_pool outside {POOL_FILE}")
     banned = {entry for name in dotted if (entry := banned_module(name))}
     problems += [f"{rel}: banned module {entry}" for entry in sorted(banned)]
     return modules, problems
@@ -216,6 +225,10 @@ PLANTED = [
     ("import psycopg\npsycopg.connect('x')\n", ".connect outside app/db/connect.py"),
     ("from psycopg import connect\n", "from psycopg import connect"),
     ("import psycopg\npsycopg.Connection.connect('x')\n", ".connect outside"),
+    # Review finding test-3 / sec-2: a pool built elsewhere skips CheckedConnection.
+    ("from psycopg_pool import ConnectionPool\n", "psycopg_pool outside app/db/session.py"),
+    ("import psycopg_pool\n", "psycopg_pool outside app/db/session.py"),
+    ("from psycopg_pool import NullConnectionPool as N\n", "psycopg_pool outside"),
 ]
 
 
@@ -236,6 +249,10 @@ def test_clean_code_is_not_reported() -> None:
     modules, problems = scan(source, "app/clean.py")
     assert problems == [], problems
     assert modules == {"logging", "re", "os", "app", "fastapi", "opentelemetry"}
+
+
+def test_the_pool_is_allowed_in_its_own_file() -> None:
+    assert scan("from psycopg_pool import ConnectionPool\n", "app/db/session.py")[1] == []
 
 
 def test_connect_is_allowed_in_its_own_file() -> None:

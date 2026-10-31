@@ -1,6 +1,6 @@
 # M0 — foundation, local: plan
 
-Date: 2026-10-28 · Status: accepted by Timur with four changes (folded in below); amended 2026-10-29 with the PR 1 review handovers (see "Amendment") · Owner: Timur · Milestone: M0, days 1–3 of `docs/brief.md`
+Date: 2026-10-28 · Status: accepted by Timur with four changes (folded in below); amended 2026-10-29 with the PR 1 review handovers, 2026-10-30 with the database port and 2026-10-31 with PR 5b's additions (see the "Amendment" sections) · Owner: Timur · Milestone: M0, days 1–3 of `docs/brief.md`
 
 ## Context
 
@@ -66,6 +66,21 @@ The PR 1 review (#3) left four handovers for later PRs. Timur accepted them on 2
 ### Amendment (Timur, 2026-10-30)
 
 While PR 5a was built, a native PostgreSQL turned out to listen on `*:5432` on the development machine. Timur chose host port **55432** for the compose database, so a native server can never answer in its place. The PR 5a lines below say 55432; the evidence uses `docker compose exec`, which needs no local `psql`.
+
+### Amendment (Timur, 2026-10-31)
+
+PR 5b (#13) carried the PR 5a review handovers and added what its own review asked for. Timur accepted these on 2026-10-31; the PR 5b, M1 and verification lines below are updated where they changed.
+
+- **The PR 5a handovers** landed in PR 5b: sec-8 (pool connections through `app/db/connect.py`), sec-12b (the guard checks `search_path` and the role settings) and sec-6 (the grant matrix covers functions and types).
+- **Additions in PR 5b:**
+  - `app/main.py` owns a lazy pool (`min_size=0`, `max_size=4`, `timeout=5.0`), opened and closed in the lifespan;
+  - `CheckedConnection` in `app/db/connect.py` carries the connection checks, so the connections psycopg_pool opens itself pass them;
+  - the guard also refuses REPLICATION, any session-level setting besides `search_path`, WITH HOLD cursors, LISTEN and advisory locks;
+  - `VerifiedAdvisor` is a plain class issued only through `app/auth/identity.issue()`; pydantic and FastAPI cannot build one.
+- **The hand check:** `count(*) FROM mandates` as the app role is 0 on empty tables with or without row-level security. A row the superuser plants in a rolled-back transaction, visible to the superuser and not to the app role, replaces it (runbook, "The database").
+- **For M1:** `hnsw.iterative_scan` must be set transaction-locally, or added to `db/init/00-roles.sql` and `ROLE_SETTINGS` in `app/db/session.py` together; otherwise the pool guard refuses every connection.
+  - **Transaction-locally** means `set_config('hnsw.iterative_scan', …, true)` inside the advisor transaction in `app/db/session.py`. That is the one file where `tests/test_sql_hygiene.py` allows `set_config`, and the scan forbids `SET LOCAL` strings in `app/`.
+  - **The role-settings route** also changes the pin in `tests/db/test_migration_role.py`, and needs `make down` before `make up`, because `db/init` runs only on an empty data directory.
 
 ## Defaults that shape every PR
 
@@ -630,7 +645,7 @@ While PR 5a was built, a native PostgreSQL turned out to listen on `*:5432` on t
 - `test_app_starts_without_db`: with the DB port closed, `/health` returns 200 within 2 s.
 
 **Evidence Timur can run.**
-- `psql -h 127.0.0.1 -U sitrep_app sitrep -c 'select count(*) from mandates'` → `0`.
+- A row the superuser plants in a rolled-back transaction: `superuser_sees 1`, `app_sees 0` (runbook, "The database"; amendment of 2026-10-31).
 - Commit 2 red with property messages in the check history, then green.
 
 **Open questions.** None (11 answered: the split).
@@ -857,7 +872,7 @@ Cut line: PR 9 moves to day 4 if needed, and M1 starts once it lands. Nothing is
 - **M1:**
   - the agent loop, the real tool handlers and retrieval, with the forged-argument test retargeted to them;
   - the loader, chunking, the ONNX embedder and `make model`;
-  - HNSW iterative-scan tests;
+  - HNSW iterative-scan tests, with `hnsw.iterative_scan` set transaction-locally or in the role settings and `ROLE_SETTINGS` together (amendment of 2026-10-31);
   - approval tokens and their contract tests;
   - the positive-path runner test with the first recorded case;
   - eval and red-team cases;
@@ -880,7 +895,7 @@ Cut line: PR 9 moves to day 4 if needed, and M1 starts once it lands. Nothing is
 - **CI:** six green checks on `main`, required by the ruleset; web-test finishes inside 10 minutes.
 - **By hand:**
   - `DEV_AUTH=1 HOST=0.0.0.0 uv run python -P -m app` exits 2;
-  - `psql` as `sitrep_app` without a context counts zero mandates;
+  - a row the superuser plants in a rolled-back transaction is invisible to `sitrep_app` without a context;
   - `curl` with a query string leaves no trace in spans or logs;
   - `curl /health/` gives 404.
 

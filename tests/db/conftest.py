@@ -12,8 +12,11 @@ from collections.abc import Iterator
 import psycopg
 import pytest
 from dbtools import SUPERUSER_URL, Connection
+from psycopg_pool import ConnectionPool
+from seed_rows import seeded_database
 
-from app.config.settings import DATABASE_PORT
+from app.config.settings import DATABASE_PORT, Settings
+from app.db import session
 from app.db.connect import connect
 from app.db.migrate import RECORD
 
@@ -37,3 +40,17 @@ def database() -> None:
 def superuser(database: None) -> Iterator[Connection]:
     with connect(SUPERUSER_URL, autocommit=True) as conn:
         yield conn
+
+
+@pytest.fixture(scope="session")
+def seeded(database: None) -> Iterator[None]:
+    """One row per mandate-scoped table for each advisor, for the whole session."""
+    with seeded_database():
+        yield
+
+
+@pytest.fixture
+def app_pool(settings: Settings, database: None) -> Iterator[ConnectionPool]:
+    """The app's pool on DATABASE_URL, one connection, opened for one test."""
+    with session.make_pool(settings.database_url, max_size=1, timeout=5.0) as pool:
+        yield pool

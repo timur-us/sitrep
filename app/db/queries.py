@@ -1,0 +1,25 @@
+"""The statements the app's routes run, each a module-level constant (ADR 0008).
+
+Two kinds of SQL live elsewhere: the pool guard and the advisor context are string
+literals in app/db/session.py, the one file that may name the advisor setting, and
+app/db/migrate.py composes its own DDL from app/db/names.py. tests/test_sql_hygiene.py
+holds the rest of app/ to this file and to literals: `.execute()` and its relatives take
+a string literal or a constant from here, values are always bound parameters, and no
+statement is built from strings at runtime.
+
+Full-text search has one statement per language (ADR 0005). Each uses the two-argument
+websearch_to_tsquery with its own configuration and keeps to documents in its language,
+so an English query never matches a German document through a shared stem.
+"""
+
+SEARCH_DOCUMENTS_ENGLISH = (
+    "SELECT d.advisor_id, d.id FROM documents d"
+    " WHERE d.lang = 'english' AND d.tsv @@ websearch_to_tsquery('english', %s)"
+    " ORDER BY d.advisor_id, d.id"
+)
+
+SEARCH_DOCUMENTS_GERMAN = (
+    "SELECT d.advisor_id, d.id FROM documents d"
+    " WHERE d.lang = 'german' AND d.tsv @@ websearch_to_tsquery('german', %s)"
+    " ORDER BY d.advisor_id, d.id"
+)

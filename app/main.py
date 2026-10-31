@@ -8,6 +8,8 @@ global tracer provider is never set.
 from __future__ import annotations
 
 import html
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -16,6 +18,7 @@ from opentelemetry.sdk.trace import TracerProvider
 
 from app.config import branding
 from app.config.settings import Settings
+from app.db import session
 from app.http.security_headers import SecurityHeadersMiddleware, response_headers
 from app.observability import tracing
 from app.observability.logs import tag_trace_id
@@ -55,7 +58,22 @@ def create_app(
             "TRACE_PLAINTEXT=1 is allowed with the default console exporter only"
         )
 
-    app = FastAPI(redirect_slashes=False, docs_url=None, redoc_url=None, openapi_url=None)
+    # Lazy (app/db/session.py): opening the pool connects nobody, so the app starts and
+    # answers /health with the database down. The first routes to use it arrive in PR 7.
+    pool = session.make_pool(settings.database_url)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        pool.open()
+        try:
+            yield
+        finally:
+            pool.close()
+
+    app = FastAPI(
+        redirect_slashes=False, docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
+    app.state.pool = pool
     page = index_html()
 
     @app.get("/", response_class=HTMLResponse)
