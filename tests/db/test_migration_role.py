@@ -325,7 +325,8 @@ def test_the_owner_cannot_log_in() -> None:
 
 def test_role_settings_are_exactly_the_search_path(superuser: Connection) -> None:
     # A role may change its own defaults (ALTER ROLE ... SET), which no REVOKE stops;
-    # PR 5b's checkout guard checks the session. Here: what db/init set, and nothing else.
+    # app/db/session.py's guard checks them at every checkout (tests/db/test_pool.py).
+    # Here: what db/init set, and nothing else.
     rows = superuser.execute(
         "SELECT r.rolname, d.datname, s.setconfig FROM pg_db_role_setting s"
         " JOIN pg_roles r ON r.oid = s.setrole LEFT JOIN pg_database d ON d.oid = s.setdatabase"

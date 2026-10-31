@@ -450,3 +450,16 @@ def test_the_app_opens_and_closes_its_pool(settings: Settings) -> None:
             assert conn.execute("SELECT current_user").fetchone() == (APP,)
         assert isinstance(conn, CheckedConnection)
     assert pool.closed
+
+
+def test_a_connection_stays_clean_through_many_checkouts(app_pool: ConnectionPool) -> None:
+    # psycopg prepares a statement after five runs (prepare_threshold), and the portal of a
+    # prepared statement shows in pg_cursors while it runs: the guard counts only WITH HOLD
+    # cursors, or it would reject every connection from the sixth checkout on.
+    pids = set()
+    for _ in range(12):
+        with session.advisor_transaction(app_pool, issue(MINE.id)) as conn:
+            conn.execute("SELECT 1")
+        with app_pool.connection() as conn:
+            pids.add(conn.info.backend_pid)
+    assert len(pids) == 1, f"{len(pids)} connections for 12 checkouts"

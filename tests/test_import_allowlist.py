@@ -41,8 +41,8 @@ ALLOWED = frozenset(
         # The database driver (ADR 0008). It connects on its own, so this scan does not
         # see where; app/db/connect.py is the only place that opens a connection.
         "psycopg",
-        # The connection pool (ADR 0008). It opens connections itself, through the
-        # connection class app/db/session.py gives it (tests/db/test_pool.py).
+        # The connection pool (ADR 0008), in app/db/session.py only. It opens connections
+        # itself, through the connection class session.py gives it (tests/db/test_pool.py).
         "psycopg_pool",
         "pydantic",
         "pydantic_settings",
@@ -107,6 +107,9 @@ BANNED_ATTRIBUTES = frozenset(
 # Opening a database connection: only here, where the URL is checked and libpq's
 # environment overrides are pinned (ADR 0008).
 DB_CONNECT_FILE = "app/db/connect.py"
+# Building a pool: only here, where its connections go through app/db/connect.py and
+# the guard (review finding test-3 of PR 5b).
+POOL_FILE = "app/db/session.py"
 # On the os module only: running or replacing a program.
 OS_PROGRAM = re.compile(r"system|popen|startfile|fork\w*|exec\w*|spawn\w*|posix_spawn\w*")
 
@@ -156,6 +159,8 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
                 problems.append(f"{rel}:{node.lineno}: .connect outside {DB_CONNECT_FILE}")
         elif isinstance(node, ast.Name) and node.id in BANNED_NAMES:
             problems.append(f"{rel}:{node.lineno}: {node.id}")
+    if "psycopg_pool" in modules and rel != POOL_FILE:
+        problems.append(f"{rel}: psycopg_pool outside {POOL_FILE}")
     banned = {entry for name in dotted if (entry := banned_module(name))}
     problems += [f"{rel}: banned module {entry}" for entry in sorted(banned)]
     return modules, problems

@@ -29,7 +29,7 @@ SITREP (situation report) retrieves from German and English documents; the synth
 
 ## Decision
 
-- **Language:** `lang text NOT NULL CHECK (lang IN ('german','english'))` and a STORED `tsv` through `CASE` over the two-argument `to_tsvector`. One query branch per language. One-argument text-search functions are banned (a test in PR 5b).
+- **Language:** `lang text NOT NULL CHECK (lang IN ('german','english'))` and a STORED `tsv` through `CASE` over the two-argument `to_tsvector`. One query branch per language. One-argument text-search functions are banned (`tests/db/test_fts_language.py`).
 - **Model:** e5-small at a pinned commit, 384 dimensions, `query: ` and `passage: ` prefixes added by the embedder, a 512-token cap with chunks of 400 tokens or fewer.
 - **Licence:** MIT in the card metadata only; the repository has no LICENSE file.
 - **Runtime:** onnxruntime plus `tokenizers`, with `onnx/model.onnx` (fp32, 470.3 MB) and `onnx/tokenizer.json` (17.1 MB).

@@ -6,16 +6,23 @@ and act as another advisor for the rest of a transaction. So no app statement is
 built from strings. An AST scan of app/:
 
 - `.execute`, `.executemany`, `.copy` and `.stream` take a string literal or a constant
-  that app/db/queries.py defines; values travel as bound parameters;
-- no psycopg.sql, ClientCursor, mogrify or cursor_factory;
+  that app/db/queries.py defines, never `**kwargs`; values travel as bound parameters;
+  `.execute`, `.executemany` and `.stream` are only called, never passed around, and a
+  constant imported from queries.py is never rebound;
+- no psycopg.sql (under any import name), ClientCursor, mogrify, cursor_factory or
+  pgconn (libpq's own exec and send calls);
 - app/db/queries.py holds string literals only;
-- set_config and app.advisor_id appear in app/db/session.py only (in any text there);
-- no string anywhere in app/ says SET LOCAL or SET app.
+- set_config and app.advisor_id appear in app/db/session.py only, in any text there,
+  in any case and with any spacing around the dot;
+- no string anywhere in app/ says SET LOCAL, SET SESSION or SET app.
 
 app/db/migrate.py is excepted from the first two rules: it composes its own DDL with
-psycopg.sql from app/db/names.py, never from input. The scan reads names, not values:
-a statement reached through getattr(), or a module imported under the name `queries`
-that is not app/db/queries.py, is not caught.
+psycopg.sql from app/db/names.py, never from input.
+
+This is a lint against building SQL from strings by accident, not a proof. It reads
+names, not values: a statement reached through getattr(), a method taken from a class
+rather than an instance, or a module imported under the name `queries` that is not
+app/db/queries.py, is not caught.
 """
 
 from __future__ import annotations
@@ -31,10 +38,16 @@ SESSION = "app/db/session.py"
 QUERIES = "app/db/queries.py"
 MIGRATE = "app/db/migrate.py"
 STATEMENT_METHODS = frozenset({"execute", "executemany", "copy", "stream"})
-# Client-side composition or interpolation of SQL.
-BANNED = frozenset({"ClientCursor", "AsyncClientCursor", "mogrify", "cursor_factory"})
-SESSION_ONLY = ("set_config", "app.advisor_id")
-SET_COMMAND = re.compile(r"\bSET\s+(?:LOCAL\b|app\.)", re.IGNORECASE)
+# Never referenced without a call; .copy is left out, it is also dict's and list's.
+CALLED_ONLY = frozenset({"execute", "executemany", "stream"})
+# Client-side composition or interpolation of SQL, and libpq's raw connection.
+BANNED = frozenset({"ClientCursor", "AsyncClientCursor", "mogrify", "cursor_factory", "pgconn"})
+# SQL names and setting names are case-insensitive.
+SESSION_ONLY = {
+    "set_config": re.compile(r"set_config", re.IGNORECASE),
+    "app.advisor_id": re.compile(r"app\s*\.\s*advisor_id", re.IGNORECASE),
+}
+SET_COMMAND = re.compile(r"\bSET\s+(?:LOCAL\b|SESSION\b|app\s*\.)", re.IGNORECASE)
 
 
 def query_constants(source: str) -> tuple[set[str], list[str]]:
@@ -64,7 +77,15 @@ def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
     tree = ast.parse(source)
     modules: set[str] = set()  # local names for app.db.queries
     imported: set[str] = set()  # constants imported from it by name
+    drivers: set[str] = set()  # local names for the psycopg package
+    called: set[int] = set()  # the func node of every call
     for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            called.add(id(node.func))
+        if isinstance(node, ast.Import):
+            drivers |= {
+                alias.asname or "psycopg" for alias in node.names if alias.name == "psycopg"
+            }
         if isinstance(node, ast.ImportFrom) and node.module == "app.db":
             modules |= {
                 alias.asname or alias.name for alias in node.names if alias.name == "queries"
@@ -103,12 +124,10 @@ def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
         elif composes and isinstance(node, ast.Attribute):
             if node.attr in BANNED:
                 problems.append(f"{where}: .{node.attr}")
-            if (
-                node.attr == "sql"
-                and isinstance(node.value, ast.Name)
-                and node.value.id == "psycopg"
-            ):
+            if node.attr == "sql" and isinstance(node.value, ast.Name) and node.value.id in drivers:
                 problems.append(f"{where}: psycopg.sql")
+            if node.attr in CALLED_ONLY and id(node) not in called:
+                problems.append(f"{where}: .{node.attr} referenced, not called")
         elif composes and isinstance(node, ast.Name) and node.id in BANNED:
             problems.append(f"{where}: {node.id}")
         elif composes and isinstance(node, ast.keyword) and node.arg in BANNED:
@@ -127,6 +146,9 @@ def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
             for keyword in node.keywords:
                 if keyword.arg in ("query", "statement"):
                     statement = keyword.value
+            if statement is None and any(keyword.arg is None for keyword in node.keywords):
+                problems.append(f"{where}: .{node.func.attr}() takes **kwargs")
+                continue
             if statement is None:
                 continue  # list.copy() and the like: no statement
             checked += 1
@@ -136,10 +158,23 @@ def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
                     f"{where}: .{node.func.attr}() takes {kind}, "
                     f"not a literal or a constant from {QUERIES}"
                 )
+        if composes and isinstance(node, ast.Assign | ast.AugAssign | ast.AnnAssign):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id in imported:
+                    problems.append(f"{where}: rebinds {target.id} from {QUERIES}")
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id in modules
+                ):
+                    problems.append(f"{where}: rebinds {target.attr} in {QUERIES}")
     if rel != SESSION:
         for number, line in enumerate(source.splitlines(), 1):
             problems += [
-                f"{rel}:{number}: {word} outside {SESSION}" for word in SESSION_ONLY if word in line
+                f"{rel}:{number}: {word} outside {SESSION}"
+                for word, pattern in SESSION_ONLY.items()
+                if pattern.search(line)
             ]
     return checked, problems
 
@@ -216,7 +251,7 @@ PLANTED = [
     ("app/db/x.py", "x = 'app . advisor_id'\n", "app.advisor_id outside"),
     ("app/db/session.py", "conn.execute('SET SESSION app.advisor_id = 1')\n", "SET SESSION"),
     ("app/db/session.py", "conn.execute('set   local  x = 1')\n", "set   local"),
-    ("app/db/x.py", "conn.execute(**statement)\n", ".execute() takes **"),
+    ("app/db/x.py", "conn.execute(**statement)\n", ".execute() takes **kwargs"),
     ("app/db/x.py", "run = conn.execute\nrun(f'SELECT {x}')\n", ".execute referenced"),
     ("app/db/x.py", "conn.pgconn.exec_(b'SELECT 1')\n", ".pgconn"),
     (
