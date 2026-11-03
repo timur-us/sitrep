@@ -1,6 +1,6 @@
 # SITREP — threat model
 
-Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database), 2026-10-31 (M0 PR 5b: row-level security) and 2026-11-03 (M0 PR 6: tool registry) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
+Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database), 2026-10-31 (M0 PR 5b: row-level security), 2026-11-03 (M0 PR 6: tool registry) and 2026-11-04 (M0 PR 7: dev login) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
 Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the system prompt staying secret (Kerckhoffs).
 
 ## Assets
@@ -62,6 +62,14 @@ Path 2 rests on the role layout under the policies (ADR 0008, `tests/db/`):
   The connection an advisor transaction yields belongs to the pool: a reference kept past the transaction (a background task, a streaming response) would run in whichever transaction next holds that connection. Nothing keeps one in M0; M1's streaming must not.
 
   A signed advisor context, which a forged `set_config` could not produce, is a later ADR.
+
+## Dev login (M0)
+
+The login until M3 (ADR 0009, `app/auth/dev_shim.py`), for path 2's "from the verified login only" and as the local stand-in for path 3:
+- **Only on loopback.** With `SITREP_DEV_AUTH=1` the entry point exits 2 before binding unless the host is exactly `127.0.0.1` and the port explicit, refuses `--uds` and `--fd`, and checks every listening socket after startup. `create_app()` mounts the shim only behind that bind. The image does not carry the file (`make docker-build` proves the import fails there).
+- **Browser origins.** DNS rebinding: Host must be exactly `127.0.0.1:<port>`, on every route. CSRF: every method but GET needs `Origin: http://127.0.0.1:<port>` exactly and `Sec-Fetch-Site: same-origin` when sent; the cookie is SameSite=Strict.
+- **Identity.** A random session id in process memory, the cookie signed with HMAC-SHA256 under a key drawn per app instance; advisors only. The middleware attaches the session's `VerifiedAdvisor` to the ASGI scope, and `current_advisor()` reads nothing else: headers, query parameters and other cookies naming an advisor change no response (`tests/db/test_dev_login.py`). `/api/mandates` runs in the advisor transaction, so row-level security does the scoping.
+- **Residual risk.** Any local process is trusted, as with the database: it can sign in as any advisor and send any Origin. Cookies ignore ports, so another server on `127.0.0.1` receives the session cookie and can set a second one (two count as none). Sessions end with the process or a logout, not by time.
 
 ## First red-team case: the EchoLeak pattern
 

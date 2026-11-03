@@ -44,6 +44,9 @@ SLUG_ALLOWED = (
     ".github/**",
 )
 
+# A settings variable: the slug in capitals, an underscore, a capital name.
+SETTINGS_VARIABLE = re.compile(rf"\b{re.escape(branding.SLUG.upper())}_[A-Z][A-Z0-9_]*\b")
+
 RULE_NAMES = (
     "product",
     "legal name",
@@ -141,6 +144,10 @@ def scan(root: Path = ROOT) -> tuple[list[str], list[Finding]]:
         scanned.append(rel)
         slug_allowed = matches_any(rel, SLUG_ALLOWED)
         for number, line in enumerate(text.splitlines(), start=1):
+            if slug_allowed:
+                # The settings' variables (ADR 0009) carry the slug in capitals; there
+                # they are the slug, not the product name.
+                line = SETTINGS_VARIABLE.sub("", line)
             for rule in active:
                 if rule.name == "slug" and slug_allowed:
                     continue

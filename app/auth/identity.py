@@ -1,7 +1,9 @@
 """The advisor a request acts for, as the verified login established it (CLAUDE.md rule 8).
 
 A VerifiedAdvisor is issued by app/auth/ only, through issue(): the dev shim locally
-(PR 7), Entra ID in Azure (M3). Nothing a model, a tool, a header, a query parameter or
+(app/auth/dev_shim.py, ADR 0009), Entra ID in Azure (M3). The login middleware attaches
+it to the request's ASGI scope with attach(), and routes take it with
+Depends(current_advisor). Nothing a model, a tool, a header, a query parameter or
 a request body says can become one:
 - the constructor refuses a call without the issuer token this module holds;
 - the class is not a dataclass and has no pydantic schema, so pydantic and FastAPI
@@ -16,9 +18,14 @@ object.__setattr__. app/db/session.py takes nothing but a VerifiedAdvisor.
 
 from __future__ import annotations
 
+from collections.abc import MutableMapping
 from typing import Any, NoReturn
 
+from fastapi import HTTPException, Request
+
 _ISSUER = object()
+# Where a login middleware puts the request's advisor in the ASGI scope.
+_SCOPE_KEY = "app.auth.verified_advisor"
 
 
 class VerifiedAdvisor:
@@ -60,3 +67,28 @@ class VerifiedAdvisor:
 def issue(advisor_id: str) -> VerifiedAdvisor:
     """For app/auth/ only: the advisor a verified login established."""
     return VerifiedAdvisor(advisor_id, _ISSUER)
+
+
+def attach(scope: MutableMapping[str, Any], advisor: VerifiedAdvisor) -> None:
+    """For app/auth/'s middleware: the request in scope acts for advisor.
+
+    The ASGI scope is built by the server; no header, query parameter, cookie or body
+    can put a key into it, so only a login middleware that ran for this request did.
+    """
+    if type(advisor) is not VerifiedAdvisor:
+        raise TypeError(f"attach takes a VerifiedAdvisor, not {type(advisor).__name__}")
+    scope[_SCOPE_KEY] = advisor
+
+
+def current_advisor(request: Request) -> VerifiedAdvisor:
+    """The route dependency: the advisor the login attached to this request, or 401.
+
+    It reads the ASGI scope and nothing else. Headers, query parameters, cookies and
+    the body are never consulted, so a request cannot name its own advisor. Without a
+    login middleware (the dev shim off, M3's Entra ID not yet built) every route that
+    depends on it answers 401.
+    """
+    advisor = request.scope.get(_SCOPE_KEY)
+    if type(advisor) is not VerifiedAdvisor:
+        raise HTTPException(status_code=401, detail="not signed in")
+    return advisor

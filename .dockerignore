@@ -12,3 +12,5 @@
 .claude
 data/synthetic/out
 tests
+# The dev login shim never ships (ADR 0009); `make docker-build` checks the image.
+app/auth/dev_shim.py

@@ -1,6 +1,6 @@
 # M0 — foundation, local: plan
 
-Date: 2026-10-28 · Status: accepted by Timur with four changes (folded in below); amended 2026-10-29 with the PR 1 review handovers, 2026-10-30 with the database port, 2026-10-31 with PR 5b's additions and 2026-11-03 with PR 6's registry rules (see the "Amendment" sections) · Owner: Timur · Milestone: M0, days 1–3 of `docs/brief.md`
+Date: 2026-10-28 · Status: accepted by Timur with four changes (folded in below); amended 2026-10-29 with the PR 1 review handovers, 2026-10-30 with the database port, 2026-10-31 with PR 5b's additions and 2026-11-03 with PR 6's registry rules, and in PR 7 with the settings prefix of 2026-10-29 (see the "Amendment" sections) · Owner: Timur · Milestone: M0, days 1–3 of `docs/brief.md`
 
 ## Context
 
@@ -94,6 +94,10 @@ The other four answers are recorded in ADR 0001, "Amendment (PR 6, 2026-11-03)":
 - no new ADR number;
 - error locations stay;
 - the approval-token design is deferred to M1's ADR, leaning to opaque random tokens stored as a hash.
+
+### Amendment (Timur, 2026-10-29, recorded in PR 7)
+
+The PR 3 review (#5, finding sec-7) found the settings unprefixed and matched without regard to case, while tcsh exports `HOST`. Timur chose on 2026-10-29 to prefix them in PR 7. `HOST`, `PORT`, `DEV_AUTH` and `TRACE_PLAINTEXT` are read as `SITREP_HOST`, `SITREP_PORT`, `SITREP_DEV_AUTH` and `SITREP_TRACE_PLAINTEXT`. `.env.example`, the Dockerfile, the docker smoke test, the runbook and the tests changed in the same PR. ADR 0009 records it. The PR 7 lines and the verification below use the new names. Whether `DATABASE_URL` and `MIGRATION_DATABASE_URL` take the prefix too (PR 5a review, sec-11) is still open.
 
 ## Defaults that shape every PR
 
@@ -747,7 +751,8 @@ The other four answers are recorded in ADR 0001, "Amendment (PR 6, 2026-11-03)":
 - `app/auth/identity.py`: `current_advisor` → `VerifiedAdvisor`. Headers and query parameters are ignored.
 - `app/api/mandates.py`: `GET /api/mandates` returns the advisor's own mandates. This goes beyond the brief's M0 row. It is a minimal list used as the test vehicle for the login → RLS path, with no retrieval. Its SQL lives in `queries.py`, and with the DB down it returns 503.
 - `.dockerignore`: `+app/auth/dev_shim.py`.
-- The docker smoke: importing the shim fails in the image, and `DEV_AUTH=1` with `HOST` set to `0.0.0.0` or to `127.0.0.1` exits non-zero.
+- The docker smoke: importing the shim fails in the image, and `SITREP_DEV_AUTH=1` with `SITREP_HOST` set to `0.0.0.0` or to `127.0.0.1` exits non-zero.
+- The `SITREP_` prefix (amendment of 2026-10-29): settings, `.env.example`, Dockerfile, docker smoke, runbook, tests.
 - `docs/decisions/0009-dev-auth-shim.md`.
 - Runbook: use `http://127.0.0.1:8000`; the shim runs natively only.
 
@@ -768,8 +773,8 @@ The other four answers are recorded in ADR 0001, "Amendment (PR 6, 2026-11-03)":
   - POST with `Origin` missing, `null`, `http://localhost:8000`, `http://127.0.0.1:9999` or `http://127.0.0.1.mallory.example:8000` → 403.
 
 **Evidence Timur can run.**
-- `DEV_AUTH=1 HOST=0.0.0.0 uv run python -P -m app` → exit 2.
-- `DEV_AUTH=1 uv run python -P -m app` → log in as Alice at `http://127.0.0.1:8000/dev/login`, then `/api/mandates`.
+- `SITREP_DEV_AUTH=1 SITREP_HOST=0.0.0.0 uv run python -P -m app` → exit 2.
+- `SITREP_DEV_AUTH=1 uv run python -P -m app` → log in as Alice at `http://127.0.0.1:8000/dev/login`, then `/api/mandates`.
 
 **Open questions.** None (13 answered: cookie).
 
@@ -908,7 +913,7 @@ Cut line: PR 9 moves to day 4 if needed, and M1 starts once it lands. Nothing is
 - **Fresh clone:** `make up && make migrate && make test && make evals && make redteam && make data && make docker-build && make web-test` all pass, with no `.env` and no API key.
 - **CI:** six green checks on `main`, required by the ruleset; web-test finishes inside 10 minutes.
 - **By hand:**
-  - `DEV_AUTH=1 HOST=0.0.0.0 uv run python -P -m app` exits 2;
+  - `SITREP_DEV_AUTH=1 SITREP_HOST=0.0.0.0 uv run python -P -m app` exits 2;
   - a row the superuser plants in a rolled-back transaction is invisible to `sitrep_app` without a context;
   - `curl` with a query string leaves no trace in spans or logs;
   - `curl /health/` gives 404.

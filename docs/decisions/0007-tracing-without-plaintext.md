@@ -28,7 +28,7 @@ SITREP (situation report) will carry client data and prompts through every reque
 - **Explicit provider, no globals for traces.** The provider goes to the instrumentation directly; its resource ignores `OTEL_RESOURCE_ATTRIBUTES`. The global propagator is an empty one: inbound trace context is never adopted. Spans export synchronously (`SimpleSpanProcessor`).
 - **`X-Trace-Id`** on every response, 500 included, so a support case can quote it. Ids come from `secrets`, not from the SDK's `random`, whose state the ids would reveal.
 - **Logs.** No access log, `proxy_headers` off, no server header. A redacting filter on uvicorn's loggers and on the handler keeps the message template, drops its arguments, and turns an exception into its type (plus the symbolic errno for an `OSError`) and the trace id. The handler never prints its own traceback on a failed write, since that traceback's context is the exception being logged.
-- **`TRACE_PLAINTEXT=1`** (exactly `"1"`) sends spans to the console unfiltered. It is refused, before the server starts, unless the exporter is the console and the entry point binds exactly `127.0.0.1`. The image binds `0.0.0.0` by default and refuses it; `-e HOST=127.0.0.1` would pass the check. Logs stay redacted either way.
+- **`TRACE_PLAINTEXT=1`** (exactly `"1"`; read as `SITREP_TRACE_PLAINTEXT` since ADR 0009) sends spans to the console unfiltered. It is refused, before the server starts, unless the exporter is the console and the entry point binds exactly `127.0.0.1`. The image binds `0.0.0.0` by default and refuses it; `-e SITREP_HOST=127.0.0.1` would pass the check. Logs stay redacted either way.
 
 ## Consequences
 

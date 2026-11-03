@@ -43,7 +43,10 @@ from opentelemetry.sdk.trace.id_generator import IdGenerator
 from opentelemetry.trace import SpanContext, Status
 
 from app.config import branding
-from app.config.settings import LOOPBACK, Settings
+from app.config.settings import LOOPBACK, Settings, env_name
+
+# The variable that switches plaintext spans on, as the messages name it.
+PLAINTEXT = env_name("trace_plaintext")
 
 # The instrumentation's default (pre-stable) HTTP conventions. Left out on purpose:
 # http.target and http.url (path and query), http.host and http.server_name (the Host
@@ -209,10 +212,10 @@ def exporter_chain(
     if not settings.trace_plaintext_on:
         return AllowlistExporter(exporter)
     if type(exporter) is not ConsoleSpanExporter:
-        raise PlaintextRefused("TRACE_PLAINTEXT=1 is allowed with the console exporter only")
+        raise PlaintextRefused(f"{PLAINTEXT}=1 is allowed with the console exporter only")
     if bind_host != LOOPBACK:
         raise PlaintextRefused(
-            "TRACE_PLAINTEXT=1 is allowed only when the entry point binds 127.0.0.1"
+            f"{PLAINTEXT}=1 is allowed only when the entry point binds 127.0.0.1"
         )
     return exporter
 

@@ -185,11 +185,25 @@ def test_cookie_replayed_after_logout_is_401(shim: TestClient) -> None:
 
 def test_login_again_ends_the_old_session(shim: TestClient) -> None:
     first = login(shim, MINE.id)
+    # One cookie only: the shim takes two cookies of its name as none (the next test).
+    shim.cookies.clear()
     shim.cookies.set(dev_shim.COOKIE, first)
     second = login(shim, OTHER.id)
     assert first != second
     assert whoami(shim, second) == 503, "control: the new session was not accepted"
     assert whoami(shim, first) == 401, "the old session survived a new login"
+
+
+def test_two_session_cookies_are_none(shim: TestClient) -> None:
+    # A cookie another local port sets for 127.0.0.1 arrives next to the real one;
+    # with two, neither is taken (cookie tossing).
+    cookie = login(shim, MINE.id)
+    shim.cookies.clear()
+    other = login(shim, OTHER.id)
+    # Control: both sessions are live, each on its own.
+    assert (whoami(shim, cookie), whoami(shim, other)) == (503, 503), "control"
+    pair = f"{dev_shim.COOKIE}={cookie}; {dev_shim.COOKIE}={other}"
+    assert whoami(shim, None, headers={"Cookie": pair}) == 401, "two session cookies"
 
 
 @pytest.mark.parametrize("person", NOT_ADVISORS, ids=lambda p: p.role.value)
