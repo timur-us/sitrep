@@ -8,7 +8,8 @@ accident:
 - repr() shows a random reference and the provenance only, so a traceback, a debugger or
   a log call that repr()s its arguments never carries the text (CLAUDE.md rule 10);
 - it has no public attribute that returns the value;
-- it cannot be subclassed, so no subclass can add a rendering.
+- it cannot be subclassed, so no subclass can add a rendering;
+- it cannot be pickled, copied or deep-copied.
 
 wrap() is the one way to the text: it renders the value inside an `<untrusted …>`
 delimiter that names the tool and the records it came from. The text and the provenance
@@ -19,7 +20,7 @@ A str is rendered as it is; anything else as JSON through pydantic. M2 adds
 the canary scan and measures the provenance rendering against the red-team corpus; M0
 fixes that wrap() is the only way out and that the text stays inside.
 
-Python cannot hide the value: `_value` is reachable on purpose. The rule is that code
+Python cannot hide the value: `_value` is reachable. The rule is that code
 outside this module never reads it; M1's number guard, the one other reader, gets a
 named accessor in its own PR.
 
@@ -103,6 +104,14 @@ class Untrusted[T]:
         raise TypeError(RENDER_REFUSED)
 
     def __radd__(self, other: object) -> NoReturn:
+        raise TypeError(RENDER_REFUSED)
+
+    # No pickle, copy or deepcopy: a serialised value is out of reach of every rule here
+    # (a cache, a queue, a file), and a copy would carry the same reference (Fable's review).
+    def __reduce__(self) -> NoReturn:
+        raise TypeError(RENDER_REFUSED)
+
+    def __reduce_ex__(self, protocol: object) -> NoReturn:
         raise TypeError(RENDER_REFUSED)
 
 

@@ -8,8 +8,9 @@ holds, and reports all the rules a spec breaks at once (RegistrationError):
   advisor approves (app/harness/approval.py);
 - READ tools return Untrusted[...] (app/harness/context.py): what a tool reads is data,
   never instructions (CLAUDE.md rule 9);
-- the arguments are a pydantic model, and its JSON schema (`model_json_schema()`, the one
-  the model is shown) is walked recursively, `$defs` included. Every object says
+- the arguments are a pydantic model, frozen like every model nested in it, so a
+  validated call cannot change before it runs; its JSON schema (`model_json_schema()`,
+  asked for once, checked, and stored as the one the model is shown) is walked recursively, `$defs` included. Every object says
   `additionalProperties: false`, which also refuses `dict[str, Any]`, and every value
   has a type, which refuses `Any` and a bare `list`. A JSON-in-a-string value
   (`Json[...]`) is refused: the object inside it would escape both checks;
@@ -64,6 +65,7 @@ IDENTITY_TERMS = (
     "on_behalf",
     "berater",
     "benutzer",
+    "mitarbeiter",  # plan amendment (Timur, 2026-11-03)
 )
 _FLAT_TERMS = tuple(term.replace("_", "") for term in IDENTITY_TERMS)
 # The Messages API's rule for tool names.
@@ -256,7 +258,8 @@ def _nested_models(annotation: object) -> list[type[BaseModel]]:
 
 
 def model_problems(model: type[BaseModel]) -> list[str]:
-    """Identity or non-ASCII names that model, or a model nested in it, accepts."""
+    """Identity or non-ASCII names that model, or a model nested in it, accepts, and any
+    of those models that is not frozen."""
     problems: list[str] = []
     seen: set[type[BaseModel]] = set()
     stack = [model]
@@ -265,6 +268,8 @@ def model_problems(model: type[BaseModel]) -> list[str]:
         if current in seen:
             continue
         seen.add(current)
+        if current.model_config.get("frozen") is not True:
+            problems.append(f"{current.__name__}: not frozen (frozen=True)")
         for field_name, field in current.model_fields.items():
             names = [field_name, *_alias_names(field.alias), *_alias_names(field.validation_alias)]
             for name in dict.fromkeys(names):
@@ -296,6 +301,14 @@ class ToolRegistry:
 
     def problems(self, spec: ToolSpec) -> list[str]:
         """Every rule spec breaks; empty when register() would admit it."""
+        return self._check(spec)[0]
+
+    def _check(self, spec: ToolSpec) -> tuple[list[str], str | None]:
+        """The rules spec breaks, and the arguments schema they were checked on, as JSON.
+
+        The schema is asked for once: what register() stores, and M1 sends, is the text
+        checked here, never a second answer from the model class (Fable's review).
+        """
         problems: list[str] = []
         if type(spec.name) is not str or not TOOL_NAME.fullmatch(spec.name):
             problems.append(f"tool name {spec.name!r} does not match {TOOL_NAME.pattern}")
@@ -318,19 +331,20 @@ class ToolRegistry:
         arguments = spec.arguments
         if not (isinstance(arguments, type) and issubclass(arguments, BaseModel)):
             problems.append(f"arguments {arguments!r} is not a pydantic BaseModel class")
-            return problems
+            return problems, None
         try:
-            schema = arguments.model_json_schema()
-        except Exception as error:  # noqa: BLE001 - a model without a schema is refused
-            return [*problems, f"arguments: no JSON schema ({type(error).__name__})"]
-        return problems + schema_problems(schema) + model_problems(arguments)
+            checked = json.dumps(arguments.model_json_schema())
+        except Exception as error:  # noqa: BLE001 - a model without a JSON schema is refused
+            return [*problems, f"arguments: no JSON schema ({type(error).__name__})"], None
+        problems += schema_problems(json.loads(checked)) + model_problems(arguments)
+        return problems, checked
 
     def register(self, spec: ToolSpec) -> None:
-        problems = self.problems(spec)
-        if problems:
+        problems, checked = self._check(spec)
+        if problems or checked is None:
             raise RegistrationError(problems)
         self._specs[spec.name] = spec
-        self._schemas[spec.name] = json.dumps(spec.arguments.model_json_schema())
+        self._schemas[spec.name] = checked
 
     def __contains__(self, name: object) -> bool:
         return name in self._specs

@@ -1,6 +1,6 @@
 # M0 — foundation, local: plan
 
-Date: 2026-10-28 · Status: accepted by Timur with four changes (folded in below); amended 2026-10-29 with the PR 1 review handovers, 2026-10-30 with the database port and 2026-10-31 with PR 5b's additions (see the "Amendment" sections) · Owner: Timur · Milestone: M0, days 1–3 of `docs/brief.md`
+Date: 2026-10-28 · Status: accepted by Timur with four changes (folded in below); amended 2026-10-29 with the PR 1 review handovers, 2026-10-30 with the database port, 2026-10-31 with PR 5b's additions and 2026-11-03 with PR 6's registry rules (see the "Amendment" sections) · Owner: Timur · Milestone: M0, days 1–3 of `docs/brief.md`
 
 ## Context
 
@@ -81,6 +81,19 @@ PR 5b (#13) carried the PR 5a review handovers and added what its own review ask
 - **For M1:** `hnsw.iterative_scan` must be set transaction-locally, or added to `db/init/00-roles.sql` and `ROLE_SETTINGS` in `app/db/session.py` together; otherwise the pool guard refuses every connection.
   - **Transaction-locally** means `set_config('hnsw.iterative_scan', …, true)` inside the advisor transaction in `app/db/session.py`. That is the one file where `tests/test_sql_hygiene.py` allows `set_config`, and the scan forbids `SET LOCAL` strings in `app/`.
   - **The role-settings route** also changes the pin in `tests/db/test_migration_role.py`, and needs `make down` before `make up`, because `db/init` runs only on an empty data directory.
+
+### Amendment (Timur, 2026-11-03)
+
+PR 6 (#14) asked five questions in its review. Timur answered them on 2026-11-03, after Fable's security review. Answer (5) changes the registry's rules, so it lands here; the PR 6 lines below are updated to match.
+
+- **The identity terms gain `mitarbeiter`.** The other German candidates (`betreuer`, `sachbearbeiter`) and the short Entra claims (`oid`, `upn`, `tid`) are not added: the short ones collide with ordinary words under the substring match.
+- **The registry refuses an arguments model that is not frozen**, at the top or nested. A validated call is what the advisor approves, so nothing may change it before it runs.
+
+The other four answers are recorded in ADR 0001, "Amendment (PR 6, 2026-11-03)":
+- `wrap()` keeps escaping;
+- no new ADR number;
+- error locations stay;
+- the approval-token design is deferred to M1's ADR, leaning to opaque random tokens stored as a hash.
 
 ## Defaults that shape every PR
 
@@ -663,7 +676,8 @@ PR 5b (#13) carried the PR 5a review handovers and added what its own review ask
 - `app/harness/tools.py`:
   - `Effect` (READ, DRAFT, SIDE_EFFECT), `DataClass`, `ToolSpec`, `ToolRegistry`.
   - Registration runs on `model_json_schema()`, recursively and including `$defs`. It requires `additionalProperties: false` everywhere, which also rejects `dict[str, Any]`.
-  - Property names may not match the identity pattern (case-insensitive, after a camelCase split): `advisor`, `user`, `principal`, `tenant`, `owner`, `identity`, `role`, `on_behalf`, `berater`, `benutzer`.
+  - Property names may not match the identity pattern (case-insensitive, after a camelCase split): `advisor`, `user`, `principal`, `tenant`, `owner`, `identity`, `role`, `on_behalf`, `berater`, `benutzer`, `mitarbeiter` (amendment of 2026-11-03; as built, a substring match after removing separators, ADR 0001).
+  - Arguments models, and every model nested in them, are frozen (amendment of 2026-11-03).
   - DRAFT and SIDE_EFFECT tools require `requires_approval`.
   - READ tools require an `Untrusted[...]` result type.
   - `validate_call` returns structured errors.
