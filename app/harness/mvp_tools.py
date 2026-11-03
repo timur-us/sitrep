@@ -1,39 +1,66 @@
-"""The four MVP tools, declared only. Scaffolding: the naive first draft."""
+"""The four MVP tools of docs/brief.md, declared only: the handlers are M1's.
+
+| Tool | Effect | Approval |
+|---|---|---|
+| search_client_docs | READ | no |
+| get_portfolio | READ | no |
+| draft_email | DRAFT | yes |
+| create_followup | SIDE_EFFECT | yes |
+
+All four touch client data, so all four are CONFIDENTIAL. The READ tools return
+Untrusted results; the other two return a Proposal, which approves nothing
+(app/harness/approval.py). No argument names an advisor: whose mandates a call reaches
+is decided by the login and row-level security, so a mandate id the model names is only
+ever looked up among the advisor's own. Each argument has bounds; the canary scan and
+the recipient allowlist are M2's (app/harness/policy.py).
+"""
 
 from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
+from typing import Annotated
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.harness.approval import Proposal
+from app.harness.context import Untrusted
 from app.harness.tools import DataClass, Effect, ToolRegistry, ToolSpec
 
-
-class SearchClientDocs(BaseModel):
-    query: str
-    advisor_id: str | None = None
-    mandate_id: str | None = None
-    limit: int = 8
+MandateId = Annotated[str, Field(min_length=1, max_length=128)]
+Address = Annotated[str, Field(min_length=3, max_length=254)]
 
 
-class GetPortfolio(BaseModel):
-    mandate_id: str
+class Arguments(BaseModel):
+    """Base of every tool's arguments: no extra keys, nothing changed after validation."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-class DraftEmail(BaseModel):
-    mandate_id: str
-    to: list[str]
-    subject: str
-    body: str
+class SearchClientDocs(Arguments):
+    query: str = Field(min_length=1, max_length=500, description="What to look for.")
+    mandate_id: MandateId | None = Field(
+        default=None, description="Search one mandate only; all of the advisor's otherwise."
+    )
+    limit: int = Field(default=8, ge=1, le=20, description="At most this many hits.")
 
 
-class CreateFollowup(BaseModel):
-    mandate_id: str
-    title: str
+class GetPortfolio(Arguments):
+    mandate_id: MandateId
+
+
+class DraftEmail(Arguments):
+    mandate_id: MandateId
+    to: list[Address] = Field(min_length=1, max_length=10)
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=20_000)
+
+
+class CreateFollowup(Arguments):
+    mandate_id: MandateId
+    title: str = Field(min_length=1, max_length=200)
     due: datetime.date
-    notes: str = ""
+    notes: str = Field(default="", max_length=2_000)
 
 
 @dataclass(frozen=True)
@@ -56,44 +83,45 @@ class Portfolio:
 TOOLS = (
     ToolSpec(
         name="search_client_docs",
-        description="Search the documents of the advisor's mandates.",
+        description="Search the documents of the advisor's own mandates.",
         arguments=SearchClientDocs,
-        result=list[DocumentHit],
+        result=Untrusted[list[DocumentHit]],
         effect=Effect.READ,
-        data_class=DataClass.INTERNAL,
+        data_class=DataClass.CONFIDENTIAL,
         requires_approval=False,
     ),
     ToolSpec(
         name="get_portfolio",
-        description="The latest portfolio report of one mandate.",
+        description="The latest portfolio report of one of the advisor's mandates.",
         arguments=GetPortfolio,
-        result=Portfolio,
+        result=Untrusted[Portfolio],
         effect=Effect.READ,
-        data_class=DataClass.INTERNAL,
+        data_class=DataClass.CONFIDENTIAL,
         requires_approval=False,
     ),
     ToolSpec(
         name="draft_email",
-        description="Draft an e-mail to the client.",
+        description="Propose an e-mail to the client; the advisor approves it before it exists.",
         arguments=DraftEmail,
         result=Proposal,
-        effect=Effect.READ,
-        data_class=DataClass.INTERNAL,
-        requires_approval=False,
+        effect=Effect.DRAFT,
+        data_class=DataClass.CONFIDENTIAL,
+        requires_approval=True,
     ),
     ToolSpec(
         name="create_followup",
-        description="Create a follow-up task.",
+        description="Propose a follow-up task; the advisor approves it before it is created.",
         arguments=CreateFollowup,
         result=Proposal,
-        effect=Effect.READ,
-        data_class=DataClass.INTERNAL,
-        requires_approval=False,
+        effect=Effect.SIDE_EFFECT,
+        data_class=DataClass.CONFIDENTIAL,
+        requires_approval=True,
     ),
 )
 
 
 def build_registry() -> ToolRegistry:
+    """A registry with the four tools, each admitted by register()'s checks."""
     registry = ToolRegistry()
     for spec in TOOLS:
         registry.register(spec)
