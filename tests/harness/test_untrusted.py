@@ -8,11 +8,14 @@ wrap() is the one way to the text, inside a delimiter the text cannot close.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import hashlib
 import io
 import json
 import logging
+import pickle
+import traceback
 from typing import Any, get_args, get_origin
 
 import pytest
@@ -245,3 +248,20 @@ def test_subscripted_construction() -> None:
     item = Untrusted[list[Hit]]([Hit("doc-1", PAYLOAD)], provenance())
     assert type(item) is Untrusted
     assert PAYLOAD in wrap(item) and PAYLOAD not in repr(item)
+
+
+# Fable's security review of PR 6: no serialisation.
+
+
+@pytest.mark.parametrize(
+    "duplicate",
+    [pickle.dumps, copy.copy, copy.deepcopy, lambda u: pickle.dumps(u, protocol=0)],
+    ids=["pickle", "copy", "deepcopy", "pickle-0"],
+)
+def test_untrusted_refuses_serialisation(duplicate: Any) -> None:
+    # A pickle carries the value out of reach of every rule here (a cache, a queue, a
+    # file); a copy would carry it with the same reference.
+    with pytest.raises(TypeError) as refused:
+        duplicate(untrusted())
+    assert PAYLOAD not in str(refused.value)
+    assert PAYLOAD not in "".join(traceback.format_exception(refused.value))

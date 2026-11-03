@@ -97,6 +97,7 @@ FORGED = {
     "in-list": {"query": WORD, "filters": [{"owner": "{other}"}]},
     "fullwidth": {"query": WORD, "ａｄｖｉｓｏｒ_id": "{other}"},
     "german": {"query": WORD, "berater_id": "{other}"},
+    "mitarbeiter": {"query": WORD, "mitarbeiter_id": "{other}"},
     "on-behalf": {"query": WORD, "onBehalfOf": "{other}"},
     "user": {"query": WORD, "user": "{other}"},
     "homoglyph": {"query": WORD, "\u0430dvisor_id": "{other}"},  # Cyrillic a

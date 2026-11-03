@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 import pytest
 from pydantic import (
@@ -48,7 +48,8 @@ from app.harness.tools import (
     identity_term,
 )
 
-FORBID = ConfigDict(extra="forbid")
+# Every arguments model the registry admits forbids extra keys and is frozen.
+FORBID = ConfigDict(extra="forbid", frozen=True)
 
 
 class Clean(BaseModel):
@@ -269,6 +270,8 @@ IDENTITY_NAMES = [
     "berater_id",
     "beraterId",
     "benutzer",
+    "mitarbeiter_id",
+    "MitarbeiterId",
     "user",
     "userName",
     "principal",
@@ -307,7 +310,7 @@ def test_identity_through_a_name_behind_an_alias() -> None:
     # validate_by_name: the field name is accepted as well as the alias.
     by_name = model(
         "ByName",
-        ConfigDict(extra="forbid", validate_by_name=True),
+        ConfigDict(extra="forbid", frozen=True, validate_by_name=True),
         advisor_id=(str, Field(alias="query")),
     )
     problems = problems_of(clean_spec(arguments=by_name))
@@ -343,6 +346,7 @@ def test_identity_terms_are_the_plans() -> None:
         "on_behalf",
         "berater",
         "benutzer",
+        "mitarbeiter",  # plan amendment (Timur, 2026-11-03)
     }
 
 
@@ -590,3 +594,62 @@ def test_odd_argument_shapes(registry: ToolRegistry, arguments: dict[Any, Any], 
     # test-7
     outcome = rejected(registry.validate_call("probe_tool", arguments))
     assert kind in [error.type for error in outcome.errors], outcome.errors
+
+
+# Fable's security review of PR 6, and the plan amendment (Timur, 2026-11-03).
+
+
+class Mutable(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str
+
+
+class MutableInner(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    term: str
+
+
+class FrozenOuter(BaseModel):
+    model_config = FORBID
+    query: str
+    filters: MutableInner | None = None
+
+
+@pytest.mark.parametrize(
+    ("arguments", "needle"),
+    [(Mutable, "Mutable: not frozen"), (FrozenOuter, "MutableInner: not frozen")],
+    ids=["top", "nested"],
+)
+def test_arguments_models_are_frozen(arguments: type[BaseModel], needle: str) -> None:
+    # A validated call is what the advisor approves; no model in it may change after.
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any(needle in problem and "frozen=True" in problem for problem in problems), problems
+
+
+class Shifting(BaseModel):
+    """Shows a closed schema to the first call and an open one to every later call."""
+
+    model_config = FORBID
+    query: str
+    calls: ClassVar[list[int]] = []
+
+    @classmethod
+    def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        schema = super().model_json_schema(*args, **kwargs)
+        cls.calls.append(1)
+        if len(cls.calls) > 1:
+            schema["additionalProperties"] = True
+        return schema
+
+
+def test_the_stored_schema_is_the_checked_one() -> None:
+    # Fable: register() must store the schema problems() checked, not ask the model again.
+    Shifting.calls.clear()
+    registry = ToolRegistry()
+    try:
+        registry.register(clean_spec(arguments=Shifting))
+    except RegistrationError:
+        return  # refusing a model that shows two schemas is as good
+    assert registry.schema("probe_tool")["additionalProperties"] is False, (
+        f"stored a schema that was not checked ({len(Shifting.calls)} calls)"
+    )

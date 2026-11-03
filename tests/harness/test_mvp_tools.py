@@ -28,7 +28,7 @@ from app.harness.tools import (
 # The plan's identity terms, written out here rather than taken from app/harness/tools.py,
 # so this check does not depend on the matcher it backs up.
 IDENTITY = re.compile(
-    r"advisor|user|principal|tenant|owner|identity|role|on_?behalf|berater|benutzer",
+    r"advisor|user|principal|tenant|owner|identity|role|on_?behalf|berater|benutzer|mitarbeiter",
     re.IGNORECASE,
 )
 
