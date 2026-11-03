@@ -10,9 +10,11 @@
 All four touch client data, so all four are CONFIDENTIAL. The READ tools return
 Untrusted results; the other two return a Proposal, which approves nothing
 (app/harness/approval.py). No argument names an advisor: whose mandates a call reaches
-is decided by the login and row-level security, so a mandate id the model names is only
-ever looked up among the advisor's own. Each argument has bounds; the canary scan and
-the recipient allowlist are M2's (app/harness/policy.py).
+is decided by the login and row-level security. M1's handlers must therefore look up a
+mandate id the model names only inside the advisor transaction (app/db/session.py),
+where another advisor's mandate does not exist; M1 tests that through these tools. Each
+argument has bounds; the canary scan and the recipient allowlist are M2's
+(app/harness/policy.py).
 """
 
 from __future__ import annotations
@@ -51,7 +53,8 @@ class GetPortfolio(Arguments):
 
 class DraftEmail(Arguments):
     mandate_id: MandateId
-    to: list[Address] = Field(min_length=1, max_length=10)
+    # A tuple, so a validated call cannot gain a recipient (review finding sec-5).
+    to: tuple[Address, ...] = Field(min_length=1, max_length=10)
     subject: str = Field(min_length=1, max_length=200)
     body: str = Field(min_length=1, max_length=20_000)
 

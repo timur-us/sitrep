@@ -1,6 +1,6 @@
 # SITREP — threat model
 
-Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database) 2026-10-31 (M0 PR 5b: row-level security) and 2026-11-03 (M0 PR 6: tool registry) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
+Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database), 2026-10-31 (M0 PR 5b: row-level security) and 2026-11-03 (M0 PR 6: tool registry) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
 Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the system prompt staying secret (Kerckhoffs).
 
 ## Assets
@@ -32,8 +32,8 @@ Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the
 
 | # | Path | Mitigation | When |
 |---|---|---|---|
-| 1 | Indirect prompt injection through an e-mail or document → exfiltration through a link, an image or a tool argument (LLM01, LLM02) | provenance wrapper, output allowlists, no auto-loaded images in the UI, recipient allowlist, canary scan over answers and tool arguments | **MVP** (M0 interface: READ results are `Untrusted`, rendered only through `wrap()`; M1 measured, M2 hardened) |
-| 2 | Cross-mandate leak through retrieval without scoping, or through a tool argument that names another advisor (LLM02) | row-level security: app role is not table owner, no BYPASSRLS, FORCE ROW LEVEL SECURITY, advisor id set per transaction (`set_config(…, true)`, the bindable `SET LOCAL`) from the verified login only; the role layout below it, the pool guard and bind-only SQL (ADR 0008, "Local database" below) | M0 roles (PR 5a) and RLS (PR 5b), M1 test, M2 red-team case |
+| 1 | Indirect prompt injection through an e-mail or document → exfiltration through a link, an image or a tool argument (LLM01, LLM02) | provenance wrapper, output allowlists, no auto-loaded images in the UI, recipient allowlist, canary scan over answers and tool arguments | **MVP** (M0 interface: READ results are typed `Untrusted` and not rendered by accident, `wrap()` being the sanctioned way to the text; M1 measured, M2 hardened) |
+| 2 | Cross-mandate leak through retrieval without scoping, or through a tool argument that names another advisor (LLM02) | row-level security: app role is not table owner, no BYPASSRLS, FORCE ROW LEVEL SECURITY, advisor id set per transaction (`set_config(…, true)`, the bindable `SET LOCAL`) from the verified login only; the role layout below it, the pool guard and bind-only SQL (ADR 0008, "Local database" below) | M0 roles (PR 5a), RLS (PR 5b) and the tool registry (PR 6), M1 test, M2 red-team case |
 | 3 | Forged identity header against the built-in auth | the app trusts only headers set by the platform after it strips client-supplied ones; a test proves a self-set `X-MS-CLIENT-PRINCIPAL` does nothing | M3 |
 | 4 | Tool misuse: draft addressed to Mallory, follow-up with malicious content, approval bypass (LLM06) | approval gate with server-issued, signed, single-use tokens; recipient allowlist; the model cannot mint an approval | M0 registry (DRAFT and SIDE_EFFECT tools must require approval), M1–M2 |
 | 5 | Poisoning of the knowledge base (LLM04) | provenance, origin filters, eval case | M4 |

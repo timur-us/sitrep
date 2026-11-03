@@ -13,7 +13,9 @@ accident:
 wrap() is the one way to the text: it renders the value inside an `<untrusted …>`
 delimiter that names the tool and the records it came from. The text and the provenance
 are escaped, so a document that says `</untrusted>` cannot close the delimiter and write
-outside it. A str is rendered as it is; anything else as JSON through pydantic. M2 adds
+outside it. The cost: the model reads `&`, `<` and `>` as entities (`R&amp;D`, `&lt;5 %`)
+and may quote them so; the number guard compares against the source, not this text.
+A str is rendered as it is; anything else as JSON through pydantic. M2 adds
 the canary scan and measures the provenance rendering against the red-team corpus; M0
 fixes that wrap() is the only way out and that the text stays inside.
 
@@ -131,6 +133,8 @@ class TokenBudget(Protocol):
     - charge() raises BudgetExceeded once remaining() would go below zero; the loop then
       ends the turn with a stated reason, and never truncates a tool result silently;
     - remaining() never goes up within a request.
+    - The rate limit per identity (path 8, many identities) sits beside it, keyed by the verified
+      advisor; it is not this Protocol's.
     """
 
     def remaining(self) -> int: ...

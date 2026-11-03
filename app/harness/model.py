@@ -14,8 +14,9 @@ class ModelClient(Protocol):
     """M1 contract:
 
     - One client factory builds it from settings. The direct Messages API is the default
-      route; Foundry is a configuration switch in the same factory (ADR 0003). The API
-      key is the only secret and is never logged.
+      route; Foundry is a configuration switch in the same factory (ADR 0003). The
+      endpoint comes from settings only, never from model or tool output. The API key is
+      never logged.
     - create() sends one Messages API request and returns the response as a mapping. The
       tools are the registry's checked schemas (ToolRegistry.schema()), nothing else.
     - No forced tool_choice: the runtime model refuses it (ADR 0001). The loop, not the

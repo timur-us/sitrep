@@ -25,10 +25,13 @@ class OutputPolicy(Protocol):
 
     - check_answer() runs on every answer before the UI sees it; check_arguments() runs
       on every validated tool call before the approval gate and before any handler.
-    - Links and images are allowed only to hosts on an allowlist built from
-      app/config/branding.py, of domains with no redirect or proxy endpoint (the EchoLeak
-      lesson in the threat model). Recipients of draft_email only from the recipient
-      allowlist.
+    - Links and images, inline or reference-style, are allowed only to hosts on an
+      allowlist built from app/config/branding.py, of domains with no redirect or proxy
+      endpoint (the EchoLeak lesson in the threat model). That holds for answers and for
+      every string argument of a tool call alike: a draft_email body or a follow-up's
+      notes is an exfiltration path too. Recipients of draft_email only from the
+      recipient allowlist, checked per address (no header line breaks).
+    - check_arguments() runs on the stored call that will execute, not on a copy.
     - The canary scan runs over answers and over every argument value; a hit blocks the
       output and raises the canary alarm in the trace.
     - A refusal is a Decision with allowed=False and the rule ids; the trace records the

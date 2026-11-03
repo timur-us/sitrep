@@ -11,22 +11,30 @@ holds, and reports all the rules a spec breaks at once (RegistrationError):
 - the arguments are a pydantic model, and its JSON schema (`model_json_schema()`, the one
   the model is shown) is walked recursively, `$defs` included. Every object says
   `additionalProperties: false`, which also refuses `dict[str, Any]`, and every value
-  has a type, which refuses `Any` and a bare `list`;
+  has a type, which refuses `Any` and a bare `list`. A JSON-in-a-string value
+  (`Json[...]`) is refused: the object inside it would escape both checks;
 - no name an argument can be sent under matches the identity pattern: the field names,
-  aliases and alias choices of the model and of every model nested in it, and the
-  schema's property names. Names are plain ASCII, so a homoglyph cannot slip past the
+  aliases, alias paths and alias choices of the model and of every model nested in it
+  (in lists, tuples, unions and Annotated), and the schema's property names. The match
+  is a substring, so it also refuses names such as username, ownership or parole: a
+  field gets another name. Names are plain ASCII, so a homoglyph cannot slip past the
   pattern. The advisor comes from the verified login only (CLAUDE.md rule 8).
 
 validate_call() turns the model's arguments into a ValidCall, or a RejectedCall with
-structured errors: a type, a location and pydantic's message, which names the rule and
-not the value; the input is never copied in. Keys that match the identity pattern get an
-`identity_argument` error of their own; any other unknown key is refused as
-`extra_forbidden`, since every model forbids extra keys. A location can carry key names
-the model sent, so traces record error types only (M1).
+structured errors: a type, a location and a message. No input value is copied into an
+error: the message is pydantic's only for the error types in SAFE_MESSAGES, whose
+templates name the rule and never the input; any other type (a custom validator, an
+unknown union tag) gets FIXED_MESSAGE. The location is pydantic's and can carry key
+names the model sent, so traces record error types only (M1). Keys that match the
+identity pattern get an `identity_argument` error of their own; any other unknown key
+is refused as `extra_forbidden`, since every model forbids extra keys.
 
-What this does not see: a handler that ignores its validated arguments, or a field with
-a harmless name and a harmful meaning. Row-level security is the boundary; the registry
-keeps identity out of the model's reach.
+What this does not see: a handler that ignores its validated arguments; a field with a
+harmless name and a harmful meaning; a model that rewrites its input in a before, wrap
+or plain validator, or that shows another schema than it validates (WithJsonSchema,
+SkipJsonSchema, json_schema_extra, a RootModel). The MVP models use none of these; M1
+decides whether the registry refuses them. Row-level security is the boundary; the
+registry keeps identity out of the model's reach.
 """
 
 from __future__ import annotations
@@ -79,6 +87,47 @@ _SCHEMA_ONE = (
 )
 # A schema with one of these says what it accepts; one without accepts anything.
 _TYPED = ("type", "$ref", "enum", "const", "anyOf", "oneOf", "allOf")
+# pydantic's Json[...]: a string whose content is another schema.
+_JSON_IN_STRING = ("contentSchema", "contentMediaType")
+# Error types whose pydantic message names the rule and never the input (pydantic 2.14).
+SAFE_MESSAGES = frozenset(
+    {
+        "bool_parsing",
+        "bool_type",
+        "date_from_datetime_inexact",
+        "date_from_datetime_parsing",
+        "date_parsing",
+        "date_type",
+        "dict_type",
+        "enum",
+        "extra_forbidden",
+        "float_parsing",
+        "float_type",
+        "frozen_instance",
+        "greater_than",
+        "greater_than_equal",
+        "int_from_float",
+        "int_parsing",
+        "int_type",
+        "invalid_key",
+        "less_than",
+        "less_than_equal",
+        "list_type",
+        "literal_error",
+        "missing",
+        "model_attributes_type",
+        "model_type",
+        "string_pattern_mismatch",
+        "string_too_long",
+        "string_too_short",
+        "string_type",
+        "too_long",
+        "too_short",
+        "tuple_type",
+        "union_tag_not_found",
+    }
+)
+FIXED_MESSAGE = "the value does not fit the schema"
 
 
 def identity_term(name: str) -> str | None:
@@ -166,6 +215,8 @@ def schema_problems(schema: object, root: str = "schema") -> list[str]:
             continue
         types = node.get("type")
         types = types if isinstance(types, list) else [types]
+        if any(key in node for key in _JSON_IN_STRING):
+            problems.append(f"{path}: a JSON-in-a-string value (Json[...]) is refused")
         is_object = "object" in types or "properties" in node
         if is_object and node.get("additionalProperties") is not False:
             problems.append(f"{path}: additionalProperties is not false (extra='forbid')")
@@ -306,7 +357,11 @@ class ToolRegistry:
             parsed = spec.arguments.model_validate(arguments)
         except ValidationError as invalid:
             errors += [
-                CallError(error["type"], tuple(error["loc"]), error["msg"])
+                CallError(
+                    error["type"],
+                    tuple(error["loc"]),
+                    error["msg"] if error["type"] in SAFE_MESSAGES else FIXED_MESSAGE,
+                )
                 for error in invalid.errors(
                     include_url=False, include_input=False, include_context=False
                 )
