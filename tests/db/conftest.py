@@ -12,11 +12,13 @@ from collections.abc import Iterator
 import psycopg
 import pytest
 from dbtools import SUPERUSER_URL, Connection
+from forged_payloads import BODIES, token_document_id
+from psycopg import sql
 from psycopg_pool import ConnectionPool
-from seed_rows import seeded_database
+from seed_rows import MINE, OTHER, insert, rows_for, seeded_database
 
 from app.config.settings import DATABASE_PORT, Settings
-from app.db import session
+from app.db import names, session
 from app.db.connect import connect
 from app.db.migrate import RECORD
 
@@ -54,3 +56,31 @@ def app_pool(settings: Settings, database: None) -> Iterator[ConnectionPool]:
     """The app's pool on DATABASE_URL, one connection, opened for one test."""
     with session.make_pool(settings.database_url, max_size=1, timeout=5.0) as pool:
         yield pool
+
+
+@pytest.fixture(scope="module")
+def token_documents(seeded: None) -> Iterator[None]:
+    """forged_payloads.WORD in one document per advisor (MINE, OTHER) and language."""
+    with connect(SUPERUSER_URL, autocommit=True) as conn:
+        planted = []
+        for person in (MINE, OTHER):
+            for lang, body in BODIES.items():
+                row = {
+                    "advisor_id": person.id,
+                    "id": token_document_id(person.id, lang),
+                    "mandate_id": rows_for(person.id, "1")["mandates"]["id"],
+                    "title": "Token note",
+                    "body": body,
+                    "lang": lang,
+                }
+                insert(conn, f"{names.SCHEMA}.documents", row)
+                planted.append(row["id"])
+        try:
+            yield
+        finally:
+            conn.execute(
+                sql.SQL("DELETE FROM {} WHERE id = ANY(%s)").format(
+                    sql.Identifier(names.SCHEMA, "documents")
+                ),
+                (planted,),
+            )

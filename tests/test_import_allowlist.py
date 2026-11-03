@@ -26,6 +26,8 @@ ALLOWED = frozenset(
         "collections",
         "contextlib",
         "dataclasses",
+        # app/harness/mvp_tools.py: the follow-up's due date. No clock is read in app/.
+        "datetime",
         "enum",
         "errno",
         "fastapi",

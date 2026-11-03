@@ -23,6 +23,15 @@ SITREP (situation report) lets a model call four tools for an advisor. Two of th
 
 Our own loop on the Messages API, in `app/harness/` (interfaces in M0, PR 6; the loop in M1). No Agent SDK, no tool runner, no Managed Agents.
 
+### Amendment (PR 6, 2026-11-03)
+
+Timur's decisions after Fable's security review of PR 6:
+- **Untrusted marker.** A READ result enters the context only through `wrap()`: `<untrusted tool="…" records="…">`, the text, `</untrusted>`. Text and attributes are HTML-escaped, so a document cannot close the marker; the cost is that the model reads `&`, `<` and `>` as entities. M2 measures the rendering.
+- **Identity words.** An argument name is refused when, after NFKC, case folding and removing separators, it contains one of the plan's terms. That is stricter than the plan's camelCase split, which lets `advisorid` pass; the cost is refusing names such as `username`.
+- **`Proposal`** is the result of every DRAFT and SIDE_EFFECT tool: the id of a pending approval, nothing that approves it.
+- **Error locations stay** in `CallError`, so the model sees which key was refused; traces record error types only (an M1 test).
+- **Approval tokens** are designed in M1's ADR, leaning to opaque random tokens stored as a hash, which need no signing key.
+
 ## Consequences
 
 - **Easier:** the approval gate, the provenance wrapper, the output policy and the canary scan sit between the model and every tool call, where tests can reach them. Traces carry exactly what we allow.

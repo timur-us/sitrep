@@ -23,14 +23,14 @@ from collections.abc import Iterator
 
 import psycopg
 import pytest
-from dbtools import SUPERUSER_URL, Connection
+from dbtools import Connection
+from forged_payloads import BODIES, PAYLOAD_IDS, PAYLOADS, SEARCH, SETTING, WORD, own
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 from seed_rows import (
     FACTORIES,
     MINE,
     OTHER,
-    SEED,
     TABLES,
     count,
     discovered_tables,
@@ -43,13 +43,12 @@ from seed_rows import (
 
 from app.auth.identity import VerifiedAdvisor, issue
 from app.config.settings import Settings
-from app.db import names, queries
+from app.db import names
 from app.db.connect import connect
 from app.db.session import advisor_transaction
 
 pytestmark = pytest.mark.usefixtures("database", "seeded")
 
-SETTING = "SELECT current_setting('app.advisor_id', true)"
 SET_ADVISOR = "SELECT set_config('app.advisor_id', %s, true)"
 QUALIFIED = [f"{names.SCHEMA}.{table}" for table in FACTORIES]
 
@@ -349,66 +348,8 @@ def test_isolation_odd_ids_see_nothing(app_pool: ConnectionPool, advisor_id: str
     assert not any(seen.values()), seen
 
 
-# A forged parameter.
-
-# A made-up word, planted in one document per advisor and language.
-WORD = "quorbitex"
-BODIES = {
-    "english": f"Call note: the client asked about {WORD} before the review.",
-    "german": f"Gesprächsnotiz: Die Kundin fragte vor dem Termin nach {WORD}.",
-}
-SEARCH = {"english": queries.SEARCH_DOCUMENTS_ENGLISH, "german": queries.SEARCH_DOCUMENTS_GERMAN}
-
-
-def token_document_id(advisor_id: str, lang: str) -> str:
-    return f"{SEED}-{advisor_id}-token-{lang}"
-
-
-@pytest.fixture(scope="module")
-def token_documents(seeded: None) -> Iterator[None]:
-    with connect(SUPERUSER_URL, autocommit=True) as conn:
-        planted = []
-        for person in (MINE, OTHER):
-            for lang, body in BODIES.items():
-                row = {
-                    "advisor_id": person.id,
-                    "id": token_document_id(person.id, lang),
-                    "mandate_id": rows_for(person.id, "1")["mandates"]["id"],
-                    "title": "Token note",
-                    "body": body,
-                    "lang": lang,
-                }
-                insert(conn, f"{names.SCHEMA}.documents", row)
-                planted.append(row["id"])
-        try:
-            yield
-        finally:
-            conn.execute(
-                sql.SQL("DELETE FROM {} WHERE id = ANY(%s)").format(
-                    sql.Identifier(names.SCHEMA, "documents")
-                ),
-                (planted,),
-            )
-
-
-def payloads() -> list[tuple[str, str]]:
-    """(language, payload): each closes the tsquery literal, ORs in a set_config that hands
-    the rest of the transaction to the other advisor, and keeps the statement valid."""
-    forge = f"set_config('app.advisor_id', '{OTHER.id}', true) IS NOT NULL"
-    return [
-        ("english", f"{WORD}') OR {forge} OR d.tsv @@ websearch_to_tsquery('english', '{WORD}"),
-        ("english", f"{WORD}') OR {forge} -- show every document"),
-        ("german", f"{WORD}') OR {forge} OR d.tsv @@ websearch_to_tsquery('german', '{WORD}"),
-        ("german", f"{WORD}') OR {forge} -- alle Unterlagen anzeigen"),
-    ]
-
-
-PAYLOADS = payloads()
-PAYLOAD_IDS = [f"{lang}-{index}" for index, (lang, _) in enumerate(PAYLOADS)]
-
-
-def own(person: object, lang: str) -> list[tuple[str, str]]:
-    return [(person.id, token_document_id(person.id, lang))]  # type: ignore[attr-defined]
+# A forged parameter. The word, the payloads and the token_documents fixture are shared
+# with tests/db/test_forged_tool_argument.py (tests/db/forged_payloads.py, conftest.py).
 
 
 @pytest.mark.usefixtures("token_documents")
