@@ -164,7 +164,12 @@ def test_entry_point_refuses_without_the_shim(
     def no_bind(self: uvicorn.Config) -> socket.socket:
         raise AssertionError("bound a socket; the entry point should have refused")
 
+    def no_server(self: uvicorn.Server, sockets: list | None = None) -> None:
+        raise AssertionError("the server started; the entry point should have refused")
+
+    # Both: a start that binds by itself never reaches bind_socket(), and must not serve.
     monkeypatch.setattr(uvicorn.Config, "bind_socket", no_bind)
+    monkeypatch.setattr(uvicorn.Server, "run", no_server)
     monkeypatch.setitem(sys.modules, "app.auth.dev_shim", None)
     monkeypatch.chdir(tmp_path)
     for name, value in {DEV_AUTH: "1", HOST: LOOPBACK, PORT: str(free_port())}.items():
