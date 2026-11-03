@@ -14,6 +14,8 @@ import tomllib
 import pytest
 from repo_files import ROOT
 
+from app.config.settings import env_name
+
 # Key commands per target, as `make -n` prints them.
 TARGET_COMMANDS = {
     "lint-test": [
@@ -31,7 +33,16 @@ TARGET_COMMANDS = {
         "--require-hashes",
         "--disable-pip",
     ],
-    "docker-build": ["docker build", "id -u", "-p 127.0.0.1::8000", "-e TRACE_PLAINTEXT=1"],
+    "docker-build": [
+        "docker build",
+        "id -u",
+        "-p 127.0.0.1::8000",
+        f"-e {env_name('trace_plaintext')}=1",
+        # The dev login shim is not in the image, and asking for it refuses to start.
+        "import app.auth.dev_shim",
+        f"-e {env_name('dev_auth')}=1",
+        f"-e {env_name('host')}=",
+    ],
     "web-deps": ["uv run playwright install chromium"],
     "web-test": ["uv run playwright install chromium", "uv run python -P -m pytest tests/web"],
     "evals": ["uv run python -P -m app.runners.evals"],

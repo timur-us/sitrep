@@ -37,6 +37,20 @@ def server_config(
     )
 
 
+class StartRefused(ValueError):
+    """A configuration the entry point refuses to serve. The message names no value."""
+
+
+def listening_sockets(server: uvicorn.Server) -> list:
+    """Scaffolding (PR 7, red): the sockets a started server listens on."""
+    return []
+
+
+def verify_listeners(sockets: list, port: int) -> None:
+    """Scaffolding (PR 7, red): checks nothing yet."""
+    return
+
+
 def main() -> int:
     settings = Settings(_env_file=".env")
     try:

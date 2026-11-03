@@ -21,9 +21,20 @@ from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.config import branding
 from app.db import names
 
 LOOPBACK = "127.0.0.1"
+# Scaffolding (PR 7, red): the variable names the settings are meant to read.
+ENV_PREFIX = f"{branding.SLUG.upper()}_"
+UNPREFIXED = frozenset({"database_url", "migration_database_url"})
+
+
+def env_name(field: str) -> str:
+    """The environment variable a settings field is read from."""
+    return field.upper() if field in UNPREFIXED else ENV_PREFIX + field.upper()
+
+
 # compose.yaml publishes the database here: not 5432, where a native PostgreSQL may listen.
 DATABASE_PORT = 55432
 
