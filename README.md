@@ -16,6 +16,10 @@ Status: M0 in progress. See `docs/brief.md`, `docs/threat-model.md`, `docs/disco
 
 `app/harness/` holds what the M1 agent loop builds on: a tool registry that refuses a tool with an identity field (`advisor`, `user`, `berater`, `benutzer`, `mitarbeiter` and the other terms of the plan, in any spelling), an arguments model that is not frozen, an open schema, a read tool whose result is not marked untrusted, or a drafting or side-effect tool without approval; the four MVP tools, declared only; `Untrusted[T]`, a tool result that is not rendered by accident (`str`, `format`, `+` and `repr` all refuse to show it), with `wrap()` as the one sanctioned way to the text, inside a delimiter the text cannot close; and the approval, policy, model and token-budget interfaces. `app/embeddings/` has the embedder interface and a deterministic fake that cannot pass for the real model. Nothing calls a model yet. Details: `docs/runbooks/local-setup.md`, "The harness (M0)".
 
+## Dev login (M0)
+
+Until Entra ID in M3, `SITREP_DEV_AUTH=1 uv run python -P -m app` adds a local login at `http://127.0.0.1:8000/dev/login` for the three synthetic advisors; `/api/mandates` then lists the signed-in advisor's mandates, scoped by row-level security. The entry point refuses it (exit 2, before binding) on any host but exactly `127.0.0.1`, and the image does not carry it. Every request needs `Host: 127.0.0.1:<port>`, every POST an `Origin` of exactly `http://127.0.0.1:<port>`; sessions live in process memory behind an HttpOnly, SameSite=Strict cookie, and no header or query parameter can name the advisor. The settings' variables carry the prefix `SITREP_` (`SITREP_HOST`, `SITREP_PORT`, `SITREP_DEV_AUTH`, `SITREP_TRACE_PLAINTEXT`). ADR 0009; details in `docs/runbooks/local-setup.md`, "The dev login (M0)".
+
 ## What this project shows, and what it does not
 
 This section is a promise for the finished project. Each item names the milestone that delivers it; until then it is a plan, not a result.

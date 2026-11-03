@@ -75,7 +75,8 @@ def test_database_urls_are_loopback(
     message = str(error.value)
     # A rule is a substring; "a|b" accepts either.
     assert any(part in message for part in rule.split("|")), message
-    assert field.lower() in message, message
+    # The message names the variable (ADR 0009: an alias, since the URLs are unprefixed).
+    assert field in message, message
     # The rejected value is not echoed: it may carry a password.
     assert CANARY not in message
     assert url not in message

@@ -13,6 +13,9 @@ import tomllib
 
 from repo_files import ROOT
 
+from app.config.settings import env_name
+
+SHIM = "app/auth/dev_shim.py"
 DOCKERFILE = ROOT / "Dockerfile"
 DOCKERIGNORE = ROOT / ".dockerignore"
 DIGEST = re.compile(r"@sha256:[0-9a-f]{64}")
@@ -142,9 +145,13 @@ def test_runtime_stage() -> None:
     for keyword, arguments in runtime:
         if keyword == "ENV":
             env |= dict(pair.split("=", 1) for pair in arguments.split())
-    assert env.get("DEV_AUTH") == "0", env
-    assert env.get("HOST") == "0.0.0.0", env  # noqa: S104 - the container's own interface
-    assert "TRACE_PLAINTEXT" not in env or env["TRACE_PLAINTEXT"] == "0", env
+    # The variables the settings read (ADR 0009); the unprefixed ones would do nothing.
+    assert env.get(env_name("dev_auth")) == "0", env
+    assert env.get(env_name("host")) == "0.0.0.0", env  # noqa: S104 - the container's own
+    plaintext = env_name("trace_plaintext")
+    assert plaintext not in env or env[plaintext] == "0", env
+    stale = sorted({"HOST", "PORT", "DEV_AUTH", "TRACE_PLAINTEXT"} & env.keys())
+    assert not stale, f"unprefixed settings in the image: {stale}"
 
     cmds = [arguments for keyword, arguments in runtime if keyword == "CMD"]
     assert cmds and json.loads(cmds[-1]) == ["python", "-P", "-m", "app"], cmds
@@ -169,3 +176,6 @@ def test_dockerignore() -> None:
     excluded = set(rules[last + 1 :])
     for rule in ("**/.env*", ".git", ".claude", "data/synthetic/out", "tests", "**/__pycache__"):
         assert rule in excluded, f"{rule} is not excluded after the re-includes"
+    # The dev login shim never ships (plan, PR 7); `make docker-build` checks the image.
+    assert SHIM in excluded, f"{SHIM} is not excluded after the re-includes"
+    assert (ROOT / SHIM).is_file(), f"{SHIM} does not exist: the rule excludes nothing"

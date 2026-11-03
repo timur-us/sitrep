@@ -6,6 +6,7 @@ without proxy variables.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +20,7 @@ from pydantic import ValidationError
 from repo_files import ROOT
 
 from app import __main__ as entry
-from app.config.settings import Settings
+from app.config.settings import Settings, env_name
 from app.main import create_app
 from app.observability import tracing
 
@@ -28,6 +29,9 @@ PROXY_VARIABLES = tuple(
     name for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())
 )
 LOOPBACK_PROXY = "http://127.0.0.1:9"
+# The variables the settings read (ADR 0009: prefixed, except the database URLs).
+HOST, PORT = env_name("host"), env_name("port")
+DEV_AUTH, TRACE_PLAINTEXT = env_name("dev_auth"), env_name("trace_plaintext")
 
 FLAG_VALUES = [
     ("1", True),
@@ -44,8 +48,8 @@ FLAG_VALUES = [
 
 @pytest.mark.parametrize(("value", "on"), FLAG_VALUES)
 def test_flags_exact_1(monkeypatch: pytest.MonkeyPatch, value: str, on: bool) -> None:
-    monkeypatch.setenv("TRACE_PLAINTEXT", value)
-    monkeypatch.setenv("DEV_AUTH", value)
+    monkeypatch.setenv(TRACE_PLAINTEXT, value)
+    monkeypatch.setenv(DEV_AUTH, value)
     settings = Settings(_env_file=None)
     assert settings.trace_plaintext == value, "the value was changed on the way in"
     assert (settings.trace_plaintext_on, settings.dev_auth_on) == (on, on), repr(value)
@@ -55,8 +59,8 @@ def test_flags_exact_1(monkeypatch: pytest.MonkeyPatch, value: str, on: bool) ->
 def test_flags_are_independent(
     monkeypatch: pytest.MonkeyPatch, plaintext: str, dev_auth: str
 ) -> None:
-    monkeypatch.setenv("TRACE_PLAINTEXT", plaintext)
-    monkeypatch.setenv("DEV_AUTH", dev_auth)
+    monkeypatch.setenv(TRACE_PLAINTEXT, plaintext)
+    monkeypatch.setenv(DEV_AUTH, dev_auth)
     settings = Settings(_env_file=None)
     assert (settings.trace_plaintext_on, settings.dev_auth_on) == (
         plaintext == "1",
@@ -66,9 +70,39 @@ def test_flags_are_independent(
 
 @pytest.mark.parametrize("port", ["-1", "65536", "http"])
 def test_port_must_be_a_port(monkeypatch: pytest.MonkeyPatch, port: str) -> None:
-    monkeypatch.setenv("PORT", port)
+    monkeypatch.setenv(PORT, port)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_settings_names_are_prefixed() -> None:
+    # Review finding sec-7 of PR 3 (Timur, 2026-10-29): tcsh exports HOST, and the
+    # names are matched without regard to case, so unprefixed names could move the bind.
+    prefix = HOST.removesuffix("HOST")
+    assert prefix and prefix.endswith("_"), prefix
+    assert {env_name(field) for field in Settings.model_fields} == {
+        f"{prefix}HOST",
+        f"{prefix}PORT",
+        f"{prefix}DEV_AUTH",
+        f"{prefix}TRACE_PLAINTEXT",
+        "DATABASE_URL",
+        "MIGRATION_DATABASE_URL",
+    }
+
+
+@pytest.mark.parametrize("spelling", [str.upper, str.lower, str.title])
+def test_unprefixed_names_are_ignored(monkeypatch: pytest.MonkeyPatch, spelling) -> None:
+    unprefixed = {"HOST": ALL_INTERFACES, "PORT": "9", "DEV_AUTH": "1", "TRACE_PLAINTEXT": "1"}
+    for name, value in unprefixed.items():
+        monkeypatch.setenv(spelling(name), value)
+    settings = Settings(_env_file=None)
+    values = (settings.host, settings.port, settings.dev_auth, settings.trace_plaintext)
+    assert values == ("127.0.0.1", 8000, "0", "0"), values
+    # Control: the prefixed names, in any case, are read.
+    monkeypatch.setenv(spelling(HOST), ALL_INTERFACES)
+    monkeypatch.setenv(spelling(PORT), "9")
+    prefixed = Settings(_env_file=None)
+    assert (prefixed.host, prefixed.port) == (ALL_INTERFACES, 9)
 
 
 def test_env_example_is_safe() -> None:
@@ -80,7 +114,8 @@ def test_env_example_is_safe() -> None:
     assert (example.host, example.port) == ("127.0.0.1", 8000)
     assert (example.trace_plaintext_on, example.dev_auth_on) == (False, False)
     names = {line.split("=", 1)[0] for line in path.read_text().splitlines() if "=" in line}
-    assert {"DATABASE_URL", "MIGRATION_DATABASE_URL"} <= names, sorted(names)
+    assert {env_name(field) for field in Settings.model_fields} <= names, sorted(names)
+    assert not {"HOST", "PORT", "DEV_AUTH", "TRACE_PLAINTEXT"} & names, sorted(names)
     defaults = Settings(_env_file=None)
     assert (example.database_url, example.migration_database_url) == (
         defaults.database_url,
@@ -89,7 +124,7 @@ def test_env_example_is_safe() -> None:
 
 
 def test_plaintext_needs_console_and_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TRACE_PLAINTEXT", "1")
+    monkeypatch.setenv(TRACE_PLAINTEXT, "1")
     plaintext = Settings(_env_file=None)
 
     # Allowed: the console exporter, unfiltered, on 127.0.0.1.
@@ -123,23 +158,27 @@ def test_entry_point_refuses_plaintext_off_loopback(
 ) -> None:
     monkeypatch.setattr(uvicorn.Server, "run", _no_server)
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("TRACE_PLAINTEXT", "1")
-    monkeypatch.setenv("HOST", ALL_INTERFACES)
+    monkeypatch.setenv(TRACE_PLAINTEXT, "1")
+    monkeypatch.setenv(HOST, ALL_INTERFACES)
     assert entry.main() == 2
-    assert "TRACE_PLAINTEXT=1" in capsys.readouterr().err
+    assert f"{TRACE_PLAINTEXT}=1" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
     ("variables", "host"),
-    [({"TRACE_PLAINTEXT": "1"}, "127.0.0.1"), ({"HOST": ALL_INTERFACES}, ALL_INTERFACES)],
+    [({TRACE_PLAINTEXT: "1"}, "127.0.0.1"), ({HOST: ALL_INTERFACES}, ALL_INTERFACES)],
 )
 @pytest.mark.usefixtures("restore_logging")
 def test_entry_point_starts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variables: dict[str, str], host: str
 ) -> None:
     # Positive cases: plaintext on loopback, and the image's 0.0.0.0 without plaintext.
+    # Nothing is bound: bind_socket() hands out an unbound socket.
     started: list[str] = []
-    monkeypatch.setattr(uvicorn.Server, "run", lambda server: started.append(server.config.host))
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", lambda config: socket.socket())
+    monkeypatch.setattr(
+        uvicorn.Server, "run", lambda server, sockets=None: started.append(server.config.host)
+    )
     monkeypatch.chdir(tmp_path)
     for name, value in variables.items():
         monkeypatch.setenv(name, value)
@@ -151,13 +190,13 @@ def test_entry_point_starts(
 def test_entry_point_reads_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # Only `python -m app` reads .env; the same refusal, driven from the file.
     monkeypatch.setattr(uvicorn.Server, "run", _no_server)
-    (tmp_path / ".env").write_text(f"TRACE_PLAINTEXT=1\nHOST={ALL_INTERFACES}\n")
+    (tmp_path / ".env").write_text(f"{TRACE_PLAINTEXT}=1\n{HOST}={ALL_INTERFACES}\n")
     monkeypatch.chdir(tmp_path)
     assert entry.main() == 2
 
 
 def test_settings_ignore_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    (tmp_path / ".env").write_text(f"HOST={ALL_INTERFACES}\nPORT=9\nTRACE_PLAINTEXT=1\n")
+    (tmp_path / ".env").write_text(f"{HOST}={ALL_INTERFACES}\n{PORT}=9\n{TRACE_PLAINTEXT}=1\n")
     monkeypatch.chdir(tmp_path)
     # Control: the planted file would change the settings if it were read.
     assert Settings(_env_file=".env").host == ALL_INTERFACES
@@ -189,6 +228,7 @@ def test_proxy_variables_are_scrubbed() -> None:
     env |= dict.fromkeys(PROXY_VARIABLES, LOOPBACK_PROXY)
     env |= {"Https_Proxy": LOOPBACK_PROXY, "OTEL_SDK_DISABLED": "true"}
     env |= {"Host": ALL_INTERFACES, "PORT": "9", "DEV_AUTH": "1", "TRACE_PLAINTEXT": "1"}
+    env |= {HOST.title(): ALL_INTERFACES, PORT: "9", DEV_AUTH.lower(): "1", TRACE_PLAINTEXT: "1"}
     env |= {"PGHOSTADDR": "192.0.2.1", "PGPORT": "5432", "PGOPTIONS": "-c x=y", "PGTZ": "UTC"}
     probe = f"{Path(__file__).relative_to(ROOT).as_posix()}::test_proxy_environment_is_clean"
     result = subprocess.run(

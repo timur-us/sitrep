@@ -24,15 +24,16 @@ RUN uv sync --locked --no-dev --no-editable
 FROM python:3.12.16-slim-trixie@sha256:8523d6abeb48ceae0b7240d30c5808fc26cb79c1a635bacdf19cf3baecfbec07 AS runtime
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app
 COPY --from=build /opt/venv /opt/venv
-# HOST=0.0.0.0 is the container's own interface; `make docker-build` publishes it on
-# 127.0.0.1 only. DEV_AUTH stays off in the image (PR 7 removes the shim from it).
+# SITREP_HOST=0.0.0.0 is the container's own interface; `make docker-build` publishes it
+# on 127.0.0.1 only. SITREP_DEV_AUTH stays off: .dockerignore leaves the dev login shim
+# out of the image, and the entry point refuses SITREP_DEV_AUTH=1 without it (ADR 0009).
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    HOST=0.0.0.0 \
-    PORT=8000 \
-    DEV_AUTH=0 \
-    TRACE_PLAINTEXT=0
+    SITREP_HOST=0.0.0.0 \
+    SITREP_PORT=8000 \
+    SITREP_DEV_AUTH=0 \
+    SITREP_TRACE_PLAINTEXT=0
 USER 10001:10001
 EXPOSE 8000
 CMD ["python", "-P", "-m", "app"]

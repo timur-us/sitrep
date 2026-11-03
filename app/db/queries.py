@@ -23,3 +23,7 @@ SEARCH_DOCUMENTS_GERMAN = (
     " WHERE d.lang = 'german' AND d.tsv @@ websearch_to_tsquery('german', %s)"
     " ORDER BY d.advisor_id, d.id"
 )
+
+# The signed-in advisor's mandates (app/api/mandates.py). No advisor in the statement:
+# row-level security scopes it to the advisor of the transaction.
+LIST_MANDATES = "SELECT m.id, m.family FROM mandates m ORDER BY m.id"
