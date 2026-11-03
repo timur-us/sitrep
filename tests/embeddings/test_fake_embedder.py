@@ -59,11 +59,18 @@ def test_deterministic_across_processes() -> None:
     assert first == [fake.embed_query("Anleihen"), fake.embed_passages(["bonds", "Termin"])]
 
 
+def cosine(a: list[float], b: list[float]) -> float:
+    return dot(a, b) / (dot(a, a) ** 0.5 * dot(b, b) ** 0.5)
+
+
 def test_distinct_texts_give_distinct_vectors() -> None:
+    # Review finding test-9: a true cosine, not the dot product of unit vectors, and a
+    # bound on the mean as well as the worst pair.
     vectors = FakeEmbedder().embed_passages(TEXTS)
     assert len(vectors) == 100
-    worst = max(dot(a, b) for a, b in combinations(vectors, 2))
-    assert worst < 0.99, f"pairwise cosine up to {worst}"
+    cosines = [abs(cosine(a, b)) for a, b in combinations(vectors, 2)]
+    assert max(cosines) < 0.99, f"pairwise cosine up to {max(cosines)}"
+    assert sum(cosines) / len(cosines) < 0.2, f"mean |cosine| {sum(cosines) / len(cosines)}"
 
 
 def test_query_and_passage_differ() -> None:
@@ -107,7 +114,9 @@ def test_cannot_be_mistaken_for_the_model() -> None:
 def test_refuses_what_is_not_text(texts: object) -> None:
     with pytest.raises(TypeError):
         FakeEmbedder().embed_passages(texts)  # type: ignore[arg-type]
-    if isinstance(texts, str | bytes):
+    # Review finding test-16: embed_query refuses the same, a bytes value included.
+    one = texts if isinstance(texts, str | bytes) else texts[0]  # type: ignore[index]
+    if isinstance(one, str):
         return
     with pytest.raises(TypeError):
-        FakeEmbedder().embed_query(texts[0])  # type: ignore[index]
+        FakeEmbedder().embed_query(one)  # type: ignore[arg-type]

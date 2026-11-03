@@ -19,10 +19,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import pytest
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, create_model
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ConfigDict,
+    Discriminator,
+    Field,
+    Json,
+    create_model,
+    field_validator,
+)
 
 from app.harness.context import Untrusted
 from app.harness.tools import (
@@ -431,3 +441,152 @@ def test_deep_arguments_do_not_crash(registry: ToolRegistry) -> None:
         deep = {"x": deep}
     outcome = rejected(registry.validate_call("probe_tool", {"query": "x", "filters": deep}))
     assert "identity_argument" in [error.type for error in outcome.errors]
+
+
+# Review findings of PR 6 (sec-1, sec-3, test-1 to test-7).
+
+
+class JsonDict(BaseModel):
+    model_config = FORBID
+    query: str
+    filters: Json[dict[str, str]]
+
+
+class JsonModel(BaseModel):
+    model_config = FORBID
+    query: str
+    filters: Json[InnerForbid]
+
+
+@pytest.mark.parametrize("arguments", [JsonDict, JsonModel], ids=["dict", "model"])
+def test_json_string_fields_are_refused(arguments: type[BaseModel]) -> None:
+    # sec-1: Json[...] is a string in the schema, with the object inside contentSchema,
+    # and a key inside a JSON string is invisible to the identity scan of a call.
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any("properties.filters: a JSON-in-a-string" in problem for problem in problems), (
+        problems
+    )
+
+
+def test_identity_through_an_alias_path() -> None:
+    # test-1: AliasPath("advisor_id", 0) reads arguments["advisor_id"][0].
+    path = model("Path", query=(str, Field(validation_alias=AliasPath("advisor_id", 0))))
+    problems = problems_of(clean_spec(arguments=path))
+    assert any("'advisor_id'" in problem for problem in problems), problems
+
+
+HIDDEN = model("Hidden", query=(str, Field(validation_alias=AliasChoices("query", "advisor_id"))))
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [list[HIDDEN], HIDDEN | None, tuple[HIDDEN, ...], Annotated[HIDDEN, Field(description="x")]],
+    ids=["list", "optional", "tuple", "annotated"],
+)
+def test_identity_alias_choice_in_a_nested_container(annotation: Any) -> None:
+    # test-2: an alias choice the schema does not show, inside a container.
+    problems = problems_of(clean_spec(arguments=model("Outer", items=(annotation, ...))))
+    assert any("Hidden.query" in problem and "'advisor_id'" in problem for problem in problems), (
+        problems
+    )
+
+
+def test_empty_description() -> None:
+    # test-3
+    for description in ("", "   ", None):
+        problems = problems_of(clean_spec(description=description))
+        assert "description: empty" in problems, problems
+
+
+class Node(BaseModel):
+    model_config = FORBID
+    name: str = Field(max_length=20)
+    children: tuple[Node, ...] = ()
+
+
+def test_a_recursive_model_registers() -> None:
+    # test-3: the walks end on a model that refers to itself.
+    ToolRegistry().register(clean_spec(arguments=Node))
+
+
+def test_schema_is_a_fresh_copy() -> None:
+    # test-4: a caller that changes the schema it got changes nothing in the registry.
+    registry = ToolRegistry()
+    registry.register(clean_spec())
+    first = registry.schema("probe_tool")
+    first["additionalProperties"] = True
+    first["properties"]["advisor_id"] = {"type": "string"}
+    assert registry.schema("probe_tool") == Clean.model_json_schema()
+
+
+@pytest.mark.parametrize("name", ["username", "ownership", "parole", "userId", "co_owner"])
+def test_identity_near_misses_are_refused_by_design(name: str) -> None:
+    # test-5 / spec-4: the substring match refuses these too; a field gets another name.
+    assert identity_term(name) is not None, name
+
+
+def test_a_canary_in_a_key_name_is_in_the_location(registry: ToolRegistry) -> None:
+    # test-6 / sec-3: pinned as documented. A location names the keys the model sent, so
+    # traces record error types only (M1); the message never carries them.
+    outcome = rejected(registry.validate_call("probe_tool", {"query": "x", CANARY: 1}))
+    assert [(error.type, error.loc) for error in outcome.errors] == [("extra_forbidden", (CANARY,))]
+    assert all(CANARY not in error.msg for error in outcome.errors)
+
+
+class Echoing(BaseModel):
+    model_config = FORBID
+    query: str
+
+    @field_validator("query")
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise ValueError(f"not allowed: {value}")
+
+
+class KindA(BaseModel):
+    model_config = FORBID
+    kind: Literal["a"]
+
+
+class KindB(BaseModel):
+    model_config = FORBID
+    kind: Literal["b"]
+
+
+class Tagged(BaseModel):
+    model_config = FORBID
+    item: Annotated[KindA | KindB, Discriminator("kind")]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "call", "kind"),
+    [
+        (Echoing, {"query": CANARY}, "value_error"),
+        (Tagged, {"item": {"kind": CANARY}}, "union_tag_invalid"),
+    ],
+    ids=["validator", "union-tag"],
+)
+def test_messages_that_would_echo_the_input_are_replaced(
+    arguments: type[BaseModel], call: dict[str, Any], kind: str
+) -> None:
+    # sec-3 / test-6: pydantic writes the input into these messages.
+    registry = ToolRegistry()
+    registry.register(clean_spec(arguments=arguments))
+    outcome = rejected(registry.validate_call("probe_tool", call))
+    assert [error.type for error in outcome.errors] == [kind]
+    assert CANARY not in repr(outcome.errors), outcome.errors
+
+
+@pytest.mark.parametrize(
+    ("arguments", "kind"),
+    [
+        ({"query": "x", "filters": [[[[{"advisor_id": CANARY}]]]]}, "identity_argument"),
+        ({"query": "x", 1: "y"}, "invalid_key"),
+        ({"query": "x", "advis\u200bor_id": CANARY}, "identity_argument"),
+    ],
+    ids=["deep-list", "int-key", "zero-width"],
+)
+def test_odd_argument_shapes(registry: ToolRegistry, arguments: dict[Any, Any], kind: str) -> None:
+    # test-7
+    outcome = rejected(registry.validate_call("probe_tool", arguments))
+    assert kind in [error.type for error in outcome.errors], outcome.errors
