@@ -10,8 +10,18 @@ import pytest
 from data_dirs import DATA_DIRS, DATA_SUFFIXES, violations
 from repo_files import ROOT, git
 
-# Committed in PR 4 with a .gitkeep each; data/synthetic/ follows in PR 8.
+from data.synthetic import generate
+
+# Committed in PR 4 with a .gitkeep each. data/synthetic/templates holds templates
+# (PR 8), and data/synthetic/out is generated and git-ignored: both are checked below.
 COMMITTED = ("evals/cases", "evals/recorded", "redteam/attacks", "redteam/recorded")
+CORPUS_FILES = [
+    "advisors.jsonl",
+    "documents.jsonl",
+    "mandates.jsonl",
+    "manifest.json",
+    "product_sheets.jsonl",
+]
 
 
 def test_data_dirs_are_declared() -> None:
@@ -39,6 +49,34 @@ def test_committed_data_dirs_exist() -> None:
         assert path.is_dir() and not path.is_symlink(), f"{rel} is not a plain directory"
         tracked = git(ROOT, "ls-files", "--", f"{rel}/.gitkeep").decode().strip()
         assert tracked == f"{rel}/.gitkeep", f"{rel}/.gitkeep is not tracked by git"
+
+
+def test_templates_are_committed_in_both_languages() -> None:
+    # Non-vacuity for data/synthetic/templates: committed templates in both languages.
+    tracked = git(ROOT, "ls-files", "--", "data/synthetic/templates").decode().split()
+    for lang in ("de", "en"):
+        own = [rel for rel in tracked if rel.startswith(f"data/synthetic/templates/{lang}/")]
+        assert len(own) >= 6, f"data/synthetic/templates/{lang}: {len(own)} tracked templates"
+        assert all(rel.endswith(".txt") for rel in own), own
+
+
+def test_generated_corpus_is_inert(tmp_path: Path) -> None:
+    # Non-vacuity for data/synthetic/out, which git ignores: the check walks a corpus
+    # generated here, finds it clean, and catches a file planted next to it.
+    out = tmp_path / "data" / "synthetic" / "out"
+    assert generate.main(["--out", str(out)]) == 0
+    assert sorted(path.name for path in out.glob("*")) == CORPUS_FILES
+    assert violations(tmp_path) == []
+    _plant(tmp_path, "data/synthetic/out/loader.py")
+    assert violations(tmp_path) == ["data/synthetic/out/loader.py: not a declared data extension"]
+
+
+def test_corpus_output_is_git_ignored() -> None:
+    # make data writes into the data directory, and nothing it writes is committed.
+    assert generate.DEFAULT_OUT == ROOT / "data" / "synthetic" / "out"
+    for name in CORPUS_FILES:
+        rel = f"data/synthetic/out/{name}"
+        assert git(ROOT, "check-ignore", "--no-index", rel).decode().strip() == rel
 
 
 def _plant(root: Path, rel: str, mode: int = 0o644) -> Path:
