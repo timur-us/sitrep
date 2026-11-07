@@ -141,6 +141,17 @@ def test_scanner_planted(tmp_path: Path) -> None:
     (tmp_path / "Makefile").write_text(f"{branding.PRODUCT.name} draft\n{prefixed}")
     _, findings = branding_scan.scan(tmp_path)
     assert {(f.path, f.line) for f in findings if f.path == "Makefile"} == {("Makefile", 1)}
+    # Review finding test-12: only the settings' own variables pass. A token that merely
+    # looks like one, here with a cast name or the bank's stem, is still reported.
+    lookalikes = [
+        f"{branding.SLUG.upper()}_{branding.ADVISORS[0].name.upper()}=1",
+        f"{branding.SLUG.upper()}_{branding.BANK.name_stems[0].upper()}_KEY=1",
+        f"{branding.SLUG.upper()}_HOSTNAME=1",
+    ]
+    (tmp_path / "Makefile").write_text("\n".join(lookalikes) + "\n")
+    _, findings = branding_scan.scan(tmp_path)
+    lines = {f.line for f in findings if f.path == "Makefile"}
+    assert lines == {1, 2, 3}, f"look-alike variables not reported: {lines}"
 
     assert set(branding_scan.EXCLUDED) == {
         "docs/**/*.md",

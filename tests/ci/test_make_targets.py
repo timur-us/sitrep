@@ -83,6 +83,25 @@ def test_ci_target_runs_its_commands(target: str) -> None:
     assert not missing, f"make -n {target} lacks {missing}:\n{out}"
 
 
+def test_docker_smoke_refuses_the_dev_login_on_both_hosts() -> None:
+    # Review finding test-10: the loop covers both hosts, and inside it the run with the
+    # dev login on must have exited 2 and logged its refusal.
+    out = dry_run("docker-build")
+    loop = out.find("for host in 0.0.0.0 127.0.0.1; do")
+    assert loop >= 0, out
+    # Up to the line after the loop (the loop holds an inner retry loop with its own done).
+    end = out.find('echo "smoke: the dev login refused', loop)
+    assert end > loop, out
+    body = out[loop:end]
+    run = f"docker run -d -e {env_name('dev_auth')}=1 -e {env_name('host')}=$host"
+    for needle in (
+        run,
+        'test "$state" = "exited 2"',
+        f"refused to start: {env_name('dev_auth')}=1",
+    ):
+        assert needle in body, f"the dev-login loop lacks {needle!r}:\n{body}"
+
+
 def test_lint_test_starts_and_migrates_the_database_before_pytest() -> None:
     # The tests in tests/db fail, never skip, without a migrated database.
     out = dry_run("lint-test")

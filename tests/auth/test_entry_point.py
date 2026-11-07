@@ -27,6 +27,8 @@ from app import __main__ as entry
 from app.config.settings import env_name
 
 TIMEOUT = 8.0
+# Review finding test-11: the serving control gets the web fixture's start budget.
+START_TIMEOUT = 20.0
 LOOPBACK = "127.0.0.1"
 DEV_AUTH, HOST, PORT = env_name("dev_auth"), env_name("host"), env_name("port")
 REFUSED_HOSTS = [
@@ -98,7 +100,11 @@ def test_entry_point_refuses_a_socket_option(tmp_path: Path, option: str) -> Non
     env = scrubbed_env(tmp_path, **{DEV_AUTH: "1", HOST: LOOPBACK, PORT: str(port)})
     code, stderr = run_entry(tmp_path, env, option, target)
     assert code == 2, f"{option} with {DEV_AUTH}=1: exit {code} (None: it served)"
-    assert "refused to start" in stderr and option in stderr, stderr[-2000:]
+    # Review finding test-6: the refusal for arguments, not just the option's name,
+    # which the message always carries.
+    assert "refused to start: python -m app takes no arguments" in stderr, stderr[-2000:]
+    # Review finding test-1: uvicorn logs this when bind_socket() succeeds.
+    assert "Uvicorn running" not in stderr, "it bound before refusing"
     assert not (tmp_path / "app.sock").exists(), "a Unix socket was created"
     assert refused_connection(port), f"something listens on {LOOPBACK}:{port}"
 
@@ -109,6 +115,66 @@ def test_entry_point_refuses_port_0(tmp_path: Path) -> None:
     code, stderr = run_entry(tmp_path, env)
     assert code == 2, f"{PORT}=0 with {DEV_AUTH}=1: exit {code} (None: it served)"
     assert "refused to start" in stderr and PORT in stderr, stderr[-2000:]
+    assert "Uvicorn running" not in stderr, "it bound before refusing"  # test-1
+
+
+def _refuse_bind_and_serve(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_bind(self: uvicorn.Config) -> socket.socket:
+        raise AssertionError("bound a socket; the entry point should have refused")
+
+    def no_server(self: uvicorn.Server, sockets: list | None = None) -> None:
+        raise AssertionError("the server started; the entry point should have refused")
+
+    # Both: a start that binds by itself never reaches bind_socket(), and must not serve.
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", no_bind)
+    monkeypatch.setattr(uvicorn.Server, "run", no_server)
+
+
+# Review findings test-1 and test-3: each refusal happens before bind_socket() is ever
+# called, the argument refusal without the dev login too.
+BEFORE_BINDING = [
+    pytest.param({DEV_AUTH: "1", HOST: host}, [], HOST, id=f"host {host!r}")
+    for host in REFUSED_HOSTS
+] + [
+    pytest.param({DEV_AUTH: "1", HOST: LOOPBACK, PORT: "0"}, [], PORT, id="port 0"),
+    pytest.param({DEV_AUTH: "1"}, ["--uds", "/tmp/x.sock"], "no arguments", id="dev --uds"),  # noqa: S108
+    pytest.param({DEV_AUTH: "1"}, ["--fd", "3"], "no arguments", id="dev --fd"),
+    pytest.param({}, ["--uds", "/tmp/x.sock"], "no arguments", id="--uds"),  # noqa: S108
+    pytest.param({}, ["--fd", "3"], "no arguments", id="--fd"),
+    pytest.param({}, ["--host", "0.0.0.0"], "no arguments", id="--host"),  # noqa: S104
+]
+
+
+@pytest.mark.parametrize(("variables", "argv", "named"), BEFORE_BINDING)
+@pytest.mark.usefixtures("restore_logging")
+def test_entry_point_refuses_before_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    variables: dict[str, str],
+    argv: list[str],
+    named: str,
+) -> None:
+    _refuse_bind_and_serve(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(PORT, str(free_port()))
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    assert entry.main(argv) == 2
+    err = capsys.readouterr().err
+    assert "refused to start" in err and named in err, err
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_entry_point_refuses_the_dev_login_from_dotenv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Review finding test-3: the same refusal, driven from the .env the entry point reads.
+    _refuse_bind_and_serve(monkeypatch)
+    (tmp_path / ".env").write_text(f"{DEV_AUTH}=1\n{HOST}=0.0.0.0\n{PORT}={free_port()}\n")
+    monkeypatch.chdir(tmp_path)
+    assert entry.main() == 2
+    assert f"{DEV_AUTH}=1 needs {HOST}" in capsys.readouterr().err
 
 
 def _get(port: int, path: str, host: str) -> int:
@@ -134,7 +200,7 @@ def test_entry_point_serves_the_shim_on_loopback(tmp_path: Path) -> None:
             stderr=stderr,
         )
     try:
-        deadline = time.monotonic() + TIMEOUT
+        deadline = time.monotonic() + START_TIMEOUT
         statuses: tuple[int, int] | None = None
         while statuses is None and time.monotonic() < deadline:
             if process.poll() is not None:
@@ -161,15 +227,7 @@ def test_entry_point_refuses_without_the_shim(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # As in the image, where .dockerignore leaves the shim out: importing it fails.
-    def no_bind(self: uvicorn.Config) -> socket.socket:
-        raise AssertionError("bound a socket; the entry point should have refused")
-
-    def no_server(self: uvicorn.Server, sockets: list | None = None) -> None:
-        raise AssertionError("the server started; the entry point should have refused")
-
-    # Both: a start that binds by itself never reaches bind_socket(), and must not serve.
-    monkeypatch.setattr(uvicorn.Config, "bind_socket", no_bind)
-    monkeypatch.setattr(uvicorn.Server, "run", no_server)
+    _refuse_bind_and_serve(monkeypatch)
     monkeypatch.setitem(sys.modules, "app.auth.dev_shim", None)
     monkeypatch.chdir(tmp_path)
     for name, value in {DEV_AUTH: "1", HOST: LOOPBACK, PORT: str(free_port())}.items():

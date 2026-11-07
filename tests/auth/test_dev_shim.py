@@ -1,8 +1,9 @@
 """The dev login shim, in process (plan, PR 7). No database: the routes under test answer
 before one is needed.
 
-- The shim is mounted only when the (prefixed) DEV_AUTH setting is exactly "1" and the entry point binds
-  exactly 127.0.0.1; otherwise /dev/login is 404 and /api/mandates is 401.
+- The shim is mounted only when the (prefixed) DEV_AUTH setting is exactly "1" and the
+  entry point binds exactly 127.0.0.1; otherwise /dev/login is 404 and /api/mandates is
+  401. Behind it, every request must come from a 127.0.0.1 peer (review finding sec-2).
 - Identity comes from the session cookie only: headers, query parameters and other
   cookies that name an advisor change nothing; a tampered cookie, one from another
   process and one replayed after logout are 401; only advisors can log in.
@@ -10,15 +11,18 @@ before one is needed.
   and every non-GET request an Origin of exactly http://127.0.0.1:<port> (CSRF), with
   Sec-Fetch-Site same-origin when it is sent.
 
-The responses of real sessions against the database is in tests/db/test_dev_login.py.
+The responses of real sessions against the database are in tests/db/test_dev_login.py.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 
+import anyio
 import pytest
+from fastapi import WebSocket
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from app.auth import dev_shim
 from app.config import branding
@@ -44,9 +48,16 @@ def dev_settings(monkeypatch: pytest.MonkeyPatch, value: str | None = "1") -> Se
     return Settings(_env_file=None)
 
 
-def client(settings: Settings, bind_host: str | None = LOOPBACK) -> TestClient:
+FORM = {**ORIGIN, "Content-Type": "application/x-www-form-urlencoded"}
+# The TCP peer TestClient reports; its default ("testclient", 50000) is no address.
+PEER = (LOOPBACK, 50000)
+
+
+def client(
+    settings: Settings, bind_host: str | None = LOOPBACK, peer: tuple[str, int] = PEER
+) -> TestClient:
     # No lifespan: the pool stays closed, and nothing here needs the database.
-    return TestClient(create_app(settings, bind_host=bind_host), base_url=BASE)
+    return TestClient(create_app(settings, bind_host=bind_host), base_url=BASE, client=peer)
 
 
 @pytest.fixture
@@ -232,14 +243,50 @@ def test_only_advisors_can_log_in(shim: TestClient, person: branding.Person) -> 
     ],
 )
 def test_login_body_is_exact(shim: TestClient, body: str) -> None:
-    response = shim.post(
-        "/dev/login",
-        content=body,
-        headers={**ORIGIN, "Content-Type": "application/x-www-form-urlencoded"},
-    )
-    assert response.status_code in (400, 403), f"{body!r}: {response.status_code}"
+    # Review finding test-8: a malformed body is 400; 403 is for a well-formed id that
+    # names no advisor (test_unknown_ids_are_403).
+    response = shim.post("/dev/login", content=body, headers=FORM)
+    assert response.status_code == 400, f"{body!r}: {response.status_code}"
     assert dev_shim.COOKIE not in response.cookies
     login(shim, MINE.id)  # control
+
+
+@pytest.mark.parametrize("advisor_id", ["root", "admin", "zzz", "a" * 32])
+def test_unknown_ids_are_403(shim: TestClient, advisor_id: str) -> None:
+    # Review finding test-3: well-formed ids outside the cast.
+    response = shim.post("/dev/login", content=f"advisor={advisor_id}", headers=FORM)
+    assert response.status_code == 403, f"{advisor_id!r}: {response.status_code}"
+    assert dev_shim.COOKIE not in response.cookies
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        None,
+        "application/json",
+        "multipart/form-data; boundary=x",
+        "text/plain",
+        "application/x-www-form-urlencoded; charset=utf-8",
+        "Application/X-WWW-Form-Urlencoded",
+    ],
+    ids=repr,
+)
+def test_login_content_type_is_exact(shim: TestClient, content_type: str | None) -> None:
+    # Review findings spec-3 and test-3: only the form type a browser's form sends.
+    headers = dict(ORIGIN) if content_type is None else {**ORIGIN, "Content-Type": content_type}
+    response = shim.post("/dev/login", content=f"advisor={MINE.id}", headers=headers)
+    assert response.status_code == 400, f"{content_type!r}: {response.status_code}"
+    assert dev_shim.COOKIE not in response.cookies
+    login(shim, MINE.id)  # control: the exact type
+
+
+def test_long_login_body_is_400(shim: TestClient) -> None:
+    # Review finding test-3. The pattern alone would refuse this body as well; what the
+    # cap adds (the body is not buffered past MAX_BODY) is not visible from outside.
+    body = f"advisor={MINE.id}" + "a" * (dev_shim.MAX_BODY * 4)
+    response = shim.post("/dev/login", content=body, headers=FORM)
+    assert response.status_code == 400, response.status_code
+    assert dev_shim.COOKIE not in response.cookies
 
 
 # Browser origins.
@@ -255,7 +302,11 @@ def test_login_body_is_exact(shim: TestClient, body: str) -> None:
         f"{LOOPBACK}:9999",
         f"{LOOPBACK}:{PORT}.{branding.DOMAINS.attacker}",
         f"[::1]:{PORT}",
-        f"{LOOPBACK.upper()}:{PORT} ",
+        # Review finding test-9: these replace a no-op upper() on digits.
+        f"{LOOPBACK}:{PORT} ",
+        f"{LOOPBACK}:0{PORT}",
+        f"{LOOPBACK}.:{PORT}",
+        f"LOCALHOST:{PORT}",
     ],
 )
 def test_host_must_be_exact(shim: TestClient, host: str) -> None:
@@ -324,3 +375,98 @@ def test_refusals_carry_the_security_headers(shim: TestClient) -> None:
     for response in refused:
         assert response.headers.get("cache-control") == "no-store", response.headers
         assert "default-src 'none'" in response.headers.get("content-security-policy", "")
+
+
+# Review finding test-3: one header of each, as the comparison of lists means.
+
+
+@pytest.mark.parametrize(
+    ("name", "status"), [("Host", 400), ("Origin", 403), ("Sec-Fetch-Site", 403)]
+)
+def test_duplicate_headers_are_refused(shim: TestClient, name: str, status: int) -> None:
+    right = {"Host": f"{LOOPBACK}:{PORT}", "Origin": BASE, "Sec-Fetch-Site": "same-origin"}
+    single = [("Content-Type", "application/x-www-form-urlencoded"), *right.items()]
+    assert shim.post("/dev/login", content=f"advisor={MINE.id}", headers=single).status_code == (
+        200
+    ), "control: one of each"
+    doubled = [*single, (name, right[name])]
+    response = shim.post("/dev/login", content=f"advisor={MINE.id}", headers=doubled)
+    assert response.status_code == status, f"two {name} headers: {response.status_code}"
+    assert dev_shim.COOKIE not in response.cookies
+
+
+def _with_websocket(settings: Settings, bind_host: str | None) -> TestClient:
+    app = create_app(settings, bind_host=bind_host)
+
+    async def echo(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.close()
+
+    app.add_api_websocket_route("/probe-ws", echo)
+    return TestClient(app, base_url=BASE, client=PEER)
+
+
+def test_websockets_are_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review finding test-3: the shim closes any connection that is not HTTP, so none
+    # goes around its Host check. Control: without the shim the route accepts.
+    settings = dev_settings(monkeypatch)
+    with _with_websocket(settings, bind_host=None).websocket_connect("/probe-ws") as socket:
+        assert socket is not None, "control: the route accepts without the shim"
+    shimmed = _with_websocket(settings, bind_host=LOOPBACK)
+    with pytest.raises(WebSocketDisconnect) as closed, shimmed.websocket_connect("/probe-ws"):
+        pass
+    assert closed.value.code == 1008, closed.value.code
+
+
+# Review finding sec-2: the shim does not take create_app()'s bind_host on its caller's
+# word. With proxy_headers off, scope["client"] is the TCP peer, which a remote host
+# cannot choose; anything but 127.0.0.1 is refused, on every route.
+
+
+@pytest.mark.parametrize(
+    "peer",
+    [("192.0.2.1", 50000), ("testclient", 50000), ("::1", 50000), ("127.0.0.2", 50000)],
+    ids=lambda peer: peer[0],
+)
+def test_peer_must_be_loopback(monkeypatch: pytest.MonkeyPatch, peer: tuple[str, int]) -> None:
+    settings = dev_settings(monkeypatch)
+    assert client(settings).get("/dev/login").status_code == 200, "control: a 127.0.0.1 peer"
+    remote = client(settings, peer=peer)
+    for path in ("/dev/login", "/health", "/", "/api/mandates"):
+        status = remote.get(path).status_code
+        assert status == 403, f"peer {peer[0]} on {path}: {status}"
+    response = remote.post("/dev/login", content=f"advisor={MINE.id}", headers=FORM)
+    assert response.status_code == 403, f"peer {peer[0]} logged in: {response.status_code}"
+    assert dev_shim.COOKIE not in response.cookies
+
+
+def test_scope_without_a_peer_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A Unix socket gives no peer address (scope["client"] is None).
+    app = create_app(dev_settings(monkeypatch), bind_host=LOOPBACK)
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/dev/login",
+        "raw_path": b"/dev/login",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", f"{LOOPBACK}:{PORT}".encode())],
+        "client": None,
+        "server": (LOOPBACK, PORT),
+        "state": {},
+    }
+
+    anyio.run(app, scope, receive, send)
+    starts = [message["status"] for message in sent if message["type"] == "http.response.start"]
+    assert starts == [403], starts

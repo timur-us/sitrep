@@ -15,11 +15,12 @@ from __future__ import annotations
 import socket
 from collections.abc import Iterator
 
+import psycopg
 import pytest
 from dbtools import SUPERUSER_URL, Connection, column
 from fastapi.testclient import TestClient
 from psycopg import sql
-from seed_rows import MINE, OTHER, insert
+from seed_rows import MINE, OTHER, SEED, SEED_ADVISOR, cleanup, insert
 
 from app.auth import dev_shim
 from app.config import branding
@@ -39,30 +40,39 @@ PLANT = "dev-login-plant"
 MANDATES = sql.Identifier(names.SCHEMA, "mandates")
 
 
-@pytest.fixture(scope="module")
-def planted(seeded: None) -> Iterator[None]:
-    """The demo mandate for its advisor, and one more mandate for every other advisor."""
+def plant_rows() -> list[dict[str, str]]:
+    """The demo mandate for its advisor (under its real id), and one more mandate for
+    every other advisor (under the seed prefix, review finding test-5)."""
     rows = [
         {"advisor_id": branding.DEMO_MANDATE.advisor_id, "id": branding.DEMO_MANDATE.id}
         | {"family": branding.DEMO_MANDATE.family}
     ]
     rows += [
-        {"advisor_id": person.id, "id": f"{PLANT}-{person.id}", "family": "Plantfamily"}
+        {"advisor_id": person.id, "id": f"{SEED}-{person.id}-{PLANT}", "family": "Plantfamily"}
         for person in branding.ADVISORS
         if person.id != branding.DEMO_MANDATE.advisor_id
     ]
+    return rows
+
+
+# A planted row is removed only while its advisor row is the seed's: a real advisor's
+# demo mandate (from M1's loader) is never touched.
+DELETE_PLANT = sql.SQL(
+    "DELETE FROM {} WHERE advisor_id = %s AND id = %s"
+    " AND advisor_id IN (SELECT advisor_id FROM {} WHERE display_name LIKE %s)"
+).format(MANDATES, sql.Identifier(names.SCHEMA, "advisors"))
+
+
+@pytest.fixture(scope="module")
+def planted(seeded: None) -> Iterator[None]:
     with connect(SUPERUSER_URL, autocommit=True) as conn:
-        inserted = [
-            row for row in rows if insert(conn, f"{names.SCHEMA}.mandates", row, if_absent=True)
-        ]
+        for row in plant_rows():
+            insert(conn, f"{names.SCHEMA}.mandates", row, if_absent=True)
         try:
             yield
         finally:
-            for row in inserted:
-                conn.execute(
-                    sql.SQL("DELETE FROM {} WHERE advisor_id = %s AND id = %s").format(MANDATES),
-                    (row["advisor_id"], row["id"]),
-                )
+            for row in plant_rows():
+                conn.execute(DELETE_PLANT, (row["advisor_id"], row["id"], SEED_ADVISOR + " %"))
 
 
 @pytest.fixture
@@ -70,8 +80,32 @@ def app_client(monkeypatch: pytest.MonkeyPatch, planted: None) -> Iterator[TestC
     monkeypatch.setenv(env_name("dev_auth"), "1")
     monkeypatch.setenv(env_name("port"), str(PORT))
     app = create_app(Settings(_env_file=None), bind_host=LOOPBACK)
-    with TestClient(app, base_url=BASE) as test_client:
+    # A 127.0.0.1 peer: the shim refuses any other (review finding sec-2).
+    with TestClient(app, base_url=BASE, client=(LOOPBACK, 50000)) as test_client:
         yield test_client
+
+
+def test_cleanup_removes_rows_left_by_a_killed_run(superuser: Connection) -> None:
+    # Review finding test-5: a run killed before its teardown leaves rows under the seed
+    # advisors, the demo mandate's real id included. The next session's cleanup must
+    # remove them, or deleting the seed advisors fails on the foreign key. Rolled back.
+    leftover = {"advisor_id": OTHER.id, "id": "left-by-a-killed-run", "family": "Leftover"}
+    with superuser.transaction(force_rollback=True):
+        insert(superuser, f"{names.SCHEMA}.mandates", leftover)
+        for row in plant_rows():
+            insert(superuser, f"{names.SCHEMA}.mandates", row, if_absent=True)
+        failure = None
+        try:
+            with superuser.transaction():
+                cleanup(superuser)
+        except psycopg.Error as error:
+            failure = type(error).__name__
+        assert failure is None, f"cleanup failed after a killed run: {failure}"
+        seed_advisors = sql.SQL("SELECT count(*) FROM {} WHERE display_name LIKE %s").format(
+            sql.Identifier(names.SCHEMA, "advisors")
+        )
+        left = superuser.execute(seed_advisors, (SEED_ADVISOR + " %",)).fetchone()[0]
+        assert left == 0, f"{left} seed advisors left"
 
 
 def expected(superuser: Connection, advisor_id: str) -> set[str]:
@@ -138,8 +172,11 @@ def test_forged_identity_inputs(app_client: TestClient, forged: dict) -> None:
 def test_forged_identity_cookie(app_client: TestClient) -> None:
     plain = mandates_of(app_client, MINE.id)
     app_client.cookies.set("advisor", OTHER.id)
-    assert app_client.get("/api/mandates").json() == plain[1], "an advisor cookie counted"
-    assert dev_shim.COOKIE in app_client.cookies, "control: the session cookie is still sent"
+    response = app_client.get("/api/mandates")
+    assert response.json() == plain[1], "an advisor cookie counted"
+    # Review finding test-9: both cookies went out with the request.
+    sent = response.request.headers.get("cookie", "")
+    assert f"advisor={OTHER.id}" in sent and f"{dev_shim.COOKIE}=" in sent, sent.split("=")[0]
 
 
 def test_mandates_with_the_database_down(app_client: TestClient, settings: Settings) -> None:

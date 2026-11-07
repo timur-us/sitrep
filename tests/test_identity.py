@@ -130,6 +130,12 @@ def test_verified_advisor_only_from_auth() -> None:
         "from app.auth import identity\nidentity.issue('x')\n",
         "import app.auth.identity\napp.auth.identity.issue('x')\n",
         "from app.auth.identity import _ISSUER\n",
+        # Review finding sec-3: attaching an advisor to a request, and the scope key it
+        # uses, belong to app/auth/'s login middleware as well.
+        "from app.auth.identity import attach\nattach(scope, advisor)\n",
+        "from app.auth import identity\nidentity.attach(scope, advisor)\n",
+        "from app.auth.identity import _SCOPE_KEY\n",
+        f"scope[{identity._SCOPE_KEY!r}] = advisor\n",
     ],
 )
 def test_planted_constructions_are_caught(source: str) -> None:
@@ -148,6 +154,11 @@ def test_uses_that_construct_nothing_pass() -> None:
     assert constructions(source, "app/db/x.py") == []
     assert constructions("VerifiedAdvisor('x')\n", "app/auth/dev_shim.py") == []
     assert constructions("from app.auth.identity import issue\nissue('x')\n", "app/auth/x.py") == []
+    attach = "from app.auth.identity import attach\nattach(scope, advisor)\n"
+    assert constructions(attach, "app/auth/dev_shim.py") == []
+    # Routes take the advisor through the dependency; that is not a construction.
+    route = "from app.auth.identity import current_advisor\nDepends(current_advisor)\n"
+    assert constructions(route, "app/api/x.py") == []
 
 
 class LookAlike:

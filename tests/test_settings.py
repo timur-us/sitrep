@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from repo_files import ROOT
 
 from app import __main__ as entry
+from app.config import branding
 from app.config.settings import Settings, env_name
 from app.main import create_app
 from app.observability import tracing
@@ -78,8 +79,11 @@ def test_port_must_be_a_port(monkeypatch: pytest.MonkeyPatch, port: str) -> None
 def test_settings_names_are_prefixed() -> None:
     # Review finding sec-7 of PR 3 (Timur, 2026-10-29): tcsh exports HOST, and the
     # names are matched without regard to case, so unprefixed names could move the bind.
-    prefix = HOST.removesuffix("HOST")
-    assert prefix and prefix.endswith("_"), prefix
+    # Review finding test-7: the prefix from branding, not from env_name() itself. The
+    # literal names live in .env.example and the Dockerfile (test_env_example_is_safe,
+    # tests/test_dockerfile.py); the branding scan keeps them out of Python files.
+    prefix = f"{branding.SLUG.upper()}_"
+    assert HOST == f"{prefix}HOST", HOST
     assert {env_name(field) for field in Settings.model_fields} == {
         f"{prefix}HOST",
         f"{prefix}PORT",
@@ -173,17 +177,28 @@ def test_entry_point_starts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, variables: dict[str, str], host: str
 ) -> None:
     # Positive cases: plaintext on loopback, and the image's 0.0.0.0 without plaintext.
-    # Nothing is bound: bind_socket() hands out an unbound socket.
-    started: list[str] = []
-    monkeypatch.setattr(uvicorn.Config, "bind_socket", lambda config: socket.socket())
+    # Nothing is bound: bind_socket() hands out an unbound socket. Review finding test-4:
+    # the server is given exactly that socket, so it binds nothing by itself.
+    bound: list[socket.socket] = []
+    started: list[tuple[str, list | None]] = []
+
+    def bind_socket(config: uvicorn.Config) -> socket.socket:
+        bound.append(socket.socket())
+        return bound[-1]
+
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", bind_socket)
     monkeypatch.setattr(
-        uvicorn.Server, "run", lambda server, sockets=None: started.append(server.config.host)
+        uvicorn.Server,
+        "run",
+        lambda server, sockets=None: started.append((server.config.host, sockets)),
     )
     monkeypatch.chdir(tmp_path)
     for name, value in variables.items():
         monkeypatch.setenv(name, value)
     assert entry.main() == 0
-    assert started == [host], started
+    assert len(bound) == 1, bound
+    assert started == [(host, bound)], started
+    assert bound[0].fileno() == -1, "the entry point did not close the socket"
 
 
 @pytest.mark.usefixtures("restore_logging")
