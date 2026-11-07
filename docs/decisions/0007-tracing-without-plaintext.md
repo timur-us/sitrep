@@ -33,11 +33,11 @@ SITREP (situation report) will carry client data and prompts through every reque
 ## Consequences
 
 - **Easier:** a new library, semantic-convention change or environment variable cannot add plaintext to spans without a reviewed edit; the real-server test proves it with a canary in query, headers, cookie, body, path and exception message.
-- **Harder:** debugging sees less. Exception messages and query strings are gone from traces and logs. Locally, `TRACE_PLAINTEXT=1` restores the spans; logs have no such switch. Log lines show `%d`-style templates without their values.
+- **Harder:** debugging sees less. Exception messages and query strings are gone from traces and logs. Locally, `SITREP_TRACE_PLAINTEXT=1` restores the spans; logs have no such switch. Log lines show `%d`-style templates without their values.
 - **Watch:**
   - the allowlist uses the instrumentation's pre-stable HTTP names; opting into the stable conventions drops those attributes until the list is reviewed;
   - message templates are trusted to be constants: an f-string with request content, asyncio's task-exception message, and the thread and unraisable hooks get through (no M0 path; M1's loop needs them closed);
-  - M3's Application Insights exporter replaces the console behind the same allowlist, batched, and needs an image guard for `TRACE_PLAINTEXT`;
+  - M3's Application Insights exporter replaces the console behind the same allowlist, batched, and needs an image guard for `SITREP_TRACE_PLAINTEXT`;
   - M1 approves prompt hashes and lengths as attributes, by name.
 
 ## Sources

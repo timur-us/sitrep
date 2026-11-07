@@ -70,7 +70,8 @@ REDACTED_NAME = "redacted"
 
 
 class PlaintextRefused(ValueError):
-    """TRACE_PLAINTEXT=1 where it is not allowed. The message names no value."""
+    """trace_plaintext at "1" where it is not allowed. The message names the variable
+    (PLAINTEXT), never a value."""
 
 
 class EmptyPropagator(TextMapPropagator):
@@ -205,7 +206,7 @@ def exporter_chain(
 ) -> SpanExporter:
     """AllowlistExporter(inner), inner defaulting to the console.
 
-    With TRACE_PLAINTEXT=1 the console exporter is returned unwrapped, and only when the
+    With trace_plaintext at "1" the console exporter is returned unwrapped, and only when the
     entry point binds exactly 127.0.0.1. Anything else raises PlaintextRefused.
     """
     exporter = _console() if inner is None else inner

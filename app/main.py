@@ -50,7 +50,8 @@ def create_app(
 ) -> FastAPI:
     """bind_host is the address the entry point binds; None when it is not known.
 
-    With TRACE_PLAINTEXT=1 the default console chain is required, on 127.0.0.1.
+    With trace_plaintext at "1" (the prefixed variable, ADR 0009) the default console
+    chain is required, on 127.0.0.1.
     """
     if tracer_provider is None:
         tracer_provider = tracing.build_tracer_provider(settings, bind_host)

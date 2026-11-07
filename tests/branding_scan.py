@@ -18,6 +18,7 @@ from pathlib import Path
 from repo_files import ROOT, list_files, read_text
 
 from app.config import branding
+from app.config.settings import ENV_PREFIX, Settings, env_name
 
 # Never scanned. Prose must spell out the name (CLAUDE.md scopes the single source
 # to generator, prompts, allowlists, tests and UI); recordings are generated data.
@@ -44,8 +45,12 @@ SLUG_ALLOWED = (
     ".github/**",
 )
 
-# A settings variable: the slug in capitals, an underscore, a capital name.
-SETTINGS_VARIABLE = re.compile(rf"\b{re.escape(branding.SLUG.upper())}_[A-Z][A-Z0-9_]*\b")
+# The settings' own variables (ADR 0009), and no other token that merely starts like one
+# (review finding test-12): the names come from app/config/settings.py.
+SETTINGS_NAMES = sorted(
+    name for field in Settings.model_fields if (name := env_name(field)).startswith(ENV_PREFIX)
+)
+SETTINGS_VARIABLE = re.compile(rf"\b(?:{'|'.join(map(re.escape, SETTINGS_NAMES))})\b")
 
 RULE_NAMES = (
     "product",

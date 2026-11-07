@@ -3,15 +3,18 @@
 uvicorn runs without an access log (it would log paths and query strings), without
 trusting proxy headers, without a server header, and with the redacting log config.
 
-The entry point refuses to start, with exit code 2 and before it binds anything:
-- any command-line argument, --uds and --fd included: the bind is the HOST and PORT
-  settings (read with the product prefix, ADR 0009), on TCP only;
-- TRACE_PLAINTEXT=1 anywhere but 127.0.0.1 (ADR 0007);
-- DEV_AUTH=1 (the dev login, ADR 0009) unless the host is exactly 127.0.0.1 and
+Settings are named here by their fields (host, port, dev_auth, trace_plaintext); each is
+read from a variable with the product prefix (env_name(), ADR 0009). The entry point
+refuses to start, with exit code 2 and before it binds anything:
+- any command-line argument, --uds and --fd included, with or without the dev login:
+  the bind is the host and port settings, on TCP only;
+- trace_plaintext at "1" anywhere but 127.0.0.1 (ADR 0007);
+- dev_auth at "1" (the dev login, ADR 0009) unless the host is exactly 127.0.0.1 and
   the port is not 0, and unless app.auth.dev_shim can be imported (the image leaves it
   out).
 
-It binds through uvicorn.Config.bind_socket() and hands the socket to the server. With
+It always binds through uvicorn.Config.bind_socket() and hands the socket to the
+server, with the dev login off too, so uvicorn never binds on its own. With
 the dev login on, verify_listeners() checks the bound socket before serving, and every
 socket the started server listens on after startup: each must be exactly 127.0.0.1 on
 the port, or the server closes them, stops, and the entry point exits 2. The app learns

@@ -1,11 +1,13 @@
 """The dev login shim (ADR 0009): a local login for the synthetic advisors.
 
-It exists only where app/__main__.py binds exactly 127.0.0.1 with DEV_AUTH=1 (prefixed);
-create_app() mounts it under no other condition, and .dockerignore keeps this file out
-of the image, where the entry point refuses DEV_AUTH=1 because it cannot import it.
+It exists only where app/__main__.py binds exactly 127.0.0.1 with the dev login on (the
+DEV_AUTH setting, read with the product prefix, exactly "1"); create_app() mounts it
+under no other condition, and .dockerignore keeps this file out of the image, where the
+entry point refuses the dev login because it cannot import it.
 
 What it adds, all in this file:
 - DevShimMiddleware, around every route, the shim's own and the app's:
+  - The TCP peer must be 127.0.0.1, otherwise 403, whatever bind the app was built for.
   - Host must be exactly 127.0.0.1:<port>, one header, otherwise 400. A name that
     resolves to 127.0.0.1 (DNS rebinding) or another port is refused.
   - Every method but GET needs one Origin header of exactly http://127.0.0.1:<port>,
@@ -16,11 +18,14 @@ What it adds, all in this file:
     the request carries is read for identity.
   - Any other ASGI connection (a websocket) is closed: the app has none.
 - GET /dev/login: a page that lists the advisors from branding, one button each.
-- POST /dev/login: the body must be exactly `advisor=<id>` for an advisor (403 for any
-  other member of the cast). A random session id is kept in process memory, mapped to
+- POST /dev/login: Content-Type exactly application/x-www-form-urlencoded and a body of
+  exactly `advisor=<id>`, at most MAX_BODY bytes (400 otherwise; 403 for a well-formed
+  id that names no advisor). A random session id is kept in process memory, mapped to
   the advisor, and sent as `<id>.<HMAC-SHA256>` under a key drawn when the app is built.
   The cookie is HttpOnly, SameSite=Strict, Path=/, without Domain, Max-Age or Expires.
-  A session the request already carried is ended.
+  A session the request already carried is ended. A request with two session cookies
+  carries none: it is not signed in, and its login or logout ends neither session.
+  Sessions do not expire by time, and the store has no size limit (ADR 0009, Watch).
 - POST /dev/logout: ends the session and clears the cookie.
 
 No redirects: the login answers with a page. The app sends Referrer-Policy:
@@ -45,9 +50,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.auth.identity import attach, issue
 from app.config import branding
+from app.config.settings import LOOPBACK
 
 COOKIE = f"{branding.SLUG}_dev_session"
-LOOPBACK = "127.0.0.1"
 FORM_TYPE = "application/x-www-form-urlencoded"
 # `advisor=<id>` is all a login body holds.
 MAX_BODY = 256
@@ -118,6 +123,13 @@ class DevShimMiddleware:
         self.origin = f"http://{LOOPBACK}:{port}".encode()
 
     def refusal(self, scope: Scope) -> Response | None:
+        # The TCP peer (review finding sec-2): uvicorn runs with proxy_headers off, so
+        # scope["client"] is the connection's own address, which a remote host cannot
+        # choose. This holds whatever bind_host create_app() was given. A Unix socket
+        # has no peer address (None) and is refused too.
+        client = scope.get("client")
+        if not client or client[0] != LOOPBACK:
+            return PlainTextResponse("Forbidden", status_code=403)
         headers = scope["headers"]
         if _values(headers, b"host") != [self.host]:
             return PlainTextResponse("Bad Request", status_code=400)

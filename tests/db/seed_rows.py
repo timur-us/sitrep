@@ -120,7 +120,24 @@ def key_of(table: str, row: dict[str, Any]) -> tuple[str, Any]:
 
 
 def cleanup(conn: Connection) -> None:
-    """Delete every seeded row, children first."""
+    """Delete every seeded row, children first.
+
+    Also every row that hangs off a seed advisor row, whatever its id (review finding
+    test-5): a run killed before its teardown can leave rows a test planted under a real
+    id, such as the demo mandate, and the seed advisor could not be deleted past them.
+    A real advisor's rows are never touched: their advisor row is not the seed's.
+    """
+    seed_advisors = sql.SQL("SELECT advisor_id FROM {} WHERE display_name LIKE %s").format(
+        table_id("advisors")
+    )
+    for table in reversed(FACTORIES):
+        if table != "advisors":
+            conn.execute(
+                sql.SQL("DELETE FROM {} WHERE advisor_id IN ({})").format(
+                    table_id(table), seed_advisors
+                ),
+                (SEED_ADVISOR + " %",),
+            )
     for table in reversed(FACTORIES):
         if table == "advisors":
             conn.execute(

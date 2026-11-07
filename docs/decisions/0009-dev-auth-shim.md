@@ -22,9 +22,9 @@ SITREP (situation report) needs a verified login before M3's Entra ID, so the pa
 ## Decision
 
 The last option, `app/auth/dev_shim.py`:
-- **Where it runs.** `python -P -m app` with `SITREP_DEV_AUTH=1` (exactly `1`) refuses, with exit 2 before binding: any host but exactly `127.0.0.1`, port 0, any argument (`--uds`, `--fd`), and a missing `app.auth.dev_shim`. It binds through `uvicorn.Config.bind_socket()` and checks every listening socket's address again after startup. `create_app()` mounts the shim only for `bind_host == "127.0.0.1"` and exactly `1`. `.dockerignore` keeps the file out of the image, and `make docker-build` proves the import fails there.
-- **Browser defences.** Host is exactly `127.0.0.1:<port>`, otherwise 400. Every method but GET needs `Origin: http://127.0.0.1:<port>` exactly, and `Sec-Fetch-Site: same-origin` when sent, otherwise 403. The login page sets its referrer policy to `same-origin`: under the app's `no-referrer`, a browser sends `Origin: null` even on a same-origin POST.
-- **Sessions.** `POST /dev/login` with exactly `advisor=<id>`, advisors only. The cookie is `<id>.<HMAC-SHA256>` under a key drawn per app instance: HttpOnly, SameSite=Strict, Path=/. Logout and a new login end the session. Two session cookies count as none.
+- **Where it runs.** `python -P -m app` takes no arguments in any mode (`--uds`, `--fd`: exit 2). With `SITREP_DEV_AUTH=1` (exactly `1`) it also exits 2 before binding for any host but exactly `127.0.0.1`, port 0, and a missing `app.auth.dev_shim`. It always binds through `uvicorn.Config.bind_socket()` and hands that socket to the server; with the dev login it checks every listening socket again after startup. `create_app()` mounts the shim only for `bind_host == "127.0.0.1"` and exactly `1`. The image lacks the file (`.dockerignore`); `make docker-build` proves it.
+- **Browser defences.** The TCP peer must be `127.0.0.1` (403), whoever serves the app. Host is exactly `127.0.0.1:<port>`, otherwise 400. Every method but GET needs `Origin: http://127.0.0.1:<port>` exactly, and `Sec-Fetch-Site: same-origin` when sent, otherwise 403. The login page sets its referrer policy to `same-origin`: under the app's `no-referrer`, a browser sends `Origin: null` even on a same-origin POST.
+- **Sessions.** `POST /dev/login` with the form Content-Type and exactly `advisor=<id>`, advisors only. The cookie is `<id>.<HMAC-SHA256>` under a key drawn per app instance: HttpOnly, SameSite=Strict, Path=/. Logout and a new login end the session. Two session cookies count as none.
 - **Identity.** The middleware attaches an issued `VerifiedAdvisor` to the ASGI scope; `current_advisor()` reads that and nothing else. Without the shim, routes that need it answer 401.
 - **Settings.** `SITREP_HOST`, `SITREP_PORT`, `SITREP_DEV_AUTH`, `SITREP_TRACE_PLAINTEXT`. The database URLs keep their names for now.
 
@@ -34,7 +34,9 @@ The last option, `app/auth/dev_shim.py`:
 - **Harder:** a restart signs everyone out; the shim works natively only, not in a container; every variable name changed.
 - **Watch:**
   - Any local process is trusted, as with the database: it can log in as any advisor and forge any Origin. Cookies ignore ports, so a server on another port of 127.0.0.1 receives the session cookie and can toss a second one.
-  - Sessions do not expire until the process ends.
+  - Sessions do not expire until the process ends, and the store has no size limit. A request with two session cookies ends neither session.
+  - With `SITREP_TRACE_PLAINTEXT=1` and OpenTelemetry's header-capture variables set, the session cookie reaches stdout.
+  - Without the shim, no Host check runs (M1, once a route serves data).
   - Whether to prefix `DATABASE_URL` and `MIGRATION_DATABASE_URL` is open (PR 5a review sec-11).
 
 ## Sources

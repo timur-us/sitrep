@@ -8,9 +8,10 @@ copied, pickled or subclassed, and pydantic and FastAPI cannot build one from a 
 
 An AST scan of app/ outside app/auth/ reports any use of the class except in
 annotations, isinstance() and `is` checks (calls, aliases, map() and the like), any use
-of issue() or the issuer token, and any __setattr__ (object.__setattr__ can write the
-slot). The scan reads names: construction through getattr(), globals() or a string is
-not caught.
+of issue() or the issuer token, of attach() or the scope key a login middleware puts
+the advisor under (as a name or as the string), and any __setattr__
+(object.__setattr__ can write the slot). The scan reads names and literals: access
+through getattr(), globals() or a string built at runtime is not caught.
 """
 
 from __future__ import annotations
@@ -35,7 +36,9 @@ from app.db import session
 APP = ROOT / "app"
 AUTH = "app/auth/"
 CLASS = "VerifiedAdvisor"
-ISSUER = frozenset({"issue", "_ISSUER"})
+# The names only app/auth/ may use: making an advisor, and (review finding sec-3)
+# attaching one to a request, with the scope key that carries it.
+ISSUER = frozenset({"issue", "_ISSUER", "attach", "_SCOPE_KEY"})
 ADVISOR = branding.ADVISORS[0].id
 
 
@@ -96,6 +99,8 @@ def constructions(source: str, rel: str) -> list[str]:
                 found.append(f"{where}: identity.{node.attr}")
         if isinstance(node, ast.Attribute) and node.attr == "__setattr__":
             found.append(f"{where}: __setattr__")
+        if isinstance(node, ast.Constant) and node.value == identity._SCOPE_KEY:
+            found.append(f"{where}: the identity scope key")
     return found
 
 
