@@ -21,7 +21,7 @@ from collections.abc import Iterator
 
 import pytest
 
-from app.config.settings import Settings
+from app.config.settings import Settings, env_name
 from app.observability.logs import LOG_CONFIG
 
 PROXY_VARIABLES = frozenset({"http_proxy", "https_proxy", "all_proxy"})
@@ -29,7 +29,10 @@ PROXY_VARIABLES = frozenset({"http_proxy", "https_proxy", "all_proxy"})
 
 @pytest.fixture(autouse=True)
 def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    # The variables the settings read (prefixed, ADR 0009), and the bare field names,
+    # which they read before the prefix.
     fields = {name.lower() for name in Settings.model_fields}
+    fields |= {env_name(name).lower() for name in Settings.model_fields}
     for name in list(os.environ):
         # pydantic-settings, like most proxy clients, matches names without regard to case.
         if (

@@ -21,9 +21,22 @@ from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.config import branding
 from app.db import names
 
 LOOPBACK = "127.0.0.1"
+# Every setting is read from a variable with the slug as prefix (ADR 0009), so a
+# shell's own HOST (tcsh exports one) cannot move the bind. The database URLs keep their
+# names: libpq's conventions, and the prefix for them is an open question for Timur.
+ENV_PREFIX = f"{branding.SLUG.upper()}_"
+UNPREFIXED = frozenset({"database_url", "migration_database_url"})
+
+
+def env_name(field: str) -> str:
+    """The environment variable a settings field is read from."""
+    return field.upper() if field in UNPREFIXED else ENV_PREFIX + field.upper()
+
+
 # compose.yaml publishes the database here: not 5432, where a native PostgreSQL may listen.
 DATABASE_PORT = 55432
 
@@ -64,16 +77,27 @@ def check_database_url(url: str) -> str:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=None, frozen=True, extra="ignore", hide_input_in_errors=True
+        env_file=None,
+        env_prefix=ENV_PREFIX,
+        frozen=True,
+        extra="ignore",
+        hide_input_in_errors=True,
     )
 
-    # The app connects as the app role; the migration runner as the migrator.
-    database_url: str = loopback_database_url(names.APP_ROLE)
-    migration_database_url: str = loopback_database_url(names.MIGRATOR_ROLE)
+    # The app connects as the app role; the migration runner as the migrator. An alias
+    # replaces the prefix (env_name()).
+    database_url: str = Field(
+        default=loopback_database_url(names.APP_ROLE), validation_alias=env_name("database_url")
+    )
+    migration_database_url: str = Field(
+        default=loopback_database_url(names.MIGRATOR_ROLE),
+        validation_alias=env_name("migration_database_url"),
+    )
 
     host: str = LOOPBACK
     port: int = Field(default=8000, ge=0, le=65535)
-    # The dev login shim (PR 7). Off in the image.
+    # The dev login shim (ADR 0009): on only for exactly "1", and only when the entry
+    # point binds exactly 127.0.0.1. It is not in the image.
     dev_auth: str = "0"
     # Spans to the console without the allowlist, for local debugging only: refused
     # unless the exporter is the console and the entry point binds 127.0.0.1 (ADR 0007).

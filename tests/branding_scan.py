@@ -18,6 +18,7 @@ from pathlib import Path
 from repo_files import ROOT, list_files, read_text
 
 from app.config import branding
+from app.config.settings import ENV_PREFIX, Settings, env_name
 
 # Never scanned. Prose must spell out the name (CLAUDE.md scopes the single source
 # to generator, prompts, allowlists, tests and UI); recordings are generated data.
@@ -43,6 +44,13 @@ SLUG_ALLOWED = (
     "db/**/*.sql",
     ".github/**",
 )
+
+# The settings' own variables (ADR 0009), and no other token that merely starts like one
+# (review finding test-12): the names come from app/config/settings.py.
+SETTINGS_NAMES = sorted(
+    name for field in Settings.model_fields if (name := env_name(field)).startswith(ENV_PREFIX)
+)
+SETTINGS_VARIABLE = re.compile(rf"\b(?:{'|'.join(map(re.escape, SETTINGS_NAMES))})\b")
 
 RULE_NAMES = (
     "product",
@@ -141,6 +149,10 @@ def scan(root: Path = ROOT) -> tuple[list[str], list[Finding]]:
         scanned.append(rel)
         slug_allowed = matches_any(rel, SLUG_ALLOWED)
         for number, line in enumerate(text.splitlines(), start=1):
+            if slug_allowed:
+                # The settings' variables (ADR 0009) carry the slug in capitals; there
+                # they are the slug, not the product name.
+                line = SETTINGS_VARIABLE.sub("", line)
             for rule in active:
                 if rule.name == "slug" and slug_allowed:
                     continue

@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Browser, sync_playwright
 
+from app.config.settings import env_name
+
 START_TIMEOUT = 20.0
 NO_NAMES = "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"
 # WebRTC sends UDP that neither the resolver rules nor Playwright's events see. This
@@ -53,16 +55,25 @@ def _healthy(port: int) -> bool:
 
 @pytest.fixture(scope="session")
 def app_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
-    workdir: Path = tmp_path_factory.mktemp("app")
+    yield from _serve(tmp_path_factory.mktemp("app"), {})
+
+
+@pytest.fixture(scope="session")
+def dev_app_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """The same entry point with the dev login on (ADR 0009)."""
+    yield from _serve(tmp_path_factory.mktemp("dev-app"), {env_name("dev_auth"): "1"})
+
+
+def _serve(workdir: Path, variables: dict[str, str]) -> Iterator[str]:
     port = free_port()
     env = {
         "PATH": os.environ.get("PATH", ""),
         "HOME": str(workdir),
-        "HOST": "127.0.0.1",
-        "PORT": str(port),
+        env_name("host"): "127.0.0.1",
+        env_name("port"): str(port),
         "NO_PROXY": "*",
         "no_proxy": "*",
-    }
+    } | variables
     log = workdir / "stderr.log"  # a file, not a pipe: a full pipe would block the app
     with log.open("wb") as stderr:
         server = subprocess.Popen(

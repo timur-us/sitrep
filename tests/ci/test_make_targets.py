@@ -14,6 +14,8 @@ import tomllib
 import pytest
 from repo_files import ROOT
 
+from app.config.settings import env_name
+
 # Key commands per target, as `make -n` prints them.
 TARGET_COMMANDS = {
     "lint-test": [
@@ -31,7 +33,16 @@ TARGET_COMMANDS = {
         "--require-hashes",
         "--disable-pip",
     ],
-    "docker-build": ["docker build", "id -u", "-p 127.0.0.1::8000", "-e TRACE_PLAINTEXT=1"],
+    "docker-build": [
+        "docker build",
+        "id -u",
+        "-p 127.0.0.1::8000",
+        f"-e {env_name('trace_plaintext')}=1",
+        # The dev login shim is not in the image, and asking for it refuses to start.
+        "import app.auth.dev_shim",
+        f"-e {env_name('dev_auth')}=1",
+        f"-e {env_name('host')}=",
+    ],
     "web-deps": ["uv run playwright install chromium"],
     "web-test": ["uv run playwright install chromium", "uv run python -P -m pytest tests/web"],
     "evals": ["uv run python -P -m app.runners.evals"],
@@ -70,6 +81,25 @@ def test_ci_target_runs_its_commands(target: str) -> None:
     out = dry_run(target)
     missing = [command for command in TARGET_COMMANDS[target] if command not in out]
     assert not missing, f"make -n {target} lacks {missing}:\n{out}"
+
+
+def test_docker_smoke_refuses_the_dev_login_on_both_hosts() -> None:
+    # Review finding test-10: the loop covers both hosts, and inside it the run with the
+    # dev login on must have exited 2 and logged its refusal.
+    out = dry_run("docker-build")
+    loop = out.find("for host in 0.0.0.0 127.0.0.1; do")
+    assert loop >= 0, out
+    # Up to the line after the loop (the loop holds an inner retry loop with its own done).
+    end = out.find('echo "smoke: the dev login refused', loop)
+    assert end > loop, out
+    body = out[loop:end]
+    run = f"docker run -d -e {env_name('dev_auth')}=1 -e {env_name('host')}=$host"
+    for needle in (
+        run,
+        'test "$state" = "exited 2"',
+        f"refused to start: {env_name('dev_auth')}=1",
+    ):
+        assert needle in body, f"the dev-login loop lacks {needle!r}:\n{body}"
 
 
 def test_lint_test_starts_and_migrates_the_database_before_pytest() -> None:

@@ -16,8 +16,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from opentelemetry.sdk.trace import TracerProvider
 
+from app.api import mandates
 from app.config import branding
-from app.config.settings import Settings
+from app.config.settings import LOOPBACK, Settings
 from app.db import session
 from app.http.security_headers import SecurityHeadersMiddleware, response_headers
 from app.observability import tracing
@@ -49,17 +50,18 @@ def create_app(
 ) -> FastAPI:
     """bind_host is the address the entry point binds; None when it is not known.
 
-    With TRACE_PLAINTEXT=1 the default console chain is required, on 127.0.0.1.
+    With trace_plaintext at "1" (the prefixed variable, ADR 0009) the default console
+    chain is required, on 127.0.0.1.
     """
     if tracer_provider is None:
         tracer_provider = tracing.build_tracer_provider(settings, bind_host)
     elif settings.trace_plaintext_on:
         raise tracing.PlaintextRefused(
-            "TRACE_PLAINTEXT=1 is allowed with the default console exporter only"
+            f"{tracing.PLAINTEXT}=1 is allowed with the default console exporter only"
         )
 
     # Lazy (app/db/session.py): opening the pool connects nobody, so the app starts and
-    # answers /health with the database down. The first routes to use it arrive in PR 7.
+    # answers /health with the database down. /api/mandates uses it.
     pool = session.make_pool(settings.database_url)
 
     @asynccontextmanager
@@ -83,6 +85,18 @@ def create_app(
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    # Always mounted: without a login (the shim off, Entra ID not before M3) it answers 401.
+    mandates.mount(app)
+
+    # The dev login (ADR 0009): only for exactly "1", and only when the entry point binds
+    # exactly 127.0.0.1 (it has refused every other host by then). Imported here, not at
+    # the top: the image does not carry the module. Mounted before the security headers,
+    # so its refusals carry them.
+    if bind_host == LOOPBACK and settings.dev_auth_on:
+        from app.auth import dev_shim
+
+        dev_shim.mount(app, port=settings.port)
 
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_exception_handler(Exception, internal_error)

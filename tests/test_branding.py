@@ -128,6 +128,31 @@ def test_scanner_planted(tmp_path: Path) -> None:
         in_makefile = ("Makefile", line, rule) in reported
         assert in_makefile is (rule != "slug"), f"Makefile line {line} ({rule}): {in_makefile}"
 
+    # The settings' variables (ADR 0009) start with the slug in capitals. Files that may
+    # carry the slug may carry them; code may not, and reads them from app/config.
+    prefixed = f"{branding.SLUG.upper()}_HOST=127.0.0.1\n"
+    for rel in ("app/env.py", "Dockerfile", ".env.example", "Makefile"):
+        (tmp_path / rel).write_text(prefixed)
+    _, findings = branding_scan.scan(tmp_path)
+    by_path = {(f.path, f.rule) for f in findings if f.path != "app/planted.py"}
+    assert ("app/env.py", "product") in by_path, by_path
+    assert not {path for path, _ in by_path} - {"app/env.py"}, by_path
+    # A product name that is not a variable is still reported where the slug is allowed.
+    (tmp_path / "Makefile").write_text(f"{branding.PRODUCT.name} draft\n{prefixed}")
+    _, findings = branding_scan.scan(tmp_path)
+    assert {(f.path, f.line) for f in findings if f.path == "Makefile"} == {("Makefile", 1)}
+    # Review finding test-12: only the settings' own variables pass. A token that merely
+    # looks like one, here with a cast name or the bank's stem, is still reported.
+    lookalikes = [
+        f"{branding.SLUG.upper()}_{branding.ADVISORS[0].name.upper()}=1",
+        f"{branding.SLUG.upper()}_{branding.BANK.name_stems[0].upper()}_KEY=1",
+        f"{branding.SLUG.upper()}_HOSTNAME=1",
+    ]
+    (tmp_path / "Makefile").write_text("\n".join(lookalikes) + "\n")
+    _, findings = branding_scan.scan(tmp_path)
+    lines = {f.line for f in findings if f.path == "Makefile"}
+    assert lines == {1, 2, 3}, f"look-alike variables not reported: {lines}"
+
     assert set(branding_scan.EXCLUDED) == {
         "docs/**/*.md",
         "README.md",

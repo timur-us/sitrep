@@ -70,7 +70,7 @@ evals: ## The eval gate, offline: check the corpus against evals/gate.toml (no s
 redteam: ## The red-team gate, offline: check the attacks against redteam/gate.toml (no scoring in M0)
 	uv run python -P -m app.runners.redteam
 
-docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-root, plaintext refused
+docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-root, plaintext and dev login refused
 	docker build -t $(IMAGE) .
 	@set -eu; \
 	uid="$$(docker run --rm $(IMAGE) id -u)"; \
@@ -97,13 +97,32 @@ docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-
 	case "$$logs" in *"$$canary"*) echo "smoke: the canary is in the logs"; exit 1;; esac; \
 	echo "smoke: logs carry the span, not the canary"
 	@set -eu; \
-	cid="$$(docker run -d -e TRACE_PLAINTEXT=1 $(IMAGE))"; \
+	cid="$$(docker run -d -e SITREP_TRACE_PLAINTEXT=1 $(IMAGE))"; \
 	trap 'docker rm -f "$$cid" >/dev/null' EXIT; \
 	for i in $$(seq 1 40); do \
 	  test "$$(docker inspect -f '{{.State.Status}}' "$$cid")" = exited && break; sleep 0.25; \
 	done; \
 	state="$$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$$cid")"; \
-	echo "smoke: TRACE_PLAINTEXT=1 on 0.0.0.0: $$state"; \
+	echo "smoke: SITREP_TRACE_PLAINTEXT=1 on 0.0.0.0: $$state"; \
 	test "$$state" = "exited 2"; \
-	docker logs "$$cid" 2>&1 | grep -q 'refused to start: TRACE_PLAINTEXT=1'; \
+	docker logs "$$cid" 2>&1 | grep -q 'refused to start: SITREP_TRACE_PLAINTEXT=1'; \
 	echo "smoke: refused with exit code 2"
+	@set -eu; \
+	if docker run --rm $(IMAGE) python -P -c 'import app.auth.dev_shim' 2>/dev/null; then \
+	  echo "smoke: the dev login shim is in the image"; exit 1; \
+	fi; \
+	echo "smoke: the dev login shim is not in the image"
+	@set -eu; \
+	for host in 0.0.0.0 127.0.0.1; do \
+	  cid="$$(docker run -d -e SITREP_DEV_AUTH=1 -e SITREP_HOST=$$host $(IMAGE))"; \
+	  for i in $$(seq 1 40); do \
+	    test "$$(docker inspect -f '{{.State.Status}}' "$$cid")" = exited && break; sleep 0.25; \
+	  done; \
+	  state="$$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$$cid")"; \
+	  logs="$$(docker logs "$$cid" 2>&1)"; \
+	  docker rm -f "$$cid" >/dev/null; \
+	  echo "smoke: SITREP_DEV_AUTH=1 on $$host: $$state"; \
+	  test "$$state" = "exited 2"; \
+	  case "$$logs" in *'refused to start: SITREP_DEV_AUTH=1'*) ;; *) echo "smoke: no refusal"; exit 1;; esac; \
+	done; \
+	echo "smoke: the dev login refused in the image, with exit code 2"

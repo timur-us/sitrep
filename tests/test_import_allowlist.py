@@ -32,6 +32,8 @@ ALLOWED = frozenset(
         "errno",
         "fastapi",
         "hashlib",
+        # app/auth/dev_shim.py signs the session cookie (ADR 0009).
+        "hmac",
         "html",
         "ipaddress",
         "json",
