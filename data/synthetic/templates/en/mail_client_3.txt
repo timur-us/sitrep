@@ -1,0 +1,8 @@
+Moving our meeting
+
+Dear {advisor_name},
+
+unfortunately we have to move our meeting. Would {next_date} work instead? A phone call or a video call is fine with us.
+
+Kind regards
+The {family} family

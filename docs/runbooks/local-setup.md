@@ -1,6 +1,6 @@
 # Local setup
 
-M0, PRs 1, 3, 4, 5a, 5b, 6 and 7. SITREP (situation report) builds and tests locally with uv, make and a PostgreSQL container, offline, with no `.env` and no API key. Every CI gate is a make target, so it runs here the same way. Each PR extends this runbook in the same PR. `tests/test_runbook.py` fails when the Makefile and this file drift apart.
+M0, PRs 1, 3, 4, 5a, 5b, 6, 7 and 8. SITREP (situation report) builds and tests locally with uv, make and a PostgreSQL container, offline, with no `.env` and no API key. Every CI gate is a make target, so it runs here the same way. Each PR extends this runbook in the same PR. `tests/test_runbook.py` fails when the Makefile and this file drift apart.
 
 ## Prerequisites
 
@@ -30,6 +30,7 @@ M0, PRs 1, 3, 4, 5a, 5b, 6 and 7. SITREP (situation report) builds and tests loc
 | `make web-test` | `make web-deps`, then the browser smoke test in `tests/web` (below). |
 | `make evals` | The eval gate, offline (below). |
 | `make redteam` | The red-team gate, offline (below). |
+| `make data` | Regenerates the synthetic corpus into `data/synthetic/out/` (below). Offline, no database. |
 
 The first `make test` creates `.venv/` from `uv.lock`. From a fresh clone:
 
@@ -177,6 +178,26 @@ Errors name the file (escaped unless it is a plain name, so no file name can sta
 
 `tests/web/test_dev_login.py` starts a second app with `SITREP_DEV_AUTH=1` and signs in through the login form in Chromium: the POST carries `Origin: http://127.0.0.1:<port>`, the cookie is HttpOnly and SameSite=Strict, and `/api/mandates` gets past the identity (503 without a database, 200 with one; 401 before the login). The control serves the same page without its referrer meta element: Chromium then sends `Origin: null`, and the shim refuses the login.
 
+## The synthetic corpus (M0)
+
+`make data` runs `python -P -m data.synthetic.generate`, which writes into `data/synthetic/out/` (git-ignored; `--out DIR` writes elsewhere):
+
+| File | One line per |
+|---|---|
+| `advisors.jsonl` | advisor from `app/config/branding.py`: `advisor_id`, `display_name`, `email` |
+| `mandates.jsonl` | mandate: `advisor_id`, `id`, `family`, `lang`, `client_email` |
+| `documents.jsonl` | mandate document: `advisor_id`, `mandate_id`, `id`, `type`, `lang`, `title`, `body`, `date`, `origin`, `trust`, `sender`, `recipients` |
+| `product_sheets.jsonl` | global product sheet, no advisor or mandate: `id`, `type`, `lang`, `title`, `body`, `date`, `origin`, `trust` |
+| `manifest.json` | the seed, the generator version and a sha256 per file |
+
+- **The corpus.** Three advisors and 40 mandates: 14 for the demo mandate's advisor (the demo mandate included), 13 each for the other two. Per mandate a KYC profile, a portfolio report, two or three call notes and three to six mailbox e-mails, plus six global product sheets. About 70 % German, 30 % English, by mandate; `lang` is `german` or `english`, as in `documents.lang`. Client families come from `data/synthetic/templates/family_names.txt`, a reviewed list of invented names; the cast and the demo mandate from branding. Dates count back from a fixed 30 October 2026.
+- **Origin and trust come from the type alone:** `kyc_register`, `portfolio_system`, `call_notes`, `mailbox` and `product_catalogue`; every e-mail is `untrusted`, the advisor's own replies included, and everything else `internal`. Trust says where a text comes from. M1 still wraps every retrieval hit as untrusted.
+- **Synthetic only.** No IBAN, phone number or street address, no first names for clients, and no domain but the staff domain. No attack content: attacks enter from `redteam/attacks/` in M1.
+- **Figures agree.** Each report lists its positions with their shares; the total is their sum, and every figure a call note quotes is in its report. Amounts are German (`1.250.000,00 EUR`) or English (`EUR 1,250,000.00`) by language.
+- **Deterministic.** Standard library only and a fixed seed, with no clock, locale or hash order involved, so `make data` twice prints the same manifest sha256. A change to the generator, a template or the names list changes that hash, and the golden value in `tests/synthetic/test_synthetic_corpus.py` changes with it, in the same PR.
+- **Templates** (`data/synthetic/templates/{de,en}/*.txt`) are data: a one-line title, a blank line, then the body, with `{name}` placeholders and no digits, addresses or URLs of their own. They are filled in one pass, never with `str.format`, and an unknown placeholder or a stray brace stops the run.
+- **The loader is M1.** Nothing here writes to the database.
+
 ## Offline tests
 
 pyproject sets `--disable-socket --allow-hosts=127.0.0.1,::1` for pytest. A TCP `connect()` on a Python socket to an address other than `127.0.0.1` or `::1` raises `SocketConnectBlockedError` (`tests/test_network.py`).
@@ -202,7 +223,8 @@ Later PRs keep those offline through loopback-only URLs and scrubbed environment
 | `tests/test_branding.py` | `app/config/branding.py` is the only file outside prose, `.claude/` and recordings that names the product, the bank, a domain, a cast member or the demo mandate. Infrastructure files that cannot import Python may carry the slug, and the settings' variables (`SITREP_HOST` and so on), which code reads from `app/config/settings.py`. The values match `CLAUDE.md`. |
 | `tests/test_no_secrets.py` | In any file git sees, none of these shapes: an Anthropic key, an AWS access key id, a GitHub token, a private-key block, an Azure storage `AccountKey=`, a password in a URL, or a JWT. Other secret shapes are not detected. The only allowed match is the fake key in `tests/guardrails/test_block_secrets.py`, pinned by its fingerprint (16 hex digits of the match's sha256); any other match in that file is reported. Findings show file, line and pattern. The text is never shown, and the fingerprint is not either, because the fingerprint of a URL password can be reversed with a dictionary. To allowlist a match on purpose, compute its fingerprint locally with `find_secrets()`. |
 | `tests/test_runbook.py` | Every Makefile target is documented here, has a `##` comment, is phony and is listed by `make help`; every `make` command here exists. |
-| `tests/test_data_dirs.py` | `evals/cases`, `evals/recorded`, `redteam/attacks`, `redteam/recorded`, `data/synthetic/templates` and `data/synthetic/out` hold only `.json`, `.jsonl`, `.toml`, `.yaml`, `.yml` and `.txt` files (plus `.gitkeep`); the report directories `evals/results` and `redteam/results` hold only `.md`. No `conftest`, no executable bit, no symlinks, no unreadable directories. The first four exist with a `.gitkeep` in git, so the check cannot pass on an empty tree. |
+| `tests/test_data_dirs.py` | `evals/cases`, `evals/recorded`, `redteam/attacks`, `redteam/recorded`, `data/synthetic/templates` and `data/synthetic/out` hold only `.json`, `.jsonl`, `.toml`, `.yaml`, `.yml` and `.txt` files (plus `.gitkeep`); the report directories `evals/results` and `redteam/results` hold only `.md`. No `conftest`, no executable bit, no symlinks, no unreadable directories. The first four exist with a `.gitkeep` in git, and `data/synthetic/templates` holds tracked templates in both languages, so the check cannot pass on an empty tree; for the git-ignored `data/synthetic/out`, the test generates a corpus, finds it clean and catches a file planted next to it. Everything `make data` writes is git-ignored. |
+| `tests/synthetic/` | The synthetic corpus, generated into a temporary directory: byte-identical from two subprocesses that differ in `PYTHONHASHSEED`, `TZ` and `LC_ALL`, and equal to the committed manifest hash; the advisors from branding, 40 mandates (14, 13, 13), the demo mandate with its advisor, each document's advisor its mandate's, the per-mandate counts, six global product sheets, all five types in both languages, a German share between 65 and 75 %; trust and origin from the type only, every e-mail untrusted, the advisor's own included; no IBAN (mod 97), phone number, street address, secret, attacker or canary domain, or host but the staff domain; each report's total the sum of its positions, every call-note figure in its report; templates without digits, addresses or URLs, filled in one pass without lookups; the names list; the generator's imports. The detectors and the figure extractor on planted positives and negatives in both number formats. |
 | `tests/test_network.py` | The offline guarantee above: the block itself, the effective configuration, the opt-out scan, and that no plugin is autoloaded. |
 | `tests/test_docs.py` | Every ADR in `docs/decisions/` follows `.claude/skills/adr/SKILL.md`: numbered without gaps (at least six), the skill's sections in order, an allowed status, a valid ISO date, a date on every source (one `- ` item per source, continuation lines indented), the product name spelled out exactly once, at most 600 words outside fenced blocks and the sources. Any other file in `docs/decisions/` is reported. The README says what the project shows, with milestones, and what it does not. |
 | `tests/test_embedding_config.py` | `app/config/embedding.py` agrees with the yaml block in ADR 0005, field by field. `DIM` and `MAX_TOKENS` match the model's own `config.json` (committed as `app/config/embedding_model_config.json`), whose sha256 is in `FILES`. The revision is a 40-hex commit; `FILES` holds plain relative paths to `.json` and `.onnx` files only, with 64-hex digests, and cannot be changed at runtime. Only `config.json` is hashed here; the ONNX digests are Hugging Face LFS oids, and the model download step in M1 checks their bytes. `.gitattributes` keeps git from converting the config's line endings. |

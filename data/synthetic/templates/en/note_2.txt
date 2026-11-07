@@ -1,0 +1,8 @@
+Call note: the {family} family, {date}
+
+Meeting in person at the bank. The equity allocation is currently {equity_share} ({equities}). The family asked whether to reduce it, given the recent market swings.
+
+Agreed: no reallocation before the next meeting. Until then we review alternatives, including {product}.
+
+Next step: call back by {next_date}.
+{advisor_name}

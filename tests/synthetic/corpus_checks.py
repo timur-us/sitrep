@@ -1,36 +1,141 @@
-"""Detectors and figure checks for the synthetic corpus: inert scaffolding (M0 PR 8, red).
+"""Detectors and figure checks for the synthetic corpus (tests/synthetic/).
 
-Every detector finds nothing and every check reports nothing yet.
+- **Real-looking data:** strings that pass the IBAN mod-97 check, phone numbers, street
+  addresses, and hosts other than the staff domain. Each detector returns what it found,
+  so the tests can show it; the corpus is synthetic, so nothing here is a real value.
+- **Figures:** amounts in euros and percentages, in the German (`1.250.000,00 EUR`,
+  `42,3 %`) and the English format (`EUR 1,250,000.00`, `42.3%`), as (unit, Decimal).
+  Dates, years and counts are not figures.
+- **Report checks:** a portfolio report's total equals the sum of its positions, and
+  every figure in a call note appears in its mandate's report.
+
+The checks are regular expressions over text. They are a net for what the generator
+might emit, not a proof that no personal data can exist in any text.
 """
 
 from __future__ import annotations
 
+import re
 from decimal import Decimal
+
+from app.config import branding
+from app.runners import corpus
+
+# IBAN lengths by country (ISO 13616 registry) for the countries a DACH bank sees most.
+# An unknown country is checked at its longest candidate only.
+IBAN_LENGTHS = {
+    "AT": 20,
+    "BE": 16,
+    "CH": 21,
+    "DE": 22,
+    "ES": 24,
+    "FR": 27,
+    "GB": 22,
+    "IT": 27,
+    "LI": 21,
+    "LU": 20,
+    "NL": 18,
+}
+# Two letters, two check digits, then letters and digits with single spaces between.
+IBAN_START = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2}\d{2})((?: ?[A-Za-z0-9]){11,30})")
+
+# "+49 30 1234567", "030/1234567", "0171 1234567": a leading + or 0, then at least six
+# more digits with single spaces, slashes or hyphens between. Amounts ("1.250.000,00"),
+# dates ("30.10.2026", "2026-10-30") and "Nr. 3" do not match.
+PHONE = re.compile(r"(?<![\w+.,])(?:\+\d{1,3}|0)(?:[ /-]?\d){6,}")
+
+STREET = re.compile(
+    r"\b[A-ZÄÖÜ][a-zäöüß]*(?:straße|strasse|str\.|weg|allee|platz|gasse|ring|damm|ufer)"
+    r"\s+\d{1,4}[a-z]?\b"
+    r"|\b\d{1,5}\s+(?:[A-Z][a-z]+\s+){1,3}(?:Street|St\.|Road|Rd\.|Avenue|Ave\.|Lane|Drive|Square)\b"
+)
+
+_AMOUNT_DE = r"(?P<de>\d{1,3}(?:\.\d{3})*,\d{2}) ?EUR\b"
+_AMOUNT_EN = r"\bEUR ?(?P<en>\d{1,3}(?:,\d{3})*\.\d{2})"
+_PERCENT = r"(?P<pct>[+-]?\d+(?:[.,]\d+)?) ?%"
+FIGURE = re.compile(rf"{_AMOUNT_DE}|{_AMOUNT_EN}|{_PERCENT}")
+
+TOTAL_LABELS = {"german": "Gesamtvermögen", "english": "Total assets"}
+
+
+def _mod97(compact: str) -> bool:
+    rearranged = compact[4:] + compact[:4]
+    digits = "".join(str(int(char, 36)) for char in rearranged)
+    return int(digits) % 97 == 1
 
 
 def ibans(text: str) -> list[str]:
-    return []
+    """Every candidate that passes the IBAN check, without spaces, in capitals."""
+    found = []
+    for match in IBAN_START.finditer(text):
+        compact = (match.group(1) + match.group(2).replace(" ", "")).upper()
+        length = IBAN_LENGTHS.get(compact[:2], len(compact))
+        candidate = compact[:length]
+        if len(candidate) == length and _mod97(candidate):
+            found.append(candidate)
+    return found
 
 
 def phones(text: str) -> list[str]:
-    return []
+    return [match.group(0) for match in PHONE.finditer(text)]
 
 
 def streets(text: str) -> list[str]:
-    return []
+    return [match.group(0) for match in STREET.finditer(text)]
 
 
 def foreign_hosts(text: str) -> list[str]:
-    return []
+    """Hosts in URLs, e-mail addresses and bare names that are not the staff domain."""
+    staff = branding.DOMAINS.staff
+    return [
+        host for host in corpus.hosts(corpus.normalize(text)) if host.lower().rstrip(".") != staff
+    ]
 
 
 def figures(text: str) -> list[tuple[str, Decimal]]:
-    return []
+    """Amounts as ("EUR", value) and percentages as ("%", value), in text order."""
+    found = []
+    for match in FIGURE.finditer(text):
+        if match.group("de") is not None:
+            raw = match.group("de").replace(".", "").replace(",", ".")
+            found.append(("EUR", Decimal(raw)))
+        elif match.group("en") is not None:
+            found.append(("EUR", Decimal(match.group("en").replace(",", ""))))
+        else:
+            found.append(("%", Decimal(match.group("pct").replace(",", "."))))
+    return found
 
 
 def report_problems(body: str, lang: str) -> list[str]:
-    return []
+    """The report's positions ("- " lines, one amount each) must add up to its total."""
+    positions: list[Decimal] = []
+    totals: list[Decimal] = []
+    problems = []
+    for number, line in enumerate(body.splitlines(), start=1):
+        amounts = [value for unit, value in figures(line) if unit == "EUR"]
+        if line.startswith("- "):
+            if len(amounts) != 1:
+                problems.append(f"line {number}: a position with {len(amounts)} amounts")
+            positions += amounts
+        elif line.startswith(TOTAL_LABELS[lang] + ":"):
+            totals += amounts
+    if not positions:
+        problems.append("no positions")
+    if len(totals) != 1:
+        problems.append(f"{len(totals)} total lines")
+    elif sum(positions) != totals[0]:
+        problems.append(f"total {totals[0]} is not the sum of the positions {sum(positions)}")
+    return problems
 
 
 def figure_problems(report: str, note: str) -> list[str]:
-    return []
+    """Figures in the note that the report does not carry; a note without one is a problem."""
+    found = figures(note)
+    if not found:
+        return ["no figure"]
+    known = set(figures(report))
+    return [
+        f"{unit} {value} is not in the report"
+        for unit, value in found
+        if (unit, value) not in known
+    ]

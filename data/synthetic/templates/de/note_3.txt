@@ -1,0 +1,6 @@
+Gesprächsnotiz Familie {family}, {date}
+
+Videotermin. Ein Teil der Liquidität von {cash} soll angelegt werden; der Rest bleibt als Reserve für geplante Ausgaben der Familie. Die Anleihen ({bonds}) bleiben unverändert.
+
+Die Familie wünscht einen Vorschlag mit {product}. Der Vorschlag wird bis {next_date} vorbereitet.
+{advisor_name}

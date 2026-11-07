@@ -1,0 +1,8 @@
+Question about the portfolio report
+
+Dear {advisor_name},
+
+thank you for the portfolio report. We would like a meeting to talk about how the assets are split. Would {next_date} suit you?
+
+Kind regards
+The {family} family

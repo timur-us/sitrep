@@ -1,0 +1,13 @@
+Vermögensbericht Familie {family} zum {date}
+
+{bank}, Vermögensverwaltung
+Betreuung: {advisor_name}
+Risikoprofil: {risk_profile}
+
+Positionen:
+{positions}
+
+Gesamtvermögen: {total}
+Wertentwicklung seit Jahresbeginn: {performance}
+
+Die Bewertung erfolgt zu Schlusskursen des Stichtags. Vergangene Wertentwicklungen sind kein verlässlicher Indikator für künftige Ergebnisse.

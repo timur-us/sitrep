@@ -1,0 +1,11 @@
+Produktblatt {product}
+
+{bank}, Stand {date}
+
+Anlageklasse: {asset_class}
+Risikoindikator (SRI): {sri} von sieben
+Laufende Kosten: {ongoing_charges} pro Jahr
+Mindestanlage: {min_investment}
+Weitere Informationen: {product_url}
+
+Dieses Produktblatt dient der Information und ist keine Anlageberatung. Maßgeblich sind allein die gesetzlichen Verkaufsunterlagen. Der Wert der Anlage kann schwanken; ein Verlust des eingesetzten Kapitals ist möglich.

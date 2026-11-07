@@ -10,7 +10,7 @@ export UV_LOCKED := 1
 # The local image tag. The smoke test publishes on 127.0.0.1 only, on a free port.
 IMAGE := sitrep:local
 
-.PHONY: help up down migrate lint fmt test lint-test audit docker-build web-deps web-test evals redteam
+.PHONY: help up down migrate lint fmt test lint-test audit docker-build web-deps web-test evals redteam data
 
 help: ## List the targets
 	@grep -E '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -69,6 +69,11 @@ evals: ## The eval gate, offline: check the corpus against evals/gate.toml (no s
 
 redteam: ## The red-team gate, offline: check the attacks against redteam/gate.toml (no scoring in M0)
 	uv run python -P -m app.runners.redteam
+
+# Standard library only, fixed seed: the same templates give the same bytes. The output
+# is git-ignored. `data` is phony, or make would take the data/ directory for it.
+data: ## Regenerate the synthetic corpus (fixed seed) into data/synthetic/out/ (git-ignored)
+	uv run python -P -m data.synthetic.generate
 
 docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-root, plaintext and dev login refused
 	docker build -t $(IMAGE) .

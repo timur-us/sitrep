@@ -1,0 +1,8 @@
+Frage zum Vermögensbericht
+
+Guten Tag {advisor_name},
+
+vielen Dank für den Vermögensbericht. Wir hätten gern einen Termin, um die Aufteilung der Anlagen zu besprechen. Passt Ihnen der {next_date}?
+
+Mit freundlichen Grüßen
+Familie {family}

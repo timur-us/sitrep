@@ -1,0 +1,11 @@
+Product sheet: {product}
+
+{bank}, as of {date}
+
+Asset class: {asset_class}
+Risk indicator (SRI): {sri} out of seven
+Ongoing charges: {ongoing_charges} a year
+Minimum investment: {min_investment}
+More information: {product_url}
+
+This product sheet is for information only and is not investment advice. Only the statutory sales documents are binding. The value of the investment can go down as well as up, and you may lose capital.

@@ -1,0 +1,9 @@
+Your documents
+
+Dear {family} family,
+
+the documents you asked for are being prepared and will reach you by {next_date}. If you have any questions, you can reach me at {advisor_email}.
+
+Kind regards
+{advisor_name}
+{bank}

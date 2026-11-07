@@ -1,0 +1,8 @@
+Gesprächsnotiz Familie {family}, {date}
+
+Telefonat mit der Familie {family}. Wir haben den aktuellen Vermögensbericht besprochen. Das Gesamtvermögen liegt bei {total}, die Wertentwicklung seit Jahresbeginn bei {performance}.
+
+Die Familie ist mit der Entwicklung zufrieden und möchte am Risikoprofil ({risk_profile}) festhalten. Sie interessiert sich für {product}; das Produktblatt wird zugeschickt.
+
+Nächster Schritt: Folgetermin am {next_date}.
+{advisor_name}

@@ -1,0 +1,13 @@
+Portfolio report: the {family} family, as of {date}
+
+{bank}, wealth management
+Advisor: {advisor_name}
+Risk profile: {risk_profile}
+
+Positions:
+{positions}
+
+Total assets: {total}
+Performance year to date: {performance}
+
+Valuations use closing prices on the reference date. Past performance is not a reliable indicator of future results.

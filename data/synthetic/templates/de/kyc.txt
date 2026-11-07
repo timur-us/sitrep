@@ -1,0 +1,17 @@
+KYC-Profil Familie {family}
+
+Mandat: Familie {family}
+Betreuung: {advisor_name} ({advisor_email}), {bank}
+Kontakt der Familie: {client_email}
+Kunde seit: {client_since}
+Letzte Überprüfung: {date}
+
+Risikoprofil: {risk_profile}
+Anlagehorizont: {horizon} Jahre
+Anlageziel: {objective}
+Herkunft des Vermögens: {source_of_wealth}
+Steuerliche Ansässigkeit: {residence}
+Politisch exponierte Person: nein
+Korrespondenzsprache: Deutsch
+
+Die Angaben wurden im Gespräch bestätigt. Änderungen der persönlichen oder finanziellen Verhältnisse teilt die Familie der Betreuung mit.
