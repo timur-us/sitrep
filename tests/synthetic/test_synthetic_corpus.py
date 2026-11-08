@@ -38,7 +38,7 @@ from data.synthetic import generate
 
 # The sha256 of manifest.json for the committed templates and names. A change to the
 # generator, a template or the names list changes it; update it on purpose, in the same PR.
-GOLDEN_MANIFEST_SHA256 = "0341e33fb70d69d1b68c87c284fc5176520610558d341efa761a33bcaeb36ee0"
+GOLDEN_MANIFEST_SHA256 = "02235aa49e3b989562a6f9f573c4480f73d50ef3c7c340ee92a6a874d7d47177"
 
 DATA_FILES = ("advisors.jsonl", "documents.jsonl", "mandates.jsonl", "product_sheets.jsonl")
 FILES = (*DATA_FILES, "manifest.json")
@@ -282,6 +282,41 @@ def test_call_notes_are_dated_after_their_report(corpus: dict[str, list[dict]]) 
     # Control: the check reads real dates, and the corpus' "today" bounds them.
     assert all(note["date"] <= generate.AS_OF.isoformat() for note in notes)
     assert all(report["date"] == generate.REPORT_DATE.isoformat() for report in reports.values())
+
+
+# Any mention of the report, German or English, in a title or a body.
+MENTIONS_REPORT = re.compile(r"vermögensbericht|\bbericht\b|\breports?\b", re.IGNORECASE)
+
+
+def test_emails_that_mention_the_report_are_dated_after_it(
+    corpus: dict[str, list[dict]],
+) -> None:
+    # Timur's answer on #18: an e-mail about the report cannot predate it. E-mails that
+    # do not mention it may carry any date.
+    documents = corpus.get("documents.jsonl", [])
+    reports = {doc["mandate_id"]: doc for doc in documents if doc["type"] == "portfolio_report"}
+    mails = [doc for doc in documents if doc["type"] == "email"]
+    about = [mail for mail in mails if MENTIONS_REPORT.search(mail["title"] + "\n" + mail["body"])]
+    assert len(reports) == 40 and len(about) >= 10, (len(reports), len(about))
+    assert {mail["lang"] for mail in about} == set(LANGS), "both languages mention the report"
+    early = [
+        f"{mail['id']} {mail['date']} < {reports[mail['mandate_id']]['date']}"
+        for mail in about
+        if mail["date"] < reports[mail["mandate_id"]]["date"]  # ISO dates sort as dates
+    ]
+    assert not early, f"{len(early)} of {len(about)} e-mails about the report predate it:\n" + (
+        "\n".join(early[:10])
+    )
+    assert all(mail["date"] <= generate.AS_OF.isoformat() for mail in mails)
+
+
+def test_report_mention_pattern() -> None:
+    # Control for the pattern above, on both templates that name the report and on text
+    # that does not.
+    for text in ("Frage zum Vermögensbericht", "thank you for the portfolio report", "den Bericht"):
+        assert MENTIONS_REPORT.search(text), text
+    for text in ("Unterlagen für die Steuererklärung", "Moving our meeting", "reportedly"):
+        assert not MENTIONS_REPORT.search(text), text
 
 
 TEMPLATES = ROOT / "data" / "synthetic" / "templates"
