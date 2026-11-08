@@ -183,7 +183,7 @@ def test_a_link_inside_the_model_directory_is_refused(tmp_path: Path) -> None:
         read_verified(directory, "onnx/model.onnx", PLANTED)
     with pytest.raises(ModelFileError, match=message):
         missing(directory, PLANTED)
-    assert verify(directory, PLANTED) == [f"{message} (run make model)"]
+    assert verify(directory, PLANTED) == [f"{message} (remove it)"]
     assert stale.read_bytes() == b"stale", "a file behind the link was deleted"
 
 

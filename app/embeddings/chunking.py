@@ -93,8 +93,9 @@ def chunk(text: str, tokenizer: TokenCounter, *, limit: int = CHUNK_TOKENS) -> l
     passages: list[str] = []
     start, first = 0, 0  # the character and the token the current passage starts at
     while True:
-        rest = text[start:].strip()
-        if len(spans) - first <= budget and fits(rest):
+        # The rest is copied only once it may fit: a copy per passage would make a long
+        # text cost its length squared (review finding sec-4).
+        if len(spans) - first <= budget and fits(rest := text[start:].strip()):
             if rest:
                 passages.append(rest)
             return passages

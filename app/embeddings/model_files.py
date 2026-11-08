@@ -6,6 +6,10 @@ load reads a file through read_verified(): its bytes, only if their sha256 is th
 one. The embedder hands those very bytes to onnxruntime and tokenizers, never the path,
 so nothing can change the file between the check and the load.
 
+The model directory itself may be a link (to a shared disk, say). Below it, a link is
+refused, whether it is the file or a directory on the way to it (review finding sec-5):
+nothing reads, deletes or downloads through one.
+
 `make model` runs this module as `python -P -m app.embeddings.model_files`:
 - `missing` deletes each file whose bytes differ from FILES and prints `<url> <path>`
   for every file to download: absent, or just deleted;
@@ -72,6 +76,10 @@ def _path(directory: Path, rel: str, files: Mapping[str, str]) -> Path:
     parts = rel.split("/")
     if "\\" in rel or any(part in ("", ".", "..") for part in parts):
         raise ModelFileError(f"{rel}: not a plain relative path")
+    # O_NOFOLLOW covers the last part only: a linked directory on the way is refused here.
+    for depth in range(1, len(parts)):
+        if os.path.islink(directory.joinpath(*parts[:depth])):
+            raise ModelFileError(f"{rel}: a link in the path (remove it)")
     return directory.joinpath(*parts)
 
 

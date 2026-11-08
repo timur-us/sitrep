@@ -32,9 +32,10 @@ migrate: ## Apply db/migrations as the migration role (after make up)
 # into models/ (git-ignored). `missing` deletes a file with other bytes and lists what to
 # fetch, so a second run downloads nothing; `verify` checks every sha256 and deletes a
 # mismatch. curl, not Python: app/ holds no HTTP client. -q (first) skips ~/.curlrc; https
-# only, redirects included; anonymous: no token, no netrc. Each file lands in a fresh
-# temporary file beside it, then is renamed. No cache (plan M1, default 6).
-MODEL_CURL := curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --connect-timeout 30 --max-time 900
+# only, redirects included; anonymous: no token, no netrc; nothing over 600 MiB (the
+# model is 470 MB). Each file lands in a fresh temporary file beside it, then is renamed;
+# a failure or an interrupt removes the temporary file. No cache (plan M1, default 6).
+MODEL_CURL := curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize 629145600 --retry 3 --connect-timeout 30 --max-time 900
 
 model: ## Download the embedding model's pinned files into models/ and check each sha256 (needs the network)
 	@set -eu; \
@@ -43,8 +44,10 @@ model: ## Download the embedding model's pinned files into models/ and check eac
 	  test -n "$$url" || continue; \
 	  mkdir -p "$$(dirname "$$path")"; \
 	  tmp="$$(mktemp "$$path.XXXXXX")"; \
+	  trap 'rm -f "$$tmp"' EXIT; \
+	  trap 'exit 130' INT TERM; \
 	  echo "model: downloading $$url"; \
-	  $(MODEL_CURL) -o "$$tmp" "$$url" || { rm -f "$$tmp"; exit 1; }; \
+	  $(MODEL_CURL) -o "$$tmp" "$$url"; \
 	  mv -f "$$tmp" "$$path"; \
 	done
 	uv run python -P -m app.embeddings.model_files verify

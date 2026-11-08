@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Timur, 2026-10-28, in the M0 plan); amended in M1 PR 4, pending Timur's yes.
+Accepted (Timur, 2026-10-28, in the M0 plan); the M1 PR 4 amendment is Proposed.
 
 ## Date
 
@@ -33,16 +33,16 @@ SITREP (situation report) retrieves from German and English documents; the synth
 - **Model:** e5-small at a pinned commit, 384 dimensions, `query: ` and `passage: ` prefixes added by the embedder, a 512-token cap with chunks of 400 tokens or fewer.
 - **Licence:** MIT in the card metadata only; the repository has no LICENSE file.
 - **Runtime:** onnxruntime plus `tokenizers`, with `onnx/model.onnx` (fp32, 470.3 MB) and `onnx/tokenizer.json` (17.1 MB).
-- **Supply chain:** only the files in `FILES` are fetched, and each is checked against its sha256 before every load. No download at runtime (amended below). Model id and revision are stored with every vector.
+- **Supply chain:** only the files in `FILES` are fetched, and each is checked against its sha256 before every load. No download at runtime. Model id and revision are stored with every vector.
 - **Anchor:** the model's `config.json` at the revision is committed as `app/config/embedding_model_config.json`; a test checks its sha256 and that `hidden_size` equals `DIM`.
 - **Evals:** recordings compare vectors with a tolerance, not byte for byte.
-- **CI in M1:** amended below.
 
 ### Amendment (M1 PR 4, 2026-11-08)
 
-- **CI:** `make model` in `lint-test`, uncached; past three minutes, a cache verified by sha256 after each restore (M1 plan, default 6).
-- **Loading:** the libraries get verified bytes, never a path, after a protobuf walk refuses external data and non-standard operator domains; CPU only.
-- **No Hub client** in the lock, `from_pretrained` banned: this replaces `HF_HUB_OFFLINE=1`.
+It replaces the cached CI step, `HF_HUB_OFFLINE=1`, the unmeasured-speed and LFS-oid caveats, and the loader's Watch item:
+- **CI:** `make model` in `lint-test`, uncached; past three minutes, a sha256-verified cache (default 6).
+- **Loading:** verified bytes, never a path, after a protobuf walk refuses external data and non-standard domains; CPU only.
+- **No Hub client** in the lock; `from_pretrained` banned.
 - **Chunks:** `chunk_tokens` at most, prefix included; nothing is truncated.
 - **Measured:** downloads match the LFS oids; Apple M1: load 1.5 s, about 60 passages/s; same-language queries rank first, German to English third.
 - **granite-r2** waits for M2.

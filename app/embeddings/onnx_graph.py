@@ -13,9 +13,16 @@ graph_problems() reads the protobuf wire format with the standard library only, 
 check runs before onnxruntime parses a byte. It walks every place a tensor or a node can
 sit: the graph's initializers and sparse initializers, node attributes (a tensor, a
 graph, and lists of either), and every subgraph (If, Loop, Scan), to a fixed depth.
-Model-local functions and training info are refused outright: the pinned model has
-neither, and a closed world needs no second walker. Fields it does not know are
-skipped, as protobuf does; a malformed or truncated message is a problem, never a pass.
+Model-local functions, training info and an `ort_config` entry in the model's metadata
+(which onnxruntime applies as session options when ORT_LOAD_CONFIG_FROM_MODEL is set)
+are refused outright: the pinned model has none of them, and a closed world needs no
+second walker. Fields it does not know are skipped, as protobuf does; a malformed or
+truncated message is a problem, never a pass.
+
+The walk reads what protobuf's C++ parser, the one inside onnxruntime, reads (review
+finding sec-1): that parser takes a tag as 32 bits and drops the rest, and an enum as 32
+bits, so a wider tag, which would be an unknown field here and a known one there, is
+refused as malformed, and a data_location is refused unless it is exactly DEFAULT.
 
 Messages name structural locations and domains only (truncated), never tensor names
 or the external path: the bytes are the model's.
@@ -42,7 +49,10 @@ _SHOWN = 40  # characters of a domain shown in a message
 _VARINT, _FIXED64, _LEN, _FIXED32 = 0, 1, 2, 5
 
 # ModelProto
-_MODEL_GRAPH, _MODEL_OPSET, _MODEL_TRAINING, _MODEL_FUNCTIONS = 7, 8, 20, 25
+_MODEL_GRAPH, _MODEL_OPSET, _MODEL_METADATA, _MODEL_TRAINING, _MODEL_FUNCTIONS = 7, 8, 14, 20, 25
+# StringStringEntryProto
+_ENTRY_KEY = 1
+_ORT_CONFIG = "ort_config"
 # OperatorSetIdProto
 _OPSET_DOMAIN = 1
 # GraphProto
@@ -54,7 +64,7 @@ _ATTR_TENSOR, _ATTR_GRAPH, _ATTR_TENSORS, _ATTR_GRAPHS = 5, 6, 10, 11
 _ATTR_SPARSE, _ATTR_SPARSES = 22, 23
 # TensorProto
 _TENSOR_EXTERNAL_DATA, _TENSOR_DATA_LOCATION = 13, 14
-_EXTERNAL = 1  # TensorProto.DataLocation.EXTERNAL
+_DEFAULT, _EXTERNAL = 0, 1  # TensorProto.DataLocation
 # SparseTensorProto
 _SPARSE_VALUES, _SPARSE_INDICES = 1, 2
 
@@ -72,6 +82,8 @@ def _varint(buf: memoryview, pos: int) -> tuple[int, int]:
         pos += 1
         value |= (byte & 0x7F) << shift
         if not byte & 0x80:
+            if value >> 64:  # protobuf's varints are 64 bits at most
+                raise _Malformed
             return value, pos
         shift += 7
 
@@ -82,7 +94,9 @@ def _fields(buf: memoryview) -> Iterator[tuple[int, int, int | memoryview]]:
     while pos < len(buf):
         tag, pos = _varint(buf, pos)
         number, wire = tag >> 3, tag & 7
-        if number == 0:
+        # A tag is 32 bits (field numbers up to 2**29 - 1): a wider one is a field that
+        # onnxruntime's parser would read under its low 32 bits.
+        if number == 0 or tag >> 32:
             raise _Malformed
         if wire == _VARINT:
             value, pos = _varint(buf, pos)
@@ -132,8 +146,12 @@ def _tensor(buf: memoryview, where: str) -> list[str]:
         elif number == _TENSOR_DATA_LOCATION:
             if wire != _VARINT:
                 raise _Malformed
+            # Any value but DEFAULT: protobuf casts the enum to 32 bits, so 2**32 + 1 is
+            # EXTERNAL to onnxruntime.
             if value == _EXTERNAL:
                 problems.append(f"{where}: data_location EXTERNAL")
+            elif value != _DEFAULT:
+                problems.append(f"{where}: data_location not DEFAULT")
     # One line per tensor: a tensor may carry both markers.
     return sorted(set(problems))
 
@@ -215,6 +233,10 @@ def _model(buf: memoryview) -> list[str]:
         elif number == _MODEL_FUNCTIONS:
             _message(wire, value)
             problems.append("model-local functions are refused")
+        elif number == _MODEL_METADATA:
+            for field, kind, item in _fields(_message(wire, value)):
+                if field == _ENTRY_KEY and _text(kind, item) == _ORT_CONFIG:
+                    problems.append("metadata ort_config is refused")
         elif number == _MODEL_TRAINING:
             _message(wire, value)
             problems.append("training info is refused")

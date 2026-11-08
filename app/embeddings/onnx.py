@@ -13,8 +13,11 @@ Loading, in this order, before onnxruntime or tokenizers sees a byte:
 Then tokenizers and onnxruntime get those verified bytes, never a path. The session runs
 on CPUExecutionProvider alone (the wheel also ships an Azure provider that calls remote
 endpoints), takes the ONNX format only, computes deterministically, and registers no
-custom operator library. Its inputs and output must be the ones this module feeds and
-reads.
+custom operator library. The model's metadata never configures it: onnxruntime's wrapper
+would take session options from it while ORT_LOAD_CONFIG_FROM_MODEL is set, so the
+session is built with read_config_from_model=0 and refused while that variable is set at
+all (review finding sec-3). Its inputs and output must be the ones this module feeds and
+reads; a refusal names the expected ones, never the model's.
 
 Embedding follows the model card at REVISION: the prefixed text through the model's own
 tokenizer, the last hidden state averaged over the attention mask (mean pooling), then
@@ -26,6 +29,7 @@ keeps stored passages at CHUNK_TOKENS or fewer.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -54,6 +58,8 @@ PROVIDERS = ["CPUExecutionProvider"]
 INPUTS = ("input_ids", "attention_mask", "token_type_ids")
 REQUIRED_INPUTS = frozenset({"input_ids", "attention_mask"})
 OUTPUT = "last_hidden_state"
+# onnxruntime's wrapper reads it, and then lets the model's metadata set session options.
+CONFIG_FROM_MODEL = "ORT_LOAD_CONFIG_FROM_MODEL"
 # Texts per run of the model. Attention holds batch x heads x length^2 floats:
 # 8 passages of 400 tokens take about 60 MB.
 BATCH = 8
@@ -117,6 +123,10 @@ def _check_config(config_json: bytes) -> None:
 
 
 def _session(model: bytes) -> ort.InferenceSession:
+    if CONFIG_FROM_MODEL in os.environ:
+        raise EmbedderError(
+            f"{CONFIG_FROM_MODEL} is set: the model's metadata would configure the session"
+        )
     options = ort.SessionOptions()
     # The bytes are an ONNX protobuf: never parsed as onnxruntime's own ORT format.
     options.add_session_config_entry("session.load_model_format", "ONNX")
@@ -124,14 +134,19 @@ def _session(model: bytes) -> ort.InferenceSession:
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     options.inter_op_num_threads = 1
     options.log_severity_level = 3  # errors only
-    session = ort.InferenceSession(model, sess_options=options, providers=PROVIDERS)
+    session = ort.InferenceSession(
+        model, sess_options=options, providers=PROVIDERS, read_config_from_model=0
+    )
     if session.get_providers() != PROVIDERS:
         raise EmbedderError(f"{MODEL}: providers {session.get_providers()}, expected {PROVIDERS}")
     inputs = {item.name: item.type for item in session.get_inputs()}
     if not REQUIRED_INPUTS <= inputs.keys() <= set(INPUTS) or any(
         kind != "tensor(int64)" for kind in inputs.values()
     ):
-        raise EmbedderError(f"{MODEL}: inputs {sorted(inputs)} are not the expected int64 inputs")
+        raise EmbedderError(
+            f"{MODEL}: inputs are not the expected int64 inputs"
+            " (input_ids, attention_mask, optionally token_type_ids)"
+        )
     outputs = session.get_outputs()
     if not outputs or outputs[0].name != OUTPUT or outputs[0].shape[-1:] != [DIM]:
         raise EmbedderError(f"{MODEL}: the first output is not {OUTPUT} with {DIM} dimensions")
