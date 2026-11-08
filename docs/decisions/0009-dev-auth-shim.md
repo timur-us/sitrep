@@ -34,13 +34,14 @@ The last option, `app/auth/dev_shim.py`:
 - **Harder:** a restart signs everyone out; the shim works natively only, not in a container; every variable name changed.
 - **Watch:**
   - Any local process is trusted, as with the database: it can log in as any advisor and forge any Origin. Cookies ignore ports, so a server on another port of 127.0.0.1 receives the session cookie and can toss a second one.
-  - Sessions do not expire until the process ends, and the store has no size limit. A request with two session cookies ends neither session.
-  - With `SITREP_TRACE_PLAINTEXT=1` and OpenTelemetry's header-capture variables set, the session cookie reaches stdout.
-  - Without the shim, no Host check runs (M1, once a route serves data).
-  - Whether to prefix `DATABASE_URL` and `MIGRATION_DATABASE_URL` is open (PR 5a review sec-11).
+  - Sessions never expire, and the store is unbounded (kept in M0). Two session cookies end neither session.
+  - Plaintext traces with OpenTelemetry's header capture print the session cookie; M1 refuses that.
+  - Without the shim, no Host check runs; M1 adds one.
+  - The database URLs get the prefix in M1's first infrastructure PR (PR 5a review sec-11).
 
 ## Sources
 
+- Timur's answers to the PR 7 questions (the last four Watch items), `docs/plans/m0-foundation.md`, amendment recorded in PR 9 (2026-11-08).
 - `docs/plans/m0-foundation.md`, "Dev shim" and PR 7 (2026-10-28).
 - PR 3 review findings sec-1 (Host allowlist) and sec-7 (prefix), https://github.com/timur-us/sitrep/pull/5 (2026-10-29).
 - Fetch Standard, "Serializing a request origin" (no-referrer gives `null` for non-GET requests), https://fetch.spec.whatwg.org/ (read 2026-11-04; measured in `tests/web/test_dev_login.py`).
