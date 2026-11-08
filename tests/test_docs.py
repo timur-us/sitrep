@@ -246,6 +246,198 @@ def test_planted_adr_heading_inside_a_fence_is_ignored(tmp_path: Path) -> None:
     assert adr_problems(decisions) == []
 
 
+PLAN = ROOT / "docs" / "plans" / "m0-foundation.md"
+RUNBOOK = ROOT / "docs" / "runbooks" / "local-setup.md"
+REPORT = ROOT / "docs" / "reports" / "m0.md"
+
+# The plan's "Verification at the end of M0": one line of `make` commands joined by "&&".
+VERIFICATION = re.compile(r"^- \*\*Fresh clone:\*\* `([^`\n]+)`", re.MULTILINE)
+FRESH_CLONE = "From a fresh clone"
+SH_BLOCK = re.compile(r"^```sh\n(.*?)^```", re.DOTALL | re.MULTILINE)
+# The plan's sequence, pinned here too, so that an edit to the plan alone fails.
+SEQUENCE = (
+    "make up",
+    "make migrate",
+    "make test",
+    "make evals",
+    "make redteam",
+    "make data",
+    "make docker-build",
+    "make web-test",
+)
+
+
+def read(path: Path) -> str:
+    """The file's text, or "" when it does not exist, so a missing file fails an assertion."""
+    return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+
+def verification_sequence(plan: str) -> list[str]:
+    """The plan's fresh-clone commands, in order; [] when the line is missing."""
+    match = VERIFICATION.search(plan)
+    return [command.strip() for command in match.group(1).split("&&")] if match else []
+
+
+def fresh_clone_problems(runbook: str, sequence: list[str]) -> list[str]:
+    """One line per way the runbook's fresh-clone block differs from the sequence."""
+    found = [body for heading, body in sections(runbook) if heading == FRESH_CLONE]
+    if len(found) != 1:
+        return [f"{len(found)} '## {FRESH_CLONE}' sections, expected 1"]
+    blocks = SH_BLOCK.findall(found[0])
+    if len(blocks) != 1:
+        return [f"'## {FRESH_CLONE}': {len(blocks)} sh blocks, expected 1"]
+    # A trailing "# comment" says what the line shows; the command is what runs.
+    lines = [line.split("#", 1)[0].strip() for line in blocks[0].splitlines()]
+    commands = [line for line in lines if line]
+    if commands != sequence:
+        return [f"'## {FRESH_CLONE}' runs {commands}, the plan says {sequence}"]
+    return []
+
+
+def test_fresh_clone_block() -> None:
+    sequence = verification_sequence(read(PLAN))
+    assert sequence == list(SEQUENCE), f"the plan's fresh-clone line is {sequence}"
+    problems = fresh_clone_problems(read(RUNBOOK), sequence)
+    assert not problems, "runbook:\n" + "\n".join(problems)
+
+
+def test_planted_fresh_clone_blocks() -> None:
+    sequence = list(SEQUENCE)
+    good = "\n".join(f"{command}  # note" for command in sequence)
+
+    def runbook(*blocks: str, heading: str = FRESH_CLONE) -> str:
+        fenced = "".join(f"```sh\n{block}\n```\n\n" for block in blocks)
+        return f"# Local setup\n\n## {heading}\n\nNo `.env`.\n\n{fenced}## Next\n\nx\n"
+
+    assert fresh_clone_problems(runbook(good), sequence) == []
+    swapped = "\n".join([sequence[1], sequence[0], *sequence[2:]])
+    shorter = "\n".join(sequence[:-1])
+    extra = good + "\nmake down"
+    reordered = [sequence[1], sequence[0], *sequence[2:]]
+    assert fresh_clone_problems(runbook(swapped), sequence) == [
+        f"'## {FRESH_CLONE}' runs {reordered}, the plan says {sequence}"
+    ]
+    assert fresh_clone_problems(runbook(shorter), sequence) == [
+        f"'## {FRESH_CLONE}' runs {sequence[:-1]}, the plan says {sequence}"
+    ]
+    assert fresh_clone_problems(runbook(extra), sequence) == [
+        f"'## {FRESH_CLONE}' runs {[*sequence, 'make down']}, the plan says {sequence}"
+    ]
+    assert fresh_clone_problems(runbook(good, good), sequence) == [
+        f"'## {FRESH_CLONE}': 2 sh blocks, expected 1"
+    ]
+    assert fresh_clone_problems(runbook(good, heading="Fresh"), sequence) == [
+        f"0 '## {FRESH_CLONE}' sections, expected 1"
+    ]
+    assert verification_sequence("- **Fresh clone:** `make a && make b` all pass") == [
+        "make a",
+        "make b",
+    ]
+    assert verification_sequence("- **Fresh:** `make a`") == []
+
+
+# docs/reports/m0.md: CLAUDE.md rule 12's three parts, after the measured facts and the
+# handovers, in this order.
+REPORT_SECTIONS = (
+    "Measured",
+    "M1 handovers",
+    "What is shaky",
+    "What was left out",
+    "What Timur has to do",
+)
+# Every M1 handover PRs 5b to 8 recorded, by the PR and the finding's id. PR 8's
+# sec-1 to sec-8 are all listed, the fixed ones too, so the report says what is left.
+HANDOVER_IDS = (
+    "PR 5b sec-5",
+    "PR 5b hnsw.iterative_scan",
+    "PR 5b product sheets",
+    "PR 5b GIN index",
+    "PR 6 sec-2",
+    "PR 6 sec-11",
+    "PR 6 test-14",
+    "PR 6 forged-argument handler",
+    "PR 6 approval tokens",
+    "PR 6 error locations",
+    "PR 6 red-team cases",
+    "PR 7 sec-1",
+    "PR 7 sec-5",
+    "PR 7 question 1",
+    "PR 7 cross-advisor cases",
+    *(f"PR 8 sec-{number}" for number in range(1, 9)),
+    "PR 8 spec-4",
+)
+# Phrases the handovers must carry: Timur's answer for the loader ADR, and the
+# forged-argument test's handler, which is M0's and not M1's.
+HANDOVER_PHRASES = ("runtime-written text is always untrusted", "loader ADR", "test-local")
+HANDOVER_ROW = re.compile(r"^\| ([^|\n]+?) \|", re.MULTILINE)
+
+
+def report_problems(text: str) -> list[str]:
+    """One line per way the M0 report misses its sections or its handovers."""
+    if not text:
+        return ["docs/reports/m0.md is missing or empty"]
+    problems = []
+    spelled_out = f"{branding.PRODUCT.name} ({branding.PRODUCT.expansion})"
+    if (times := text.count(spelled_out)) != 1:
+        problems.append(f"spells out {spelled_out!r} {times} times, expected once")
+    pairs = sections(text)
+    headings = [heading for heading, _ in pairs]
+    if headings != list(REPORT_SECTIONS):
+        problems.append(f"sections {headings}, expected {list(REPORT_SECTIONS)}")
+    found = dict(pairs)
+    problems += [f"'## {name}' is empty" for name in REPORT_SECTIONS if found.get(name) == ""]
+    handovers = found.get("M1 handovers", "")
+    rows = set(HANDOVER_ROW.findall(handovers))
+    problems += [f"no handover row {item!r}" for item in HANDOVER_IDS if item not in rows]
+    problems += [
+        f"the handovers never say {phrase!r}"
+        for phrase in HANDOVER_PHRASES
+        if phrase not in handovers
+    ]
+    return problems
+
+
+def test_m0_report_sections() -> None:
+    problems = report_problems(read(REPORT))
+    assert not problems, "docs/reports/m0.md:\n" + "\n".join(problems)
+
+
+def test_planted_m0_reports() -> None:
+    spelled_out = f"{branding.PRODUCT.name} ({branding.PRODUCT.expansion})"
+    rows = "\n".join(f"| {item} | M1 |" for item in HANDOVER_IDS)
+    handovers = f"| Id | To |\n|---|---|\n{rows}\n\n" + " ".join(HANDOVER_PHRASES)
+    bodies = {name: "Text." for name in REPORT_SECTIONS} | {"M1 handovers": handovers}
+
+    def report(bodies: dict[str, str], intro: str = spelled_out) -> str:
+        parts = [f"# M0 report\n\n{intro} closes M0."]
+        parts += [f"## {name}\n\n{body}" for name, body in bodies.items()]
+        return "\n\n".join(parts) + "\n"
+
+    assert report_problems(report(bodies)) == []
+    assert report_problems("") == ["docs/reports/m0.md is missing or empty"]
+
+    missing = {name: body for name, body in bodies.items() if name != "What is shaky"}
+    assert report_problems(report(missing)) == [
+        f"sections {list(missing)}, expected {list(REPORT_SECTIONS)}"
+    ]
+    assert report_problems(report(bodies | {"What was left out": ""})) == [
+        "'## What was left out' is empty"
+    ]
+    assert report_problems(report(bodies, intro="It")) == [
+        f"spells out {spelled_out!r} 0 times, expected once"
+    ]
+    dropped = handovers.replace("| PR 8 sec-4 | M1 |\n", "").replace("test-local", "local")
+    assert report_problems(report(bodies | {"M1 handovers": dropped})) == [
+        "no handover row 'PR 8 sec-4'",
+        "the handovers never say 'test-local'",
+    ]
+    # An id in prose, not in a row's first cell, does not count.
+    in_prose = handovers.replace("| PR 7 sec-1 | M1 |\n", "") + " PR 7 sec-1"
+    assert report_problems(report(bodies | {"M1 handovers": in_prose})) == [
+        "no handover row 'PR 7 sec-1'"
+    ]
+
+
 def test_readme_has_shows_and_does_not() -> None:
     found = dict(sections(README.read_text(encoding="utf-8")))
     assert README_SECTION in found, f"README has no '## {README_SECTION}'"
