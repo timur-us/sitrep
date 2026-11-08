@@ -1,0 +1,8 @@
+Gesprächsnotiz Familie {family}, {date}
+
+Persönliches Gespräch in der Bank. Die Aktienquote beträgt derzeit {equity_share} ({equities}). Die Familie fragt, ob die Quote angesichts der Marktschwankungen reduziert werden sollte.
+
+Vereinbart: keine Umschichtung vor dem nächsten Termin. Bis dahin prüfen wir Alternativen, unter anderem {product}.
+
+Nächster Schritt: Rückruf bis {next_date}.
+{advisor_name}

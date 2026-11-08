@@ -1,0 +1,6 @@
+Call note: the {family} family, {date}
+
+Video call. Part of the cash position of {cash} is to be invested; the rest stays as a reserve for the family's planned expenses. The bonds ({bonds}) stay as they are.
+
+The family would like a proposal with {product}. The proposal will be ready by {next_date}.
+{advisor_name}

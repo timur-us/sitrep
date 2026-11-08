@@ -1,0 +1,9 @@
+Ihre Unterlagen
+
+Guten Tag Familie {family},
+
+die gewünschten Unterlagen sind in Vorbereitung und gehen Ihnen bis {next_date} zu. Bei Fragen erreichen Sie mich unter {advisor_email}.
+
+Mit freundlichen Grüßen
+{advisor_name}
+{bank}

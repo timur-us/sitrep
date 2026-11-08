@@ -1,0 +1,8 @@
+Product sheet for {product}
+
+Dear {advisor_name},
+
+could you send us the product sheet for {product}? We would like to read it before our next conversation.
+
+Best wishes
+The {family} family

@@ -1,0 +1,17 @@
+KYC profile: the {family} family
+
+Mandate: the {family} family
+Advisor: {advisor_name} ({advisor_email}), {bank}
+Family contact: {client_email}
+Client since: {client_since}
+Last review: {date}
+
+Risk profile: {risk_profile}
+Investment horizon: {horizon} years
+Objective: {objective}
+Source of wealth: {source_of_wealth}
+Tax residence: {residence}
+Politically exposed person: no
+Language of correspondence: English
+
+The details were confirmed in conversation. The family tells the advisor about any change in their personal or financial circumstances.

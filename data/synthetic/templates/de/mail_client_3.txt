@@ -1,0 +1,8 @@
+Terminverschiebung
+
+Guten Tag {advisor_name},
+
+leider müssen wir unseren Termin verschieben. Wäre stattdessen der {next_date} möglich? Ein Telefonat oder ein Videotermin ist uns beides recht.
+
+Freundliche Grüße
+Familie {family}

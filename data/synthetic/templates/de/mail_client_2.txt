@@ -1,0 +1,8 @@
+Produktblatt {product}
+
+Guten Tag {advisor_name},
+
+könnten Sie uns das Produktblatt zu {product} schicken? Wir möchten es vor unserem nächsten Gespräch in Ruhe lesen.
+
+Viele Grüße
+Familie {family}

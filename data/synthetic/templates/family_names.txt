@@ -1,0 +1,45 @@
+# Client family names for the synthetic corpus (data/synthetic/generate.py).
+# Chosen for this project; no well-known person. One per line, ASCII. Some are
+# ordinary real surnames: nothing is attached to them, no first name, address or
+# other detail, and a surname alone identifies nobody. The demo family comes from
+# app/config/branding.py and is not listed here. Reviewed in PR 8: no cast name and
+# no bank name.
+Albering
+Ashcombe
+Auenrieder
+Birkholm
+Bramwell
+Brandtner
+Cardrew
+Dornacher
+Dreesbach
+Dunholt
+Elmhirst
+Elverding
+Eschwald
+Fairbrook
+Falkenrath
+Fennhoff
+Gerlinger
+Grabowsky
+Hallweger
+Hartwell
+Iselbrand
+Jarnow
+Kerbholz
+Kestrell
+Lorbacher
+Merzfeld
+Nordhagen
+Oberwiesner
+Pallasch
+Pellbrook
+Quellmann
+Rautenberg
+Sallmann
+Tessendorf
+Thornwick
+Ulmbacher
+Vossberg
+Wintergrund
+Zabelstein

@@ -1,0 +1,9 @@
+Your meeting on {next_date}
+
+Dear {family} family,
+
+thank you for your message. I am glad to confirm our meeting on {next_date}, and I will bring the product sheet for {product}.
+
+Kind regards
+{advisor_name}
+{bank}

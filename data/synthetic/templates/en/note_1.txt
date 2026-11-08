@@ -1,0 +1,8 @@
+Call note: the {family} family, {date}
+
+Phone call with the {family} family. We went through the latest portfolio report. Total assets stand at {total}, and performance year to date is {performance}.
+
+The family is content with the result and wants to keep the {risk_profile} risk profile. They are interested in {product}; the product sheet will be sent.
+
+Next step: follow-up meeting on {next_date}.
+{advisor_name}

@@ -1,0 +1,9 @@
+Ihr Termin am {next_date}
+
+Guten Tag Familie {family},
+
+vielen Dank für Ihre Nachricht. Gern bestätige ich unseren Termin am {next_date}. Das Produktblatt zu {product} bringe ich mit.
+
+Mit freundlichen Grüßen
+{advisor_name}
+{bank}

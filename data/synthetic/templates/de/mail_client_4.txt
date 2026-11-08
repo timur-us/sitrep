@@ -1,0 +1,8 @@
+Unterlagen für die Steuererklärung
+
+Guten Tag {advisor_name},
+
+unser Steuerberater bittet um die Jahresunterlagen zu unserem Depot. Bis wann können Sie uns diese zur Verfügung stellen?
+
+Mit freundlichen Grüßen
+Familie {family}
