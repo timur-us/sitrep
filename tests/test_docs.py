@@ -901,3 +901,129 @@ def test_planted_adr_0010_blocks() -> None:
         f"documents.jsonl:mandate_id=rt-x: {prefixed}",
         f"mandates.jsonl:id=rt-x: {prefixed}",
     ]
+
+
+# ADR 0011 (M1 PR 2): the approval token's facts, as the ADR's one yaml block. PR 14 pins
+# app/harness/approval.py to the same block.
+ADR_0011_KEYS = ("token_bytes", "hash", "ttl_seconds", "single_use", "binding")
+# What a token is bound to: the advisor, the proposal, the tool, the mandate and the hash of
+# the canonical call {tool, mandate_id, arguments} (review findings spec-1 and sec-3).
+BINDING = ("advisor_id", "proposal_id", "tool", "mandate_id", "call_sha256")
+MIN_TOKEN_BYTES = 32  # 256 bits from secrets
+MAX_TTL_SECONDS = 600  # the plan's ten minutes is the ceiling
+
+
+def adr_0011_problems(adr: str) -> list[str]:
+    """One line per way ADR 0011's block misses a fact the approval gate relies on."""
+    blocks = yaml_blocks(adr)
+    if len(blocks) != 1:
+        return [f"expected one yaml block, found {len(blocks)}"]
+    facts, problem = load_block(blocks[0])
+    if problem:
+        return [problem]
+    if not isinstance(facts, dict):
+        return ["the yaml block is not a mapping"]
+    problems = [f"{key}: not in the block" for key in ADR_0011_KEYS if key not in facts]
+    problems += [f"{key}: in the block, not expected" for key in facts if key not in ADR_0011_KEYS]
+    if problems:
+        return problems
+    size, ttl = facts["token_bytes"], facts["ttl_seconds"]
+    # bool is an int in Python: `true` is no byte count and no lifetime.
+    if type(size) is not int or size < MIN_TOKEN_BYTES:
+        problems.append(f"token_bytes: {size!r}, expected an int of at least {MIN_TOKEN_BYTES}")
+    if facts["hash"] != "sha256":
+        problems.append(f"hash: {facts['hash']!r}, expected 'sha256'")
+    if type(ttl) is not int or not 0 < ttl <= MAX_TTL_SECONDS:
+        problems.append(f"ttl_seconds: {ttl!r}, expected an int in 1..{MAX_TTL_SECONDS}")
+    if facts["single_use"] is not True:
+        problems.append(f"single_use: {facts['single_use']!r}, expected true")
+    binding = facts["binding"]
+    if not isinstance(binding, list):
+        problems.append("binding: not a list")
+    else:
+        problems += [f"binding: misses {name!r}" for name in BINDING if name not in binding]
+        problems += [
+            f"binding: {name!r} is not a binding" for name in binding if name not in BINDING
+        ]
+        if len(binding) != len(set(map(repr, binding))):
+            problems.append("binding: a name repeats")
+    return problems
+
+
+def _adr_0011() -> str:
+    found = sorted(DECISIONS.glob("0011-*.md")) if DECISIONS.is_dir() else []
+    assert len(found) == 1, f"expected one ADR 0011 in docs/decisions, found {len(found)}"
+    return found[0].read_text(encoding="utf-8")
+
+
+def test_adr_0011_block() -> None:
+    problems = adr_0011_problems(_adr_0011())
+    assert not problems, "ADR 0011:\n" + "\n".join(problems)
+
+
+GOOD_0011 = """\
+```yaml
+token_bytes: 32
+hash: sha256
+ttl_seconds: 600
+single_use: true
+binding: [advisor_id, proposal_id, tool, mandate_id, call_sha256]
+```
+"""
+
+
+def test_planted_adr_0011_blocks() -> None:
+    assert adr_0011_problems(GOOD_0011) == []
+    assert adr_0011_problems(GOOD_0011.replace("token_bytes: 32", "token_bytes: 64")) == []
+    # The block: exactly one visible yaml block, yaml, a mapping, the five keys.
+    assert adr_0011_problems("no block\n") == ["expected one yaml block, found 0"]
+    assert adr_0011_problems(GOOD_0011 + GOOD_0011) == ["expected one yaml block, found 2"]
+    assert adr_0011_problems(f"<!--\n{GOOD_0011}-->\n") == ["expected one yaml block, found 0"]
+    assert adr_0011_problems("```yaml\nx: [1\n```\n") == ["the yaml block is not yaml"]
+    assert adr_0011_problems("```yaml\n- a\n```\n") == ["the yaml block is not a mapping"]
+    assert adr_0011_problems(GOOD_0011.replace("single_use: true\n", "")) == [
+        "single_use: not in the block"
+    ]
+    assert adr_0011_problems(GOOD_0011.replace("hash: sha256", "hash: sha256\nkey: hmac")) == [
+        "key: in the block, not expected"
+    ]
+    # A repeated key is refused: PyYAML alone would keep the last, here the weak one.
+    twice = GOOD_0011.replace("single_use: true", "single_use: true\nsingle_use: false")
+    assert adr_0011_problems(twice) == ["the yaml block repeats a key: duplicate key 'single_use'"]
+
+    # The token: 32 bytes or more, a sha256 hash, a short life, used once.
+    for size in ("16", "31", "true", '"32"', "32.0"):
+        assert adr_0011_problems(GOOD_0011.replace("token_bytes: 32", f"token_bytes: {size}")) == [
+            f"token_bytes: {yaml.safe_load(size)!r}, expected an int of at least 32"
+        ], size
+    for name in ("md5", "sha1", "SHA256", "hmac-sha256"):
+        assert adr_0011_problems(GOOD_0011.replace("hash: sha256", f"hash: {name}")) == [
+            f"hash: {name!r}, expected 'sha256'"
+        ], name
+    for ttl in ("0", "-1", "601", "86400", "true"):
+        assert adr_0011_problems(GOOD_0011.replace("ttl_seconds: 600", f"ttl_seconds: {ttl}")) == [
+            f"ttl_seconds: {yaml.safe_load(ttl)!r}, expected an int in 1..600"
+        ], ttl
+    for value in ("false", "1", '"true"', "yes_please"):
+        assert adr_0011_problems(GOOD_0011.replace("single_use: true", f"single_use: {value}")) == [
+            f"single_use: {yaml.safe_load(value)!r}, expected true"
+        ], value
+
+    # The binding: all five names, in a list.
+    for name in BINDING:
+        names = ", ".join(other for other in BINDING if other != name)
+        planted = GOOD_0011.replace(", ".join(BINDING), names)
+        assert adr_0011_problems(planted) == [f"binding: misses {name!r}"], name
+    as_text = GOOD_0011.replace(f"[{', '.join(BINDING)}]", '"advisor_id proposal_id"')
+    assert adr_0011_problems(as_text) == ["binding: not a list"]
+    # Exactly those names: no extra, repeated or non-string item.
+    joined = ", ".join(BINDING)
+    assert adr_0011_problems(GOOD_0011.replace(joined, joined + ", note")) == [
+        "binding: 'note' is not a binding"
+    ]
+    assert adr_0011_problems(GOOD_0011.replace(joined, joined + ", tool")) == [
+        "binding: a name repeats"
+    ]
+    assert adr_0011_problems(GOOD_0011.replace(joined, joined + ", 7")) == [
+        "binding: 7 is not a binding"
+    ]
