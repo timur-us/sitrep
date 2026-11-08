@@ -14,21 +14,21 @@ SITREP (situation report) loads its synthetic corpus in M1 (PR 7). M0's handover
 
 ## Options
 
-- **Trust written by the loader:** one bad writer makes e-mail `internal`.
+- **Trust written by the loader:** one bad write makes e-mail `internal`.
 - **A trust table:** rows the owner can update.
-- **Product sheets in `documents`** under `OR advisor_id IS NULL`: the bypass shape sec-8 forbids. **Copied per advisor:** three copies to keep equal.
+- **Product sheets in `documents`** under `OR advisor_id IS NULL`: the bypass sec-8 forbids. **Copied per advisor:** three copies to keep equal.
 - **Attack documents in a table of their own:** a path production never reads.
 
 ## Decision
 
-- **`origin`** is `text NOT NULL` with a CHECK, on every table holding document text (the block's `tables`). The loader derives it from the record's type (`corpus_origins`) and refuses a record whose `origin` or `trust` disagrees. `chunks` inherit it through `(advisor_id, document_id)`; a hit without one counts as `untrusted`. `advisors`, `mandates` and `mandate_contacts` carry none.
-- **`trust`** is a STORED generated column (default 12): `internal` for the block's internal origins, else `untrusted`: a new origin fails closed, and no writer sets it. Trust is provenance, never permission: every hit stays `Untrusted`; `internal` relaxes no allowlist or scan (rule 9).
+- **`origin`** is `text NOT NULL` with a CHECK, on every table holding document text (the block's `tables`). The loader derives it from the record's type through the generator's `ORIGIN`, refusing an unknown type or a disagreeing `origin` or `trust`. `chunks` inherit it through `(advisor_id, document_id)`; a hit without one counts as `untrusted`. `advisors`, `mandates` and `mandate_contacts` carry none.
+- **`trust`** is a STORED generated column (default 12): `internal` for the block's internal origins, else `untrusted`: a new origin fails closed, and no writer sets it. Trust is provenance, never permission: every hit stays `Untrusted`; `internal` relaxes no allowlist, scan or guard (rule 9).
 - **Runtime text** (`drafts`, `followups`) is `untrusted`, unretrieved in M1 (default 5).
-- **`product_sheets`** is the one global table, the catalog test's sole exemption: no `advisor_id`; ENABLE and FORCE; SELECT for the app role under `NULLIF(current_setting('app.advisor_id', true), '') IS NOT NULL`, so a reused connection reads nothing; a write policy for the owner alone, since FORCE binds it. No policy admits `advisor_id IS NULL`. Each sheet stores its exact `https` URL, no query, fragment or user part, for M2's link allowlist. A sheet over the chunk cap is refused, never cut.
+- **`product_sheets`** is the one global table, the catalog test's sole exemption: no `advisor_id`; ENABLE and FORCE; SELECT for the app role under `NULLIF(current_setting('app.advisor_id', true), '') IS NOT NULL`, so a reused connection reads nothing; a write policy for the owner alone, since FORCE binds it. No policy admits `advisor_id IS NULL`. Each sheet stores its exact `https` URL (no query, fragment or user part) for M2's link allowlist. A sheet over the chunk cap is refused, never cut.
 - **`mandate_contacts`** holds each mandate's recipients under row-level security, from the mandate record's `client_email`, never from e-mail headers, for M2's recipient allowlist.
-- **Attack documents** have ids starting `rt-`, compared case-insensitively. The loader refuses a corpus id with the prefix, an attack id without, and duplicates. Behind an explicit flag it writes only `documents` and `chunks`: into the case's target mandate, under that mandate's corpus advisor, as `mailbox` whatever the case says.
+- **Attack documents** have ids starting `rt-`, compared case-insensitively. Corpus ids with it, attack ids without it, and duplicates are refused. Behind an explicit flag it writes only `documents` and `chunks`: into the case's target mandate, which must exist in the corpus, under its corpus advisor, as `mailbox` whatever the case says.
 - **The loader's identity:** the migrator after `SET ROLE` to the owner, one advisor per transaction. `owner_advisor_scope()` in `app/db/session.py` sets the advisor and refuses any session but the migrator as the owner. An AST scan keeps request code from it and from `migration_database_url`. WITH CHECK and the composite foreign keys refuse another advisor's row.
-- **Loading:** every sha256 is checked against the manifest first. Each advisor's rows are replaced by DELETE in that scope, never TRUNCATE (which ignores row-level security), and no runtime row cascades from them; a load without the flag leaves no attack row. Chunks hold at most 400 tokens, with model id and revision per vector.
+- **Loading:** every sha256 is checked against the manifest first. Each advisor's corpus rows are replaced by DELETE in that scope, never TRUNCATE (which ignores row-level security); no runtime row cascades from them, and a load without the flag leaves no attack row. Chunks hold at most 400 tokens, with model id and revision per vector.
 
 ```yaml
 corpus_origins:  # origin: trust, as data/synthetic/generate.py assigns them
@@ -51,7 +51,7 @@ attack_origin: mailbox
 
 ## Consequences
 
-- **Easier:** M2's allowlists and M4's origin filters find their columns; attacks take production's retrieval path; tests pin the block (generator now, schema in PR 7).
+- **Easier:** M2's allowlists and M4's origin filters find their columns; attacks take production's retrieval path; tests pin the block.
 - **Harder:** the loader writes as the owner: a second `set_config` call site, guarded by a role check and a name scan that `getattr()` defeats. A new origin needs a migration and this block.
 - **Watch (M3, Timur's condition):** in Azure the loader gets its own identity, and the app's identity can obtain neither that login nor the migrator's.
 
