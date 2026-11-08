@@ -18,7 +18,7 @@ Status: M0 in progress. See `docs/brief.md`, `docs/threat-model.md`, `docs/disco
 
 ## Synthetic corpus (M0)
 
-`make data` regenerates the synthetic corpus into `data/synthetic/out/` (git-ignored), offline and from a fixed seed, so two runs give the same bytes: three advisors, 40 mandates (the Weber family among Alice's 14), and per mandate a KYC profile, a portfolio report, call notes and mailbox e-mails, plus six global product sheets, about 70 % German. Each document carries its origin and trust, set from its type: the mailbox is always untrusted. No IBAN, phone number, street address or domain outside `feistel.example`, and no attack content; the loader is M1. Details: `docs/runbooks/local-setup.md`, "The synthetic corpus (M0)".
+`make data` regenerates the synthetic corpus into `data/synthetic/out/` (git-ignored), offline, from the standard library, branding and a fixed seed, so two runs give the same bytes: three advisors, 40 mandates (the Weber family among Alice's 14), and per mandate a KYC profile, a portfolio report, call notes and mailbox e-mails, plus six global product sheets, about 70 % German. Each document carries its origin and trust, set from its type: the mailbox is always untrusted. No IBAN, phone number, street address or domain outside `feistel.example`, and no attack content; the loader is M1. Details: `docs/runbooks/local-setup.md`, "The synthetic corpus (M0)".
 
 ## Dev login (M0)
 

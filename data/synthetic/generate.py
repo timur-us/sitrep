@@ -5,7 +5,8 @@ Run as `python -P -m data.synthetic.generate [--out DIR]` (`make data`). It writ
 `manifest.json` (the seed, the generator version and a sha256 per file) into
 `data/synthetic/out/`, which git ignores. The loader is M1.
 
-- **Deterministic.** Standard library only, one `random.Random(SEED)`, no clock, no
+- **Deterministic.** The standard library and `app.config.branding` only, one
+  `random.Random(SEED)`, no clock, no
   locale and no set iteration: the same templates give byte-identical files whatever
   PYTHONHASHSEED, TZ or LC_ALL say. Dates count back from `AS_OF`.
 - **Synthetic.** The cast and the demo mandate come from `app/config/branding.py`, the
@@ -16,6 +17,10 @@ Run as `python -P -m data.synthetic.generate [--out DIR]` (`make data`). It writ
 - **Origin and trust per document, from its type only** (`ORIGIN`, `trust_for`). The
   mailbox is always untrusted, whoever sent the e-mail. Trust says where the text comes
   from; every retrieval hit is still wrapped as untrusted in the harness (CLAUDE.md rule 9).
+  The other value is `internal`, not `trusted`, so that no reader takes it as permission
+  to follow what the text says.
+- **Writes only where asked.** A linked output directory or a linked file in it is
+  refused (exit 2), so a link planted in the git-ignored output cannot redirect a write.
 
 Templates are data (rule 9). They are read as plain text and filled by a one-pass
 `{name}` substitution, never by `str.format`, which follows attribute and index lookups.
@@ -177,6 +182,10 @@ PRODUCTS = (
 )
 MULTI_ASSET = ("Mischfonds", "Multi-asset")
 PRODUCT_PATH = {"german": "produkte", "english": "products"}
+
+
+class OutputError(ValueError):
+    """An output path that is a symbolic link."""
 
 
 class TemplateError(ValueError):
@@ -555,17 +564,27 @@ def serialise(records: list[dict[str, object]]) -> bytes:
 
 
 def write(out: Path, corpus: dict[str, list[dict[str, object]]]) -> str:
-    """Write the files and the manifest into out; return the manifest's sha256."""
-    out.mkdir(parents=True, exist_ok=True)
+    """Write the files and the manifest into out; return the manifest's sha256.
+
+    Links are refused before anything is written: the directory itself, or any file the
+    run would write. (Checked, then written: a link planted in between still wins. The
+    output is local and git-ignored.)
+    """
     hashes = {}
-    for name, records in sorted(corpus.items()):
-        data = serialise(records)
-        (out / name).write_bytes(data)
+    files = {name: serialise(records) for name, records in sorted(corpus.items())}
+    for name, data in files.items():
         hashes[name] = hashlib.sha256(data).hexdigest()
     manifest = {"files": hashes, "generator_version": GENERATOR_VERSION, "seed": SEED}
-    data = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    (out / "manifest.json").write_bytes(data)
-    return hashlib.sha256(data).hexdigest()
+    files["manifest.json"] = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+    if out.is_symlink():
+        raise OutputError(f"{out} is a symbolic link")
+    linked = sorted(name for name in files if (out / name).is_symlink())
+    if linked:
+        raise OutputError(f"{out}: symbolic links in place of {linked}")
+    out.mkdir(parents=True, exist_ok=True)
+    for name, data in files.items():
+        (out / name).write_bytes(data)
+    return hashlib.sha256(files["manifest.json"]).hexdigest()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -576,7 +595,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="output directory")
     args = parser.parse_args(argv)
     corpus = build()
-    digest = write(args.out, corpus)
+    try:
+        digest = write(args.out, corpus)
+    except OutputError as error:
+        print(f"data: refused: {error}", file=sys.stderr)
+        return 2
     counts = ", ".join(f"{len(records)} {name}" for name, records in sorted(corpus.items()))
     print(f"data: {counts}; manifest sha256 {digest}")
     return 0
