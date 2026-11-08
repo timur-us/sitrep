@@ -17,11 +17,25 @@ from repo_files import ROOT
 from app.config.settings import env_name
 
 # Key commands per target, as `make -n` prints them.
+MODEL_MISSING = "uv run python -P -m app.embeddings.model_files missing"
+MODEL_VERIFY = "uv run python -P -m app.embeddings.model_files verify"
+# The download (ADR 0005): curl's first argument skips ~/.curlrc; https only, redirects
+# included; the URL and the target come from model_files, never from the Makefile.
+MODEL_COMMANDS = [
+    MODEL_MISSING,
+    "curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https'",
+    "--tlsv1.2",
+    '-o "$tmp" "$url"',
+    'mv -f "$tmp" "$path"',
+    MODEL_VERIFY,
+]
+
 TARGET_COMMANDS = {
     "lint-test": [
         # -f names compose.yaml alone: no override file and no COMPOSE_FILE is merged in.
         "docker compose -f compose.yaml up -d --wait",
         "uv run python -P -m app.db.migrate",
+        *MODEL_COMMANDS,
         "uv run ruff check",
         "uv run ruff format --check",
         "uv run python -P -m pytest --ignore=tests/web",
@@ -43,6 +57,7 @@ TARGET_COMMANDS = {
         f"-e {env_name('dev_auth')}=1",
         f"-e {env_name('host')}=",
     ],
+    "model": MODEL_COMMANDS,
     "web-deps": ["uv run playwright install chromium"],
     "web-test": ["uv run playwright install chromium", "uv run python -P -m pytest tests/web"],
     "evals": ["uv run python -P -m app.runners.evals"],
@@ -112,6 +127,24 @@ def test_lint_test_starts_and_migrates_the_database_before_pytest() -> None:
     ]
     positions = [out.find(step) for step in steps]
     assert -1 not in positions and positions == sorted(positions), f"order {positions}:\n{out}"
+
+
+def test_lint_test_fetches_and_checks_the_model_before_pytest() -> None:
+    # tests/embeddings fails, never skips, without the model (plan M1, default 6).
+    out = dry_run("lint-test")
+    steps = ["python -P -m app.db.migrate", MODEL_MISSING, "curl -q ", MODEL_VERIFY, "-m pytest"]
+    positions = [out.find(step) for step in steps]
+    assert -1 not in positions and positions == sorted(positions), f"order {positions}:\n{out}"
+
+
+def test_the_model_download_is_anonymous_and_checked() -> None:
+    out = dry_run("model")
+    # No TLS bypass, no credentials, no plain http, no shell eval of what model_files prints.
+    for word in ("--insecure", " -k ", "--netrc", "--user", "-u ", "Authorization", "http://"):
+        assert word not in out, f"make model runs {word!r}:\n{out}"
+    assert "eval" not in out.split() and "sh -c" not in out, out
+    assert out.count("curl ") == 1 and "curl -q " in out, out
+    assert out.rstrip().endswith(MODEL_VERIFY), "verify is not the last step"
 
 
 def test_down_deletes_the_data() -> None:

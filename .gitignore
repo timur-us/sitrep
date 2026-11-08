@@ -20,6 +20,9 @@ dist/
 data/synthetic/out/
 tests/web/artifacts/
 
+# The embedding model's files, downloaded and checked by `make model` (ADR 0005)
+/models/
+
 # OS / editor
 .DS_Store
 .vscode/

@@ -38,6 +38,12 @@ ALLOWED = frozenset(
         "ipaddress",
         "json",
         "logging",
+        # The embedder's pooling (ADR 0005), in app/embeddings/onnx.py only.
+        "numpy",
+        # The model runtime (ADR 0005), in app/embeddings/onnx.py only: it loads native
+        # code and model graphs, so the file pins CPUExecutionProvider and the ONNX format
+        # and loads bytes that model_files.py checked. register_custom_ops_library is banned.
+        "onnxruntime",
         "opentelemetry",
         # app/db/connect.py reads os.environ; os.system, os.exec* and the like stay banned.
         "os",
@@ -52,8 +58,14 @@ ALLOWED = frozenset(
         "pydantic_settings",
         "re",
         "secrets",
+        # app/embeddings/model_files.py: S_ISREG on an open descriptor.
+        "stat",
         "starlette",
         "sys",
+        # The model's tokenizer (ADR 0005), in app/embeddings/onnx.py only. It can reach
+        # the network through Tokenizer.from_pretrained(), which is banned below; the lock
+        # leaves out the Hub client it would call (tests/test_lock.py).
+        "tokenizers",
         "tomllib",
         "types",
         "typing",
@@ -91,6 +103,8 @@ BANNED_MODULES = frozenset(
 BANNED_NAMES = frozenset({"__import__", "compile", "eval", "exec"})
 # Names that connect, serve, run a program, import by name or redirect, on any object
 # or in a from-import. RedirectResponse: the app has no endpoint that redirects.
+# from_pretrained downloads a tokenizer from the Hub; register_custom_ops_library loads
+# a native operator library into onnxruntime (ADR 0005).
 BANNED_ATTRIBUTES = frozenset(
     {
         "RedirectResponse",
@@ -100,9 +114,11 @@ BANNED_ATTRIBUTES = frozenset(
         "create_subprocess_exec",
         "create_subprocess_shell",
         "create_unix_connection",
+        "from_pretrained",
         "import_module",
         "open_connection",
         "open_unix_connection",
+        "register_custom_ops_library",
         "sock_connect",
         "start_server",
         "urlopen",
@@ -114,6 +130,15 @@ DB_CONNECT_FILE = "app/db/connect.py"
 # Building a pool: only here, where its connections go through app/db/connect.py and
 # the guard (review finding test-3 of PR 5b).
 POOL_FILE = "app/db/session.py"
+# The embedder: the one file that loads a model, from checked bytes (ADR 0005).
+EMBEDDER_FILE = "app/embeddings/onnx.py"
+# Modules that one file alone may import.
+SINGLE_FILE = {
+    "psycopg_pool": POOL_FILE,
+    "numpy": EMBEDDER_FILE,
+    "onnxruntime": EMBEDDER_FILE,
+    "tokenizers": EMBEDDER_FILE,
+}
 # On the os module only: running or replacing a program.
 OS_PROGRAM = re.compile(r"system|popen|startfile|fork\w*|exec\w*|spawn\w*|posix_spawn\w*")
 
@@ -163,8 +188,9 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
                 problems.append(f"{rel}:{node.lineno}: .connect outside {DB_CONNECT_FILE}")
         elif isinstance(node, ast.Name) and node.id in BANNED_NAMES:
             problems.append(f"{rel}:{node.lineno}: {node.id}")
-    if "psycopg_pool" in modules and rel != POOL_FILE:
-        problems.append(f"{rel}: psycopg_pool outside {POOL_FILE}")
+    for module, only in sorted(SINGLE_FILE.items()):
+        if module in modules and rel != only:
+            problems.append(f"{rel}: {module} outside {only}")
     banned = {entry for name in dotted if (entry := banned_module(name))}
     problems += [f"{rel}: banned module {entry}" for entry in sorted(banned)]
     return modules, problems
@@ -193,6 +219,7 @@ def test_import_allowlist() -> None:
         "app/__main__.py",
         "app/observability/tracing.py",
         "app/db/connect.py",
+        EMBEDDER_FILE,
     ):
         assert required in sources, f"{required} was not scanned"
     modules, problems = check(sources)
@@ -233,6 +260,16 @@ PLANTED = [
     ("from psycopg_pool import ConnectionPool\n", "psycopg_pool outside app/db/session.py"),
     ("import psycopg_pool\n", "psycopg_pool outside app/db/session.py"),
     ("from psycopg_pool import NullConnectionPool as N\n", "psycopg_pool outside"),
+    # The embedder's libraries, outside app/embeddings/onnx.py (ADR 0005).
+    ("import onnxruntime as ort\n", "onnxruntime outside app/embeddings/onnx.py"),
+    ("from onnxruntime import InferenceSession\n", "onnxruntime outside"),
+    ("import tokenizers\n", "tokenizers outside app/embeddings/onnx.py"),
+    ("from tokenizers import Tokenizer\n", "tokenizers outside"),
+    ("import numpy as np\n", "numpy outside app/embeddings/onnx.py"),
+    # Their network and native-code paths, anywhere.
+    ("Tokenizer.from_pretrained('org/model')\n", ".from_pretrained"),
+    ("from transformers import from_pretrained\n", "import from_pretrained"),
+    ("options.register_custom_ops_library('libx.so')\n", ".register_custom_ops_library"),
 ]
 
 
@@ -257,6 +294,14 @@ def test_clean_code_is_not_reported() -> None:
 
 def test_the_pool_is_allowed_in_its_own_file() -> None:
     assert scan("from psycopg_pool import ConnectionPool\n", "app/db/session.py")[1] == []
+
+
+def test_the_embedder_libraries_are_allowed_in_their_own_file() -> None:
+    source = "import numpy as np\nimport onnxruntime as ort\nimport tokenizers\n"
+    assert scan(source, "app/embeddings/onnx.py")[1] == []
+    assert scan(source, "app/embeddings/chunking.py")[1] != []
+    # The ban on from_pretrained holds there too.
+    assert scan("tokenizers.Tokenizer.from_pretrained('x')\n", "app/embeddings/onnx.py")[1] != []
 
 
 def test_connect_is_allowed_in_its_own_file() -> None:

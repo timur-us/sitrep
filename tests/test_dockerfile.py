@@ -174,7 +174,16 @@ def test_dockerignore() -> None:
     # Excluded again after the last re-include, so that nothing inside app/ slips back in.
     last = max(index for index, rule in enumerate(rules) if rule.startswith("!"))
     excluded = set(rules[last + 1 :])
-    for rule in ("**/.env*", ".git", ".claude", "data/synthetic/out", "tests", "**/__pycache__"):
+    # models: the embedding model's files (`make model`); the image carries none in M1.
+    for rule in (
+        "**/.env*",
+        ".git",
+        ".claude",
+        "data/synthetic/out",
+        "models",
+        "tests",
+        "**/__pycache__",
+    ):
         assert rule in excluded, f"{rule} is not excluded after the re-includes"
     # The dev login shim never ships (plan, PR 7); `make docker-build` checks the image.
     assert SHIM in excluded, f"{SHIM} is not excluded after the re-includes"
