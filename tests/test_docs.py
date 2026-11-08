@@ -9,12 +9,15 @@ The README says what the project shows and what it does not.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Mapping
 from datetime import date
 from pathlib import Path
 
+import yaml
 from repo_files import ROOT
 
 from app.config import branding
+from data.synthetic import generate
 
 DECISIONS = ROOT / "docs" / "decisions"
 README = ROOT / "README.md"
@@ -569,3 +572,332 @@ def test_readme_has_shows_and_does_not() -> None:
     does_not = parts["Does not show"].lower()
     missing = [topic for topic in DOES_NOT_SHOW if topic.lower() not in does_not]
     assert not missing, f"'Does not show' misses: {missing}"
+
+
+# ADR 0010 (M1 PR 1): the origins, their trust, the tables that hold them and the
+# attack-id prefix, as the ADR's one yaml block. The generator is pinned to the block
+# here; the schema is pinned to it from PR 7 on.
+ADR_0010_KEYS = ("corpus_origins", "runtime_origins", "tables", "attack_id_prefix", "attack_origin")
+# Every table that holds document text (the M1 plan, PR 1).
+TEXT_TABLES = ("documents", "product_sheets", "drafts", "followups")
+TRUST = ("internal", "untrusted")
+# The id fields of the generated records: none may start with the attack-id prefix.
+ID_FIELDS = ("id", "advisor_id", "mandate_id")
+Corpus = Mapping[str, list[dict[str, object]]]
+
+
+class DuplicateKey(yaml.YAMLError):
+    """A yaml mapping that names one key twice."""
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a mapping with two equal keys: PyYAML keeps the last one
+    without a warning, while a reader of the ADR sees the first."""
+
+
+def _unique_mapping(loader: UniqueKeyLoader, node: yaml.MappingNode) -> dict[object, object]:
+    keys = [loader.construct_object(key, deep=True) for key, _ in node.value]
+    for index, key in enumerate(keys):
+        if key in keys[:index]:
+            raise DuplicateKey(f"duplicate key {key!r}")
+    return loader.construct_mapping(node, deep=True)
+
+
+UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
+
+
+def load_block(block: str) -> tuple[object, str | None]:
+    """The yaml block's value and None, or None and the problem."""
+    try:
+        return yaml.load(block, Loader=UniqueKeyLoader), None  # noqa: S506 (a SafeLoader)
+    except DuplicateKey as error:
+        return None, f"the yaml block repeats a key: {error}"
+    except yaml.YAMLError:
+        return None, "the yaml block is not yaml"
+
+
+def yaml_blocks(text: str) -> list[str]:
+    """The bodies of the visible ```yaml blocks; one inside an HTML comment is not read."""
+    return [
+        body for language, body in ANY_FENCE.findall(blank(text, COMMENT)) if language == "yaml"
+    ]
+
+
+def corpus_ids(corpus: Corpus) -> list[str]:
+    """Every id field's value in the generated records, as file:field=value."""
+    return [
+        f"{name}:{field}={record[field]}"
+        for name, records in sorted(corpus.items())
+        for record in records
+        for field in ID_FIELDS
+        if isinstance(record.get(field), str)
+    ]
+
+
+def adr_0010_problems(
+    adr: str, origin: Mapping[str, str], trust_for: Callable[[str], str], corpus: Corpus
+) -> list[str]:
+    """One line per way ADR 0010's block disagrees with the generator or with itself."""
+    blocks = yaml_blocks(adr)
+    if len(blocks) != 1:
+        return [f"expected one yaml block, found {len(blocks)}"]
+    facts, problem = load_block(blocks[0])
+    if problem:
+        return [problem]
+    if not isinstance(facts, dict):
+        return ["the yaml block is not a mapping"]
+    problems = [f"{key}: not in the block" for key in ADR_0010_KEYS if key not in facts]
+    problems += [f"{key}: in the block, not expected" for key in facts if key not in ADR_0010_KEYS]
+    if problems:
+        return problems
+    for key in ("corpus_origins", "runtime_origins", "tables"):
+        if not isinstance(facts[key], dict) or not facts[key]:
+            problems.append(f"{key}: not a non-empty mapping")
+    for key in ("attack_id_prefix", "attack_origin"):
+        if not isinstance(facts[key], str) or not facts[key]:
+            problems.append(f"{key}: not a non-empty string")
+    if problems:
+        return problems
+    corpus_origins, runtime = facts["corpus_origins"], facts["runtime_origins"]
+    prefix = facts["attack_id_prefix"]
+
+    # The corpus origins and their trust are the generator's, one origin per type.
+    if len(set(origin.values())) != len(origin):
+        problems.append("the generator gives two document types one origin")
+    expected = {origin[doc_type]: trust_for(doc_type) for doc_type in origin}
+    if corpus_origins != expected:
+        problems.append(f"corpus_origins: {corpus_origins}, the generator says {expected}")
+    every = {**corpus_origins, **runtime}
+    problems += [
+        f"origin {name!r}: trust {trust!r}, not one of {list(TRUST)}"
+        for name, trust in every.items()
+        if trust not in TRUST
+    ]
+    problems += [
+        f"runtime origin {name!r}: {trust!r}, not 'untrusted'"
+        for name, trust in runtime.items()
+        if trust != "untrusted"
+    ]
+    problems += [
+        f"origin {name!r}: both a corpus and a runtime origin"
+        for name in sorted(set(corpus_origins) & set(runtime))
+    ]
+
+    # Every origin lives in exactly one of the text tables.
+    tables = facts["tables"]
+    if sorted(tables) != sorted(TEXT_TABLES):
+        problems.append(f"tables: {sorted(tables)}, expected {sorted(TEXT_TABLES)}")
+    placed: dict[str, list[str]] = {}
+    for table, names in tables.items():
+        if not isinstance(names, list) or not names:
+            problems.append(f"tables.{table}: not a non-empty list")
+            continue
+        for name in names:
+            placed.setdefault(str(name), []).append(table)
+    problems += [
+        f"origin {name!r}: in {homes or 'no table'}, expected exactly one"
+        for name, homes in ((name, placed.get(name, [])) for name in every)
+        if len(homes) != 1
+    ]
+    problems += [f"tables: {name!r} is no origin" for name in placed if name not in every]
+
+    # The generated records: each origin in its table, each trust the block's.
+    homes = {"documents.jsonl": "documents", "product_sheets.jsonl": "product_sheets"}
+    for name, table in homes.items():
+        for record in corpus.get(name, []):
+            found, trust = record.get("origin"), record.get("trust")
+            if found not in tables.get(table, []):
+                problems.append(f"{name}: {record.get('id')}: origin {found!r} not in {table}")
+            if corpus_origins.get(found) != trust:
+                problems.append(f"{name}: {record.get('id')}: trust {trust!r} for {found!r}")
+
+    # Attack documents: an untrusted corpus origin, and a prefix no generated id uses.
+    if corpus_origins.get(facts["attack_origin"]) != "untrusted":
+        problems.append(f"attack_origin {facts['attack_origin']!r}: not an untrusted corpus origin")
+    if facts["attack_origin"] not in tables.get("documents", []):
+        problems.append(f"attack_origin {facts['attack_origin']!r}: not a documents origin")
+    if prefix != prefix.casefold() or not prefix.endswith("-"):
+        problems.append(f"attack_id_prefix {prefix!r}: not lower case, or no trailing '-'")
+    problems += [
+        f"{item}: starts with the attack-id prefix {prefix!r}"
+        for item in corpus_ids(corpus)
+        if item.split("=", 1)[1].casefold().startswith(prefix.casefold())
+    ]
+    return problems
+
+
+def _adr_0010() -> str:
+    found = sorted(DECISIONS.glob("0010-*.md")) if DECISIONS.is_dir() else []
+    assert len(found) == 1, f"expected one ADR 0010 in docs/decisions, found {len(found)}"
+    return found[0].read_text(encoding="utf-8")
+
+
+def test_adr_0010_vocabulary() -> None:
+    corpus = generate.build()
+    # Non-vacuity: the prefix check reads every advisor, mandate, document and sheet id.
+    counts = {name: len(records) for name, records in corpus.items()}
+    assert counts["documents.jsonl"] and counts["product_sheets.jsonl"], counts
+    without = [
+        f"{name}: {record}"
+        for name, records in corpus.items()
+        for record in records
+        if not any(isinstance(record.get(field), str) for field in ID_FIELDS)
+    ]
+    assert not without, f"records with no id field: {without[:3]}"
+    problems = adr_0010_problems(_adr_0010(), generate.ORIGIN, generate.trust_for, corpus)
+    assert not problems, "ADR 0010 and data/synthetic/generate.py:\n" + "\n".join(problems)
+
+
+GOOD_0010 = """\
+```yaml
+corpus_origins:
+  kyc_register: internal
+  portfolio_system: internal
+  call_notes: internal
+  mailbox: untrusted
+  product_catalogue: internal
+runtime_origins:
+  agent_draft: untrusted
+  agent_followup: untrusted
+tables:
+  documents: [kyc_register, portfolio_system, call_notes, mailbox]
+  product_sheets: [product_catalogue]
+  drafts: [agent_draft]
+  followups: [agent_followup]
+attack_id_prefix: "rt-"
+attack_origin: mailbox
+```
+"""
+
+
+def _planted_corpus(*, mail_id: str = "m1-mail-1", mandate_id: str = "m1") -> Corpus:
+    def doc(doc_id: str, doc_type: str, **more: object) -> dict[str, object]:
+        record = {"id": doc_id, "origin": generate.ORIGIN[doc_type]}
+        return record | {"trust": generate.trust_for(doc_type)} | more
+
+    return {
+        "advisors.jsonl": [{"advisor_id": "a1"}],
+        "mandates.jsonl": [{"advisor_id": "a1", "id": mandate_id}],
+        "documents.jsonl": [
+            doc("m1-kyc", "kyc", advisor_id="a1", mandate_id=mandate_id),
+            doc(mail_id, "email", advisor_id="a1", mandate_id=mandate_id),
+        ],
+        "product_sheets.jsonl": [doc("product-x", "product_sheet")],
+    }
+
+
+def _problems_0010(adr: str, corpus: Corpus | None = None) -> list[str]:
+    planted = corpus if corpus is not None else _planted_corpus()
+    return adr_0010_problems(adr, generate.ORIGIN, generate.trust_for, planted)
+
+
+def test_planted_adr_0010_blocks() -> None:
+    assert _problems_0010(GOOD_0010) == []
+    # The block: exactly one visible yaml block, yaml, a mapping, the five keys.
+    assert _problems_0010("no block\n") == ["expected one yaml block, found 0"]
+    assert _problems_0010(GOOD_0010 + GOOD_0010) == ["expected one yaml block, found 2"]
+    assert _problems_0010(f"<!--\n{GOOD_0010}-->\n") == ["expected one yaml block, found 0"]
+    assert _problems_0010(GOOD_0010.replace("```yaml", "```text")) == [
+        "expected one yaml block, found 0"
+    ]
+    assert _problems_0010("```yaml\nx: [1\n```\n") == ["the yaml block is not yaml"]
+    assert _problems_0010("```yaml\n- a\n```\n") == ["the yaml block is not a mapping"]
+    assert _problems_0010(GOOD_0010.replace('attack_id_prefix: "rt-"\n', "")) == [
+        "attack_id_prefix: not in the block"
+    ]
+    assert _problems_0010(GOOD_0010.replace("attack_origin:", "extra: 1\nattack_origin:")) == [
+        "extra: in the block, not expected"
+    ]
+    assert _problems_0010(GOOD_0010.replace('"rt-"', '""')) == [
+        "attack_id_prefix: not a non-empty string"
+    ]
+    runtime = "runtime_origins:\n  agent_draft: untrusted\n  agent_followup: untrusted\n"
+    assert _problems_0010(GOOD_0010.replace(runtime, "runtime_origins: []\n")) == [
+        "runtime_origins: not a non-empty mapping"
+    ]
+
+    # Trust: the generator's for the corpus, untrusted for every runtime origin.
+    mail_internal = GOOD_0010.replace("mailbox: untrusted", "mailbox: internal")
+    assert _problems_0010(mail_internal)[0].startswith("corpus_origins: {")
+    assert "documents.jsonl: m1-mail-1: trust 'untrusted' for 'mailbox'" in _problems_0010(
+        mail_internal
+    )
+    assert _problems_0010(GOOD_0010.replace("agent_draft: untrusted", "agent_draft: internal")) == [
+        "runtime origin 'agent_draft': 'internal', not 'untrusted'"
+    ]
+    assert _problems_0010(GOOD_0010.replace("agent_draft: untrusted", "agent_draft: trusted")) == [
+        f"origin 'agent_draft': trust 'trusted', not one of {list(TRUST)}",
+        "runtime origin 'agent_draft': 'trusted', not 'untrusted'",
+    ]
+    both = GOOD_0010.replace(
+        "  agent_followup: untrusted\n", "  agent_followup: untrusted\n  mailbox: untrusted\n", 1
+    )
+    assert "origin 'mailbox': both a corpus and a runtime origin" in _problems_0010(both)
+    # A generator that gives two types one origin is reported, not silently merged.
+    shared = generate.ORIGIN | {"call_note": "mailbox"}
+    assert "the generator gives two document types one origin" in adr_0010_problems(
+        GOOD_0010, shared, generate.trust_for, _planted_corpus()
+    )
+
+    # Tables: the four text tables, each origin in exactly one.
+    three = sorted(["documents", "product_sheets", "drafts"])
+    assert _problems_0010(GOOD_0010.replace("  followups: [agent_followup]\n", "")) == [
+        f"tables: {three}, expected {sorted(TEXT_TABLES)}",
+        "origin 'agent_followup': in no table, expected exactly one",
+    ]
+    twice = GOOD_0010.replace("drafts: [agent_draft]", "drafts: [agent_draft, mailbox]")
+    assert _problems_0010(twice) == [
+        "origin 'mailbox': in ['documents', 'drafts'], expected exactly one"
+    ]
+    assert _problems_0010(
+        GOOD_0010.replace("drafts: [agent_draft]", "drafts: [agent_draft, x]")
+    ) == ["tables: 'x' is no origin"]
+    assert _problems_0010(GOOD_0010.replace("drafts: [agent_draft]", "drafts: agent_draft")) == [
+        "tables.drafts: not a non-empty list",
+        "origin 'agent_draft': in no table, expected exactly one",
+    ]
+    # A generated sheet whose origin the documents table would hold.
+    moved = GOOD_0010.replace(
+        "documents: [kyc_register, portfolio_system, call_notes, mailbox]",
+        "documents: [kyc_register, portfolio_system, call_notes, mailbox, product_catalogue]",
+    ).replace("product_sheets: [product_catalogue]", "product_sheets: [agent_draft]")
+    assert "product_sheets.jsonl: product-x: origin 'product_catalogue' not in product_sheets" in (
+        _problems_0010(moved)
+    )
+
+    # Attack documents: an untrusted origin, and a prefix no generated id uses.
+    assert _problems_0010(
+        GOOD_0010.replace("attack_origin: mailbox", "attack_origin: kyc_register")
+    ) == ["attack_origin 'kyc_register': not an untrusted corpus origin"]
+    assert _problems_0010(GOOD_0010.replace('"rt-"', '"RT-"')) == [
+        "attack_id_prefix 'RT-': not lower case, or no trailing '-'"
+    ]
+    # The attack origin's documents table: an untrusted origin that only sheets hold.
+    sheet_mail = GOOD_0010.replace(
+        "documents: [kyc_register, portfolio_system, call_notes, mailbox]",
+        "documents: [kyc_register, portfolio_system, call_notes]",
+    ).replace("product_sheets: [product_catalogue]", "product_sheets: [product_catalogue, mailbox]")
+    assert "attack_origin 'mailbox': not a documents origin" in _problems_0010(sheet_mail)
+    # A repeated key is refused, wherever it sits: PyYAML alone would keep the last.
+    assert _problems_0010(
+        GOOD_0010.replace(
+            "attack_origin: mailbox", "attack_origin: mailbox\nattack_origin: call_notes"
+        )
+    ) == ["the yaml block repeats a key: duplicate key 'attack_origin'"]
+    assert _problems_0010(
+        GOOD_0010.replace(
+            "  mailbox: untrusted\n", "  mailbox: untrusted\n  mailbox: internal\n", 1
+        )
+    ) == ["the yaml block repeats a key: duplicate key 'mailbox'"]
+    prefixed = "starts with the attack-id prefix 'rt-'"
+    assert _problems_0010(GOOD_0010, _planted_corpus(mail_id="rt-m1-mail-1")) == [
+        f"documents.jsonl:id=rt-m1-mail-1: {prefixed}"
+    ]
+    assert _problems_0010(GOOD_0010, _planted_corpus(mail_id="RT-m1-mail-1")) == [
+        f"documents.jsonl:id=RT-m1-mail-1: {prefixed}"
+    ]
+    assert _problems_0010(GOOD_0010, _planted_corpus(mandate_id="rt-x")) == [
+        f"documents.jsonl:mandate_id=rt-x: {prefixed}",
+        f"documents.jsonl:mandate_id=rt-x: {prefixed}",
+        f"mandates.jsonl:id=rt-x: {prefixed}",
+    ]
