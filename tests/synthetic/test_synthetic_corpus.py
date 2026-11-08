@@ -20,11 +20,13 @@ from pathlib import Path
 
 import pytest
 from corpus_checks import (
+    attack_markers,
     figure_problems,
     foreign_hosts,
     ibans,
     phones,
     report_problems,
+    reserved_domains,
     streets,
 )
 from repo_files import ROOT
@@ -131,6 +133,9 @@ def test_counts_and_ownership(corpus: dict[str, list[dict]]) -> None:
     documents = corpus.get("documents.jsonl", [])
     ids = [(document["advisor_id"], document["id"]) for document in documents]
     assert len(set(ids)) == len(ids) == len({document["id"] for document in documents})
+    sheet_ids = [sheet["id"] for sheet in corpus.get("product_sheets.jsonl", [])]
+    every_id = [document["id"] for document in documents] + sheet_ids
+    assert len(set(every_id)) == len(every_id), "a product sheet id repeats a document id"
     per_mandate: dict[str, collections.Counter] = collections.defaultdict(collections.Counter)
     for document in documents:
         mandate = by_id.get(document["mandate_id"])
@@ -156,6 +161,9 @@ def test_counts_and_ownership(corpus: dict[str, list[dict]]) -> None:
     everything = documents + sheets
     seen = {(document["type"], document["lang"]) for document in everything}
     assert seen == {(kind, lang) for kind in DOC_TYPES for lang in LANGS}, sorted(seen)
+    # About 70 % German: by mandate (28 of 40), and so about the same over the documents.
+    assert sum(mandate["lang"] == "german" for mandate in mandates) == 28
+    assert by_id[demo.id]["lang"] == "german", "the demo mandate is German"
     german = sum(document["lang"] == "german" for document in everything) / len(everything)
     assert 0.65 <= german <= 0.75, f"German share {german:.3f}"
 
@@ -172,6 +180,8 @@ def test_trust_from_type(corpus: dict[str, list[dict]]) -> None:
 
     # The type alone decides: an e-mail from the advisor's own staff address is as
     # untrusted as the client's.
+    # On purpose: the one input trust_for may read is the type. A sender or a text
+    # parameter would be the first step towards trust computed from an address.
     assert list(inspect.signature(generate.trust_for).parameters) == ["doc_type"]
     staff = {person.email for person in branding.ADVISORS}
     mails = [document for document in documents if document["type"] == "email"]
@@ -213,12 +223,7 @@ def test_no_real_looking_data(out: Path) -> None:
             ("secret", [hit.pattern for hit in find_secrets(text)]),
         ):
             problems += [f"{label}: {value!r}" for value in found]
-        lowered = text.lower()
-        problems += [
-            f"domain: {domain}"
-            for domain in (domains.attacker, domains.canary)
-            if domain in lowered
-        ]
+        problems += [f"domain: {domain}" for domain in reserved_domains(text)]
     assert not problems, "\n".join(sorted(set(problems))[:30])
 
     # Non-vacuity: the host check saw addresses and URLs, all of them on the staff domain.
@@ -228,6 +233,20 @@ def test_no_real_looking_data(out: Path) -> None:
     assert len(addresses) >= 100 and set(addresses) == {domains.staff}, set(addresses)
     urls = runner_corpus.URL.findall(joined)
     assert len(urls) >= 6 and set(urls) == {domains.staff}, set(urls)
+
+
+def test_no_attack_content(out: Path) -> None:
+    # Attacks enter from redteam/attacks/ in M1, never from the generator: no instruction
+    # aimed at an assistant, no markup that renders, and nobody of the cast but the advisors.
+    others = [person for person in branding.CAST if person.role is not branding.Role.ADVISOR]
+    names = re.compile(
+        r"\b(?:" + "|".join(re.escape(person.name) for person in others) + r")\b", re.IGNORECASE
+    )
+    texts = [text for name in DATA_FILES for text in _strings(_jsonl(out / name))]
+    assert len(texts) >= 3000, f"only {len(texts)} strings"
+    problems = [f"marker {marker!r}" for text in texts for marker in attack_markers(text)]
+    problems += [f"cast {match.group(0)!r}" for text in texts for match in names.finditer(text)]
+    assert not problems, "\n".join(sorted(set(problems))[:30])
 
 
 def test_figures_consistent(corpus: dict[str, list[dict]]) -> None:
@@ -345,6 +364,26 @@ def test_generator_imports_standard_library_only() -> None:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert not called & {"__import__", "eval", "exec", "compile", "open"}, called
+
+
+def test_generator_refuses_symlinks(tmp_path: Path) -> None:
+    # A link planted in the git-ignored output must not redirect the writes elsewhere.
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep\n", encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+
+    linked_dir = tmp_path / "linked_out"
+    linked_dir.symlink_to(elsewhere, target_is_directory=True)
+    assert generate.main(["--out", str(linked_dir)]) == 2
+    assert list(elsewhere.iterdir()) == [], "the generator wrote through a linked directory"
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "documents.jsonl").symlink_to(victim)
+    assert generate.main(["--out", str(out)]) == 2
+    assert victim.read_text(encoding="utf-8") == "keep\n", "the generator wrote through a link"
+    assert generate.main(["--out", str(tmp_path / "fresh")]) == 0  # control
 
 
 def test_make_data_runs_the_generator() -> None:

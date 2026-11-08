@@ -139,3 +139,13 @@ def figure_problems(report: str, note: str) -> list[str]:
         for unit, value in found
         if (unit, value) not in known
     ]
+
+
+def reserved_domains(text: str) -> list[str]:
+    """Inert scaffolding (review round, red): finds nothing yet."""
+    return []
+
+
+def attack_markers(text: str) -> list[str]:
+    """Inert scaffolding (review round, red): finds nothing yet."""
+    return []

@@ -71,6 +71,23 @@ def test_generated_corpus_is_inert(tmp_path: Path) -> None:
     assert violations(tmp_path) == ["data/synthetic/out/loader.py: not a declared data extension"]
 
 
+def test_data_package_holds_one_code_file() -> None:
+    # data/ is importable (the editable install's .pth), and data/ and data/synthetic/
+    # are not data directories: the generator is the one code file there, and the
+    # namespace package resolves to this repository only (review finding sec-5).
+    import data
+
+    assert [Path(entry) for entry in data.__path__] == [ROOT / "data"], list(data.__path__)
+    code = []
+    for dirpath, dirnames, filenames in os.walk(ROOT / "data"):
+        dirnames[:] = [name for name in dirnames if name != "__pycache__"]
+        for name in filenames:
+            rel = Path(dirpath, name).relative_to(ROOT).as_posix()
+            if Path(name).suffix not in DATA_SUFFIXES | {""} and name not in {".DS_Store"}:
+                code.append(rel)
+    assert sorted(code) == ["data/synthetic/generate.py"], code
+
+
 def test_corpus_output_is_git_ignored() -> None:
     # make data writes into the data directory, and nothing it writes is committed.
     assert generate.DEFAULT_OUT == ROOT / "data" / "synthetic" / "out"
