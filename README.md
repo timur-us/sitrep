@@ -6,7 +6,7 @@
 
 *Know your client before the call.*
 
-Status: M0 in progress. See `docs/brief.md`, `docs/threat-model.md`, `docs/discovery.md` and `redteam/SCOPE.md`. Decisions are recorded in `docs/decisions/` (ADRs).
+Status: M0, the local foundation, closes with PR 9; its report, with what is shaky and what M1 inherits, is `docs/reports/m0.md`. M1, the MVP core, is next. To get from a fresh clone to green: `docs/runbooks/local-setup.md`, "From a fresh clone". See `docs/brief.md`, `docs/threat-model.md`, `docs/discovery.md` and `redteam/SCOPE.md`. Decisions are recorded in `docs/decisions/` (ADRs).
 
 ## Local database
 

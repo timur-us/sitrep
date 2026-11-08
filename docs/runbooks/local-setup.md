@@ -1,6 +1,6 @@
 # Local setup
 
-M0, PRs 1, 3, 4, 5a, 5b, 6, 7 and 8. SITREP (situation report) builds and tests locally with uv, make and a PostgreSQL container, offline, with no `.env` and no API key. Every CI gate is a make target, so it runs here the same way. Each PR extends this runbook in the same PR. `tests/test_runbook.py` fails when the Makefile and this file drift apart.
+M0, PRs 1, 3, 4, 5a, 5b, 6, 7, 8 and 9. SITREP (situation report) builds and tests locally with uv, make and a PostgreSQL container, offline, with no `.env` and no API key. Every CI gate is a make target, so it runs here the same way. Each PR extends this runbook in the same PR. `tests/test_runbook.py` fails when the Makefile and this file drift apart.
 
 ## Prerequisites
 
@@ -32,13 +32,27 @@ M0, PRs 1, 3, 4, 5a, 5b, 6, 7 and 8. SITREP (situation report) builds and tests 
 | `make redteam` | The red-team gate, offline (below). |
 | `make data` | Regenerates the synthetic corpus into `data/synthetic/out/` (below). Offline, no database. |
 
-The first `make test` creates `.venv/` from `uv.lock`. From a fresh clone:
+The first `uv run` creates `.venv/` from `uv.lock`. The whole path from a fresh clone is the next section.
+
+## From a fresh clone
+
+The one documented path from `git clone` to green, with no `.env` and no API key. It is the plan's end-of-M0 verification (`docs/plans/m0-foundation.md`, "Verification at the end of M0"), and `tests/test_docs.py` keeps this block equal to it. Clone the repository, `cd` into it, then:
 
 ```sh
-make up
-make migrate
-make test
+make up            # PostgreSQL with pgvector on 127.0.0.1:55432, healthy
+make migrate       # migrate: applied 0001_schema.sql, 0002_tables_rls.sql
+make test          # ruff, then the offline tests: all passed
+make evals         # evals: no cases (min_cases=0)
+make redteam       # redteam: no cases (min_cases=0)
+make data          # the corpus; manifest sha256 02235aa4…d47177
+make docker-build  # the image, then its smoke test
+make web-test      # Chromium, then the browser smoke tests
 ```
+
+- **Every step must pass.** Each one exits non-zero on failure, and nothing after it is worth running.
+- **The network** is needed for the first `make up` (the pgvector image), the first `uv run`, which is `make migrate` (uv fetches Python 3.12 and the locked packages), `make docker-build` (the base images) and `make web-test` (Chromium, through `make web-deps`). The tests themselves stay offline.
+- **One database per machine.** `compose.yaml` names the project `sitrep`, so every checkout shares one container and its data. A database already started from another checkout is reused: its bind mount moves to this checkout, and `make migrate` then applies nothing. For a database that is fresh too, run `make down` first; it deletes the local data, which is synthetic and comes back with `make up` and `make migrate`. Run `make up` again in the other checkout afterwards, so the container mounts that checkout's `db/init` again.
+- **`make data`** writes `data/synthetic/out/` (git-ignored). The hash in the comment is the one `tests/synthetic/test_synthetic_corpus.py` pins.
 
 ## The database
 
