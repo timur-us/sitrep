@@ -51,7 +51,10 @@ make web-test      # Chromium, then the browser smoke tests
 
 - **Every step must pass.** Each one exits non-zero on failure, and nothing after it is worth running.
 - **The network** is needed for the first `make up` (the pgvector image), the first `uv run`, which is `make migrate` (uv fetches Python 3.12 and the locked packages), `make docker-build` (the base images) and `make web-test` (Chromium, through `make web-deps`). The tests themselves stay offline.
-- **One database per machine.** `compose.yaml` names the project `sitrep`, so every checkout shares one container and its data. A database already started from another checkout is reused: its bind mount moves to this checkout, and `make migrate` then applies nothing. For a database that is fresh too, run `make down` first; it deletes the local data, which is synthetic and comes back with `make up` and `make migrate`. Run `make up` again in the other checkout afterwards, so the container mounts that checkout's `db/init` again.
+- **One database per machine.** `compose.yaml` names the project `sitrep`, so every checkout shares one container and its data, and `make down` in any checkout deletes it for all of them.
+  - A database already started from another checkout is reused: its bind mount moves to this checkout, and `make migrate` then prints `migrate: nothing to apply`. Remounting changes no data: `db/init` runs only on an empty data directory.
+  - For a database that is fresh too, run `make down` first. The data is synthetic; `make up` and `make migrate` bring it back.
+  - Whatever a checkout's `db/init` and migrations created stays in the shared database for every other checkout. So never run `make up` after `make down`, or `make migrate`, from a branch you have not reviewed (a Dependabot or outside branch). To get back to your own checkout's state, run `make down`, `make up` and `make migrate` there.
 - **`make data`** writes `data/synthetic/out/` (git-ignored). The hash in the comment is the one `tests/synthetic/test_synthetic_corpus.py` pins.
 
 ## The database

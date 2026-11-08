@@ -101,16 +101,16 @@ The PR 3 review (#5, finding sec-7) found the settings unprefixed and matched wi
 
 ### Amendment (Timur, answers to the PR 7 questions, recorded in PR 9 on 2026-11-08)
 
-PR 7 (#15) closed with six questions for Timur. His answers:
+PR 7 (#15) closed with six questions for Timur. The "Answer" column is his answer as given, word for word. "What follows" is the agent's reading of it, for M1 to confirm when it builds the item.
 
-| # | Question (PR 7) | Answer | Where it lands |
-|---|---|---|---|
-| 1 | Prefix `DATABASE_URL` and `MIGRATION_DATABASE_URL` too (PR 5a review, sec-11)? | Yes, in **M1's first infrastructure PR**, not in M0. Until then both keep their names. | M1; ADR 0009 says so |
-| 2 | Session lifetime and a cap on the session store (sec-4)? | **No expiry in M0.** Sessions end at logout, at a new login or with the process, and the store stays unbounded. | Threat model and ADR 0009: decided, not open |
-| 3 | Keep refusing arguments in every mode? | **Yes, it stays.** `python -P -m app` takes no arguments, with the dev login on or off. | No change |
-| 4 | A Host check without the shim (sec-1)? | **In M1**, before a route serves data without the shim. | M1; threat model |
-| 5 | Plaintext traces while OpenTelemetry's header capture is set (sec-5)? | **Refused, in M1:** `SITREP_TRACE_PLAINTEXT=1` refuses to start while an `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*` variable is set. | M1; threat model, ADR 0009 |
-| 6 | Apply the two CLAUDE.md Commands lines proposed in PR 7? | **Timur applies them himself** (rule 11). The agent does not edit CLAUDE.md for them. | Timur; `docs/reports/m0.md` |
+| # | Question (PR 7) | Answer | What follows | Where it lands |
+|---|---|---|---|---|
+| 1 | Prefix `DATABASE_URL` and `MIGRATION_DATABASE_URL` too (PR 5a review, sec-11)? | "database URLs get the SITREP_ prefix in M1's first infrastructure PR" | Both keep their names until then. | M1; ADR 0009 |
+| 2 | Session lifetime and a cap on the session store (sec-4)? | "sessions keep no expiry in M0" | Sessions still end at logout, at a new login or with the process. The question also asked about a cap; the store stays unbounded in M0 with them. | Threat model and ADR 0009 |
+| 3 | Keep refusing arguments in every mode? | "arguments refused in every mode stays" | `python -P -m app` takes no arguments, with the dev login on or off. | No change |
+| 4 | A Host check without the shim (sec-1)? | "Host check without the shim in M1" | Before any route serves data without the shim. | M1; threat model, ADR 0009 |
+| 5 | Plaintext traces while OpenTelemetry's header capture is set (sec-5)? | "plaintext refused with OTel header capture in M1" | `SITREP_TRACE_PLAINTEXT=1` refuses to start while an `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*` variable is set; the exact rule is M1's. It changes ADR 0007's plaintext mode, so M1 amends ADR 0007. | M1; threat model, ADR 0009, ADR 0007 (M1) |
+| 6 | Apply the two CLAUDE.md Commands lines proposed in PR 7? | "CLAUDE.md Commands lines applied by Timur" | The agent does not edit CLAUDE.md for them (rule 11). | Timur; `docs/reports/m0.md` |
 
 The M1 list under "Left out of M0" gains answers 1, 4 and 5.
 
@@ -913,7 +913,7 @@ Cut line: PR 9 moves to day 4 if needed, and M1 starts once it lands. Nothing is
   - the canary-in-tool-argument test (EN and DE);
   - the UI;
   - the ADR for the API key workspace (next free number after 0009);
-  - the `SITREP_` prefix for the database URLs, in M1's first infrastructure PR; a Host check without the shim; `SITREP_TRACE_PLAINTEXT=1` refused while OpenTelemetry's header capture is set (amendment recorded in PR 9).
+  - the `SITREP_` prefix for the database URLs, in M1's first infrastructure PR; a Host check without the shim; `SITREP_TRACE_PLAINTEXT=1` refused while OpenTelemetry's header capture is set, with an amendment to ADR 0007 (amendment recorded in PR 9).
 - **M2:**
   - the output policy and its contract tests;
   - the canary scan and the provenance rendering in prompts;
