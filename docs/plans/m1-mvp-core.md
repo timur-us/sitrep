@@ -345,7 +345,7 @@ New for two sessions:
 **Files.**
 - `db/migrations/0003_loader.sql`:
   - `documents.origin` and the generated `trust`;
-  - `product_sheets`: global, FORCE, one embedding per sheet, the exact URL;
+  - `product_sheets`: global, FORCE, `origin` and the generated `trust`, one embedding per sheet, the exact URL;
   - `mandate_contacts`;
   - the policies and SELECT grants.
 - `app/db/session.py`: `owner_advisor_scope()` sets `app.advisor_id` transaction-locally, and refuses unless `session_user` is the migrator and `current_user` is the owner.
@@ -689,7 +689,7 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
   - **M1 closes after about 34.5 hours,** about 17 days: 18.5 h, plus PR 14 (5.0), PR 15 (3.5), PR 16's live step (about 1.0), PR 17 (4.5) and PR 18 (2.0). PR 13 and PR 16's offline part run in session B beside PRs 12 to 15, off the critical path.
 
     The 34.5 hours match the slice's summed build hours only by coincidence.
-  - **Ordering the slice first costs about 3 hours** on the critical path against the draft's unordered sequence (about 31.5 hours, the figure in question 4).
+  - **Ordering the slice first costs about 3 hours** on the critical path against the draft's unordered sequence (about 31.5 hours; question 4 rounded it to 31).
 - **Against M0 and the brief:** M0 took 12 days against a plan of 3–4, so these are session hours, not calendar days, and Fable stops add waiting time.
 - **Re-baselined (question 4).** The brief's days 4–9 become about days 4–21, with the cut-line demo at about day 14. M4 absorbs the slip.
 
