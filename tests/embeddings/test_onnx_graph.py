@@ -196,6 +196,10 @@ MALFORMED = {
         p.graph([], initializers=[p.field(8, "W") + p.field(14, b"\x01")])
     ),
     "random bytes": bytes(range(256)) * 4,
+    # Review finding sec-1: protobuf's C++ parser reads a tag as 32 bits and drops the
+    # rest, so a wider tag is a field the walk would skip and onnxruntime would read.
+    "a tag over 32 bits": p.varint((7 << 3 | 2) | (1 << 32)) + p.varint(0),
+    "a varint over 64 bits": b"\x08" + b"\xff" * 9 + b"\x02",
 }
 
 
@@ -208,3 +212,142 @@ def test_malformed_files_are_refused(data: bytes) -> None:
 def test_only_bytes(data: object) -> None:
     with pytest.raises(TypeError):
         graph_problems(data)  # type: ignore[arg-type]
+
+
+# Review findings sec-1 and sec-2: fields onnxruntime reads that the walk must not skip.
+GELU = ((None, 17), ("com.microsoft", 1))
+
+
+def test_a_domain_behind_a_wide_tag_is_refused() -> None:
+    node = p.field(1, "X") + p.field(2, "Y") + p.field(4, "Gelu") + p.wide(7, "com.microsoft")
+    opsets = p.field(8, p.field(2, 17)) + p.field(8, p.wide(1, "com.microsoft") + p.field(2, 1))
+    body = p.graph([node], inputs=[p.value_info("X", 2)], outputs=[p.value_info("Y", 2)])
+    model = p.field(1, 8) + p.field(2, "planted") + opsets + p.field(7, body)
+    assert graph_problems(model) == ["not a well-formed ONNX protobuf"]
+    # Control: onnxruntime reads both wide tags as the domain fields and runs the node.
+    assert run(model) == pytest.approx([0.8413447, 0.8413447], abs=1e-6)
+
+
+def test_external_data_behind_a_wide_tag_is_refused(tmp_path: Path) -> None:
+    hidden = p.wide(13, p.entry("location", "w.bin"))
+    weights = p.field(1, 2) + p.field(2, p.FLOAT) + p.field(8, "W") + hidden + p.field(14, 1)
+    model = p.add_model(weights=weights)
+    assert graph_problems(model) == ["not a well-formed ONNX protobuf"]
+    # Control: onnxruntime reads the entry, and from a path it opens the file.
+    (tmp_path / "model.onnx").write_bytes(model)
+    (tmp_path / "w.bin").write_bytes(struct.pack("<2f", 5.0, 6.0))
+    assert run(str(tmp_path / "model.onnx")) == [6.0, 7.0]
+
+
+@pytest.mark.parametrize("location", [2, (1 << 32) + 1, (1 << 63) + 1])
+def test_any_data_location_but_default_is_refused(location: int) -> None:
+    weights = p.field(1, 2) + p.field(2, p.FLOAT) + p.field(8, "W") + p.field(14, location)
+    assert graph_problems(p.add_model(weights=weights)) == [
+        "graph.initializer[0]: data_location not DEFAULT"
+    ]
+
+
+def test_a_data_location_cast_to_external_is_read(tmp_path: Path) -> None:
+    # Control for the test above: protobuf casts the enum to 32 bits, so 2**32 + 1 is
+    # EXTERNAL to onnxruntime, which then opens the file.
+    weights = (
+        p.field(1, 2)
+        + p.field(2, p.FLOAT)
+        + p.field(8, "W")
+        + p.field(13, p.entry("location", "w.bin"))
+        + p.field(14, (1 << 32) + 1)
+    )
+    model = p.add_model(weights=weights)
+    assert graph_problems(model) == [
+        "graph.initializer[0]: data_location not DEFAULT",
+        "graph.initializer[0]: external data",
+    ]
+    (tmp_path / "model.onnx").write_bytes(model)
+    (tmp_path / "w.bin").write_bytes(struct.pack("<2f", 5.0, 6.0))
+    assert run(str(tmp_path / "model.onnx")) == [6.0, 7.0]
+
+
+def test_a_config_in_the_metadata_is_refused() -> None:
+    # Review finding sec-3: with ORT_LOAD_CONFIG_FROM_MODEL=1, onnxruntime takes session
+    # options from metadata_props["ort_config"] (test_onnx_embedder.py has the control).
+    config = p.field(14, p.entry("ort_config", '{"session_options": {"enable_profiling": 1}}'))
+    assert graph_problems(p.add_model() + config) == ["metadata ort_config is refused"]
+    note = p.field(14, p.entry("note", "planted"))
+    assert graph_problems(p.add_model() + note) == []
+
+
+def test_sparse_attributes_are_walked() -> None:
+    # Review finding test-4: a sparse tensor in an attribute, alone and in a list, also
+    # inside a subgraph.
+    external = p.tensor("T", (0.0,), location="t.bin")
+    clean = p.tensor("C", (1.0,))
+    one = p.attribute(
+        "sparse_value", kind=p.ATTR_SPARSE_TENSOR, sparse_tensor=p.sparse(external, clean)
+    )
+    many = p.attribute(
+        "sparse_values",
+        kind=p.ATTR_SPARSE_TENSORS,
+        sparse_tensors=[p.sparse(clean, clean), p.sparse(clean, external)],
+    )
+    inner = p.graph([p.node("Constant", [], ["K"], attributes=[one])])
+    branch = p.node("If", ["B"], ["Y"], attributes=[p.attribute("b", kind=p.ATTR_GRAPH, g=inner)])
+    body = p.graph([p.node("Constant", [], ["K"], attributes=[one, many]), branch])
+    assert graph_problems(p.model(body)) == [
+        "graph.node[0].attribute[0].sparse[0].values: data_location EXTERNAL",
+        "graph.node[0].attribute[0].sparse[0].values: external data",
+        "graph.node[0].attribute[1].sparse[1].indices: data_location EXTERNAL",
+        "graph.node[0].attribute[1].sparse[1].indices: external data",
+        "graph.node[1].attribute[0].g[0].node[0].attribute[0].sparse[0].values: data_location EXTERNAL",
+        "graph.node[1].attribute[0].g[0].node[0].attribute[0].sparse[0].values: external data",
+    ]
+
+
+def outputs(model_path: Path, feeds: dict[str, np.ndarray]) -> list[float]:
+    import onnxruntime as ort
+
+    session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
+    return session.run(None, feeds)[0].tolist()
+
+
+def test_onnxruntime_reads_external_data_where_the_walk_looks(tmp_path: Path) -> None:
+    # Review finding test-5: the writer and the walk share their field numbers, so these
+    # controls show onnxruntime reading external data from an attribute tensor and from a
+    # subgraph's initializer: the fields the walk refuses are the ones onnxruntime uses.
+    (tmp_path / "t.bin").write_bytes(struct.pack("<2f", 5.0, 6.0))
+    external = p.tensor("T", (0.0, 0.0), location="t.bin")
+    constant = p.node(
+        "Constant", [], ["K"], attributes=[p.attribute("value", kind=p.ATTR_TENSOR, t=external)]
+    )
+    model = p.model(p.graph([constant], outputs=[p.value_info("K", 2)]))
+    assert graph_problems(model) == [
+        "graph.node[0].attribute[0].t[0]: data_location EXTERNAL",
+        "graph.node[0].attribute[0].t[0]: external data",
+    ]
+    (tmp_path / "constant.onnx").write_bytes(model)
+    assert outputs(tmp_path / "constant.onnx", {}) == [5.0, 6.0]
+
+    then = p.graph(
+        [p.node("Identity", ["T"], ["Z"])], initializers=[external], outputs=[p.value_info("Z", 2)]
+    )
+    other = p.graph(
+        [p.node("Identity", ["C"], ["Z"])],
+        initializers=[p.tensor("C", (1.0, 1.0))],
+        outputs=[p.value_info("Z", 2)],
+    )
+    branch = p.node(
+        "If",
+        ["B"],
+        ["Y"],
+        attributes=[
+            p.attribute("then_branch", kind=p.ATTR_GRAPH, g=then),
+            p.attribute("else_branch", kind=p.ATTR_GRAPH, g=other),
+        ],
+    )
+    condition = p.value_info("B", 1, elem_type=9)  # BOOL
+    model = p.model(p.graph([branch], inputs=[condition], outputs=[p.value_info("Y", 2)]))
+    assert graph_problems(model) == [
+        "graph.node[0].attribute[0].g[0].initializer[0]: data_location EXTERNAL",
+        "graph.node[0].attribute[0].g[0].initializer[0]: external data",
+    ]
+    (tmp_path / "branch.onnx").write_bytes(model)
+    assert outputs(tmp_path / "branch.onnx", {"B": np.array([True])}) == [5.0, 6.0]

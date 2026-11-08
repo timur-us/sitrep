@@ -103,8 +103,11 @@ BANNED_MODULES = frozenset(
 BANNED_NAMES = frozenset({"__import__", "compile", "eval", "exec"})
 # Names that connect, serve, run a program, import by name or redirect, on any object
 # or in a from-import. RedirectResponse: the app has no endpoint that redirects.
-# from_pretrained downloads a tokenizer from the Hub; register_custom_ops_library loads
-# a native operator library into onnxruntime (ADR 0005).
+# from_pretrained downloads a tokenizer from the Hub, and from_file reads one past
+# read_verified(); register_custom_ops_library and register_execution_provider_library
+# load native code into onnxruntime; add_external_initializers* feed it tensors from
+# outside the checked model; enable_profiling, profile_file_prefix and
+# optimized_model_filepath make it write files (ADR 0005; review finding sec-8).
 BANNED_ATTRIBUTES = frozenset(
     {
         "RedirectResponse",
@@ -114,11 +117,18 @@ BANNED_ATTRIBUTES = frozenset(
         "create_subprocess_exec",
         "create_subprocess_shell",
         "create_unix_connection",
+        "add_external_initializers",
+        "add_external_initializers_from_files_in_memory",
+        "enable_profiling",
+        "from_file",
         "from_pretrained",
         "import_module",
         "open_connection",
         "open_unix_connection",
+        "optimized_model_filepath",
+        "profile_file_prefix",
         "register_custom_ops_library",
+        "register_execution_provider_library",
         "sock_connect",
         "start_server",
         "urlopen",
@@ -270,6 +280,14 @@ PLANTED = [
     ("Tokenizer.from_pretrained('org/model')\n", ".from_pretrained"),
     ("from transformers import from_pretrained\n", "import from_pretrained"),
     ("options.register_custom_ops_library('libx.so')\n", ".register_custom_ops_library"),
+    # Review finding sec-8: native code, outside tensors, written files, unchecked reads.
+    ("ort.register_execution_provider_library('x', 'libx.so')\n", ".register_execution_provider"),
+    ("options.add_external_initializers(names, values)\n", ".add_external_initializers"),
+    ("o.add_external_initializers_from_files_in_memory(a, b, c)\n", ".add_external_initializers_"),
+    ("options.enable_profiling = True\n", ".enable_profiling"),
+    ("options.profile_file_prefix = 'p'\n", ".profile_file_prefix"),
+    ("options.optimized_model_filepath = 'm.onnx'\n", ".optimized_model_filepath"),
+    ("tokenizers.Tokenizer.from_file('tokenizer.json')\n", ".from_file"),
 ]
 
 

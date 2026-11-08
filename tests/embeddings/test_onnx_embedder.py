@@ -342,6 +342,8 @@ def test_the_verified_bytes_are_what_loads(model_copy: Path, spies: SimpleNamesp
     options = kwargs["sess_options"]
     assert options.get_session_config_entry("session.load_model_format") == "ONNX"
     assert options.use_deterministic_compute is True
+    # Review finding sec-3: the model's own metadata never configures the session.
+    assert kwargs["read_config_from_model"] == 0
     ((tokenizer_args, _),) = spies.tokenizer.calls
     (text,) = tokenizer_args
     assert hashlib.sha256(text.encode("utf-8")).hexdigest() == FILES[TOKENIZER]
@@ -436,3 +438,72 @@ def test_files_must_be_the_three(tmp_path: Path) -> None:
     for files in ({}, {CONFIG: "0" * 64}, dict(FILES) | {"onnx/extra.onnx": "0" * 64}):
         with pytest.raises(ModelFileError, match="files must be exactly"):
             OnnxEmbedder(tmp_path, files=files)
+
+
+# Review finding test-10: the session's inputs and output, each refused alone, with a
+# model shaped like the embedder's that does load (the control).
+SESSION_INPUTS = (
+    f"{MODEL}: inputs are not the expected int64 inputs (input_ids, attention_mask,"
+    " optionally token_type_ids)"
+)
+SESSION_OUTPUT = f"{MODEL}: the first output is not last_hidden_state with {DIM} dimensions"
+
+
+@pytest.mark.parametrize(
+    ("planted", "message"),
+    [
+        ({"output": "pooler_output"}, SESSION_OUTPUT),
+        ({"width": 768}, SESSION_OUTPUT),
+        ({"elem_type": p.FLOAT}, SESSION_INPUTS),
+    ],
+    ids=["output name", "output width", "input type"],
+)
+def test_the_session_must_match_the_embedder(
+    tmp_path: Path, embedder: OnnxEmbedder, planted: dict[str, int | str], message: str
+) -> None:
+    assert isinstance(
+        OnnxEmbedder(tmp_path, files=plant(tmp_path, p.encoder_model())), OnnxEmbedder
+    )
+    files = plant(tmp_path, p.encoder_model(**planted))
+    with pytest.raises(EmbedderError) as error:
+        OnnxEmbedder(tmp_path, files=files)
+    assert str(error.value) == message
+
+
+def test_a_refusal_names_no_model_input(tmp_path: Path, embedder: OnnxEmbedder) -> None:
+    # Review finding sec-10: the message carries the expected names, never the model's.
+    files = plant(tmp_path, p.add_model())  # its input is "X"
+    with pytest.raises(EmbedderError) as error:
+        OnnxEmbedder(tmp_path, files=files)
+    assert str(error.value) == SESSION_INPUTS
+
+
+ORT_CONFIG = '{"session_options": {"enable_profiling": 1}}'
+
+
+@pytest.mark.parametrize("value", ["1", "0", ""])
+def test_the_model_cannot_configure_the_session(
+    model_copy: Path, spies: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    # Review finding sec-3: onnxruntime's wrapper reads ORT_LOAD_CONFIG_FROM_MODEL, and
+    # then the model's metadata sets session options. While it is set at all, the
+    # embedder refuses before onnxruntime is called.
+    monkeypatch.setenv("ORT_LOAD_CONFIG_FROM_MODEL", value)
+    with pytest.raises(EmbedderError, match="ORT_LOAD_CONFIG_FROM_MODEL is set"):
+        OnnxEmbedder(model_copy)
+    assert spies.session.calls == []
+
+
+def test_a_model_config_changes_the_session_without_the_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Control for the test above: with the variable and no read_config_from_model=0, a
+    # planted ort_config turns profiling on, and onnxruntime writes a file.
+    import onnxruntime
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ORT_LOAD_CONFIG_FROM_MODEL", "1")
+    model = p.add_model() + p.field(14, p.entry("ort_config", ORT_CONFIG))
+    session = onnxruntime.InferenceSession(model, providers=["CPUExecutionProvider"])
+    del session
+    assert [path.name.startswith("onnxruntime_profile_") for path in tmp_path.iterdir()] == [True]

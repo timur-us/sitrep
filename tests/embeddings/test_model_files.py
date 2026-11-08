@@ -61,6 +61,8 @@ def test_the_model_files_are_git_ignored() -> None:
     # Only the top-level models/ directory: a models/ package elsewhere stays visible.
     with pytest.raises(AssertionError):
         git(ROOT, "check-ignore", "--no-index", "app/models/x.py")
+    # Nothing under models/ is committed, a link named models included (finding sec-5).
+    assert git(ROOT, "ls-files", "--", "models").decode() == ""
 
 
 def test_urls_name_the_commit_over_https() -> None:
@@ -87,8 +89,7 @@ def test_read_verified_returns_the_pinned_bytes(tmp_path: Path) -> None:
         ("absent", "config.json: missing (run make model)"),
         ("changed", "config.json: sha256 differs from FILES (run make model)"),
         ("link", "config.json: cannot be opened as a plain file"),
-        ("directory", "config.json: "),
-        ("fifo", "config.json: not a regular file"),
+        ("directory", "config.json: not a regular file"),
     ],
 )
 def test_read_verified_refuses(tmp_path: Path, setup: str, message: str) -> None:
@@ -101,22 +102,96 @@ def test_read_verified_refuses(tmp_path: Path, setup: str, message: str) -> None
         path.symlink_to(target)
     elif setup == "directory":
         path.mkdir()
-    elif setup == "fifo":
-        os.mkfifo(path)  # opening it for reading would block without O_NONBLOCK
     with pytest.raises(ModelFileError) as error:
         read_verified(tmp_path, "config.json", PLANTED)
     assert str(error.value).startswith(message), str(error.value)
     assert CANARY.decode() not in str(error.value)
 
 
-@pytest.mark.parametrize(
-    "rel", ["other.json", "../config.json", "/config.json", "./config.json", "onnx//model.onnx"]
+FIFO_PROBE = (
+    "import sys; from pathlib import Path; from app.embeddings import model_files as m;"
+    " files = {'config.json': '0' * 64}\n"
+    "try:\n m.read_verified(Path(sys.argv[1]), 'config.json', files)\n"
+    "except m.ModelFileError as error:\n print(error)\n"
 )
-def test_read_verified_takes_only_listed_plain_paths(tmp_path: Path, rel: str) -> None:
-    files = dict(PLANTED) | {rel: PLANTED["config.json"]}
+
+
+def test_a_fifo_is_refused_without_blocking(tmp_path: Path) -> None:
+    # Review finding test-3: opening a FIFO for reading blocks until a writer comes, so
+    # the probe runs in a subprocess with a timeout instead of hanging the test run.
+    os.mkfifo(tmp_path / "config.json")
+    result = subprocess.run(
+        [sys.executable, "-P", "-c", FIFO_PROBE, str(tmp_path)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("config.json: not a regular file"), result.stdout
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [
+        # Review finding test-2: the whole digest is compared, not a prefix.
+        PLANTED["config.json"][:-1] + ("0" if PLANTED["config.json"][-1] != "0" else "1"),
+        PLANTED["config.json"][:63],
+        PLANTED["config.json"].upper(),
+        PLANTED["config.json"] + "0",
+    ],
+    ids=["last digit", "63 digits", "upper case", "65 digits"],
+)
+def test_read_verified_compares_the_whole_digest(tmp_path: Path, digest: str) -> None:
     write(tmp_path, "config.json", GOOD)
-    with pytest.raises(ModelFileError):
-        read_verified(tmp_path, rel, PLANTED if rel == "other.json" else files)
+    with pytest.raises(ModelFileError, match="sha256 differs from FILES"):
+        read_verified(tmp_path, "config.json", {"config.json": digest})
+
+
+@pytest.mark.parametrize(
+    "rel", ["../config.json", "/config.json", "./config.json", "onnx//model.onnx", "onnx\\x.json"]
+)
+def test_read_verified_takes_only_plain_paths(tmp_path: Path, rel: str) -> None:
+    # Review finding test-1: each path, joined without the check, reaches a file with
+    # the pinned bytes, so only the path check can refuse it.
+    directory = tmp_path / "m"
+    write(tmp_path, "config.json", GOOD)  # where "../config.json" lands
+    write(directory, "config.json", GOOD)  # where "/config.json" and "./config.json" land
+    write(directory, "onnx/model.onnx", GOOD)  # where "onnx//model.onnx" lands
+    write(directory, "onnx\\x.json", GOOD)  # a backslash is a name character on POSIX
+    files = {rel: hashlib.sha256(GOOD).hexdigest()}
+    with pytest.raises(ModelFileError, match="not a plain relative path"):
+        read_verified(directory, rel, files)
+
+
+def test_read_verified_takes_only_listed_files(tmp_path: Path) -> None:
+    write(tmp_path, "other.json", GOOD)
+    with pytest.raises(ModelFileError, match="other.json: not one of FILES"):
+        read_verified(tmp_path, "other.json", PLANTED)
+
+
+def test_a_link_inside_the_model_directory_is_refused(tmp_path: Path) -> None:
+    # Review finding sec-5: a linked directory between the model directory and a file
+    # is refused, so neither a read nor a deletion follows it out.
+    directory, elsewhere = tmp_path / "m", tmp_path / "elsewhere"
+    write(directory, "config.json", GOOD)
+    stale = write(elsewhere, "model.onnx", b"stale")
+    (directory / "onnx").symlink_to(elsewhere, target_is_directory=True)
+    message = "onnx/model.onnx: a link in the path"
+    with pytest.raises(ModelFileError, match=message):
+        read_verified(directory, "onnx/model.onnx", PLANTED)
+    with pytest.raises(ModelFileError, match=message):
+        missing(directory, PLANTED)
+    assert verify(directory, PLANTED) == [f"{message} (run make model)"]
+    assert stale.read_bytes() == b"stale", "a file behind the link was deleted"
+
+
+def test_the_model_directory_itself_may_be_a_link(tmp_path: Path) -> None:
+    # By design: models/ (or the revision directory) may be a link, to a shared disk.
+    write(tmp_path / "real", "config.json", GOOD)
+    (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+    assert read_verified(tmp_path / "link", "config.json", PLANTED) == GOOD
 
 
 def test_read_verified_refuses_an_oversized_file(

@@ -129,10 +129,6 @@ def test_the_limit_is_exact(tokenizer: ModelTokenizer) -> None:
     check(fits + " a", over, tokenizer, CHUNK_TOKENS)
 
 
-def test_the_limit_is_below_the_model_cap() -> None:
-    assert CHUNK_TOKENS == 400 and CHUNK_TOKENS < MAX_TOKENS
-
-
 @pytest.mark.parametrize("text", ["", " ", "\n\n\t ", "\u3000"])
 def test_nothing_to_embed(text: str, tokenizer: ModelTokenizer) -> None:
     assert chunk(text, tokenizer) == []
@@ -149,11 +145,16 @@ def test_a_short_text_is_one_stripped_passage(tokenizer: ModelTokenizer) -> None
         ("a b c d e f g h i j", ["a b c d e f g", "h i j"]),
         # A blank line in the second half of the window wins over every space.
         ("a b c\n\nd e f g h i j k", ["a b c", "d e f g h i j", "k"]),
+        # A blank line beats a line break (review finding test-6).
+        ("a b c\n\nd e\nf g h i j k", ["a b c", "d e\nf g h i j", "k"]),
         # A sentence end beats a space, a line break beats a sentence end.
         ("a b c d. e f g h i j", ["a b c d.", "e f g h i j"]),
         ("a b c. d\ne f g h i j", ["a b c. d", "e f g h i j"]),
         # A boundary in the first half is not taken: the passage would be short.
         ("a\n\nb c d e f g h i j", ["a\n\nb c d e f g", "h i j"]),
+        # The second half starts at the fourth token of a seven-token window: a blank
+        # line before the third is not taken, one before the fourth is (the case above).
+        ("a b\n\nc d e f g h i j", ["a b\n\nc d e f g", "h i j"]),
         # Whitespace inside a passage stays as it was.
         ("a  b\tc d e f g h i j", ["a  b\tc d e f g", "h i j"]),
     ],
@@ -164,7 +165,11 @@ def test_where_the_cuts_fall(text: str, expected: list[str]) -> None:
     check(text, passages, Words(), 10)
 
 
-@pytest.mark.parametrize("text", [b"Anleihen", None, ["Anleihen"], 400])
+class Text(str):
+    """A str subclass: refused, as the embedder refuses it."""
+
+
+@pytest.mark.parametrize("text", [b"Anleihen", None, ["Anleihen"], 400, Text("Anleihen")])
 def test_refuses_what_is_not_text(text: object) -> None:
     with pytest.raises(TypeError):
         chunk(text, Words())  # type: ignore[arg-type]
@@ -175,6 +180,24 @@ def test_refuses_a_limit_out_of_range(limit: object) -> None:
     # 3 leaves no room: Words counts "passage: " as 3 tokens.
     with pytest.raises(ValueError):
         chunk("a b c", Words(), limit=limit)  # type: ignore[arg-type]
+
+
+def test_the_model_cap_is_a_valid_limit() -> None:
+    assert chunk("a b", Words(), limit=MAX_TOKENS) == ["a b"]
+
+
+def test_a_cut_that_changes_the_count_is_moved() -> None:
+    # Review finding test-7: a tokenizer whose count is not the sum of its parts, as a
+    # real one may merge across a cut. The best cut gives a passage over the limit, so the
+    # chunker moves the cut back until the passage fits.
+    class Merging(Words):
+        def count(self, text: str) -> int:
+            return super().count(text) + (1 if "f g" in text else 0)
+
+    text = "a b c d e f g h i j"
+    passages = chunk(text, Merging(), limit=10)
+    assert passages == ["a b c d e f", "g h i j"]
+    check(text, passages, Merging(), 10)
 
 
 def test_refuses_offsets_that_do_not_advance() -> None:

@@ -25,6 +25,11 @@ MODEL_COMMANDS = [
     MODEL_MISSING,
     "curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https'",
     "--tlsv1.2",
+    # Review finding sec-6: no download larger than the model (470 MB) fills the disk,
+    # and an interrupted one leaves no temporary file.
+    "--max-filesize 629145600",
+    "trap 'rm -f \"$tmp\"' EXIT",
+    "trap 'exit 130' INT TERM",
     '-o "$tmp" "$url"',
     'mv -f "$tmp" "$path"',
     MODEL_VERIFY,
