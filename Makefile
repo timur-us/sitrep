@@ -10,7 +10,7 @@ export UV_LOCKED := 1
 # The local image tag. The smoke test publishes on 127.0.0.1 only, on a free port.
 IMAGE := sitrep:local
 
-.PHONY: help up down migrate lint fmt test lint-test audit docker-build web-deps web-test evals redteam data
+.PHONY: help up down migrate model lint fmt test lint-test audit docker-build web-deps web-test evals redteam data
 
 help: ## List the targets
 	@grep -E '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -28,6 +28,27 @@ down: ## Stop PostgreSQL and delete its data
 migrate: ## Apply db/migrations as the migration role (after make up)
 	uv run python -P -m app.db.migrate
 
+# The embedding model (ADR 0005): exactly FILES at REVISION, from app/config/embedding.py,
+# into models/ (git-ignored). `missing` deletes a file with other bytes and lists what to
+# fetch, so a second run downloads nothing; `verify` checks every sha256 and deletes a
+# mismatch. curl, not Python: app/ holds no HTTP client. -q (first) skips ~/.curlrc; https
+# only, redirects included; anonymous: no token, no netrc. Each file lands in a fresh
+# temporary file beside it, then is renamed. No cache (plan M1, default 6).
+MODEL_CURL := curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --connect-timeout 30 --max-time 900
+
+model: ## Download the embedding model's pinned files into models/ and check each sha256 (needs the network)
+	@set -eu; \
+	todo="$$(uv run python -P -m app.embeddings.model_files missing)"; \
+	printf '%s\n' "$$todo" | while read -r url path; do \
+	  test -n "$$url" || continue; \
+	  mkdir -p "$$(dirname "$$path")"; \
+	  tmp="$$(mktemp "$$path.XXXXXX")"; \
+	  echo "model: downloading $$url"; \
+	  $(MODEL_CURL) -o "$$tmp" "$$url" || { rm -f "$$tmp"; exit 1; }; \
+	  mv -f "$$tmp" "$$path"; \
+	done
+	uv run python -P -m app.embeddings.model_files verify
+
 lint: ## Check lint and formatting with ruff
 	uv run ruff check
 	uv run ruff format --check
@@ -36,14 +57,15 @@ fmt: ## Format the code with ruff
 	uv run ruff format
 
 # Offline means no network beyond loopback: tests/db needs `make up` and `make migrate`
-# first, and fails, never skips, without them.
-test: lint ## Lint, then run the offline tests (all of tests/ except tests/web; needs make up, make migrate)
+# first, tests/embeddings needs `make model`, and both fail, never skip, without them.
+test: lint ## Lint, then run the offline tests (all of tests/ except tests/web; needs make up, make migrate, make model)
 	uv run python -P -m pytest --ignore=tests/web
 
 # CI runs one target per job (.github/workflows/ci.yml); tests/ci/ pins both sides.
-# Prerequisites run in order: the database is up and migrated before pytest starts.
+# Prerequisites run in order: the database is up and migrated, and the model is in
+# place, before pytest starts.
 
-lint-test: up migrate test ## CI's lint-test job: up, migrate, then make test (which also scans the branch's commits for secrets)
+lint-test: up migrate model test ## CI's lint-test job: up, migrate, model, then make test (which also scans the branch's commits for secrets)
 
 # Re-resolving the lock catches a hand edit that the hashes do not cover (ADR 0006).
 # --refresh: without it, uv answers from its cache and misses a backdated upload-time.

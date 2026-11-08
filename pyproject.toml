@@ -39,6 +39,11 @@ required-version = ">=0.13.5,<0.14"
 # Minimum release age: nothing uploaded in the last 7 days is resolved. uv stores
 # the span in uv.lock (exclude-newer-span = "P7D"), so the lock does not go stale.
 exclude-newer = "7 days"
+# tokenizers requires huggingface-hub for Tokenizer.from_pretrained() alone, which
+# app/ never calls (tests/test_import_allowlist.py bans it). Excluding it keeps the Hub
+# client and its HTTP stack out of the lock, so nothing installed can download a model
+# (ADR 0005, amended in M1 PR 4; tests/test_lock.py).
+exclude-dependencies = ["huggingface-hub"]
 
 [tool.uv.build-backend]
 module-name = "app"

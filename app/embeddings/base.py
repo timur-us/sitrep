@@ -7,8 +7,8 @@ prefixes and degrades without them.
 
 Every embedder names the model and revision its vectors come from; both are stored with
 every vector (`chunks.embedding_model`, `chunks.embedding_revision`), so vectors of
-different models are never compared. The real ONNX embedder is M1's;
-app/embeddings/fake.py stands in until then.
+different models are never compared. The real embedder is app/embeddings/onnx.py;
+app/embeddings/fake.py serves the tests that need no model.
 """
 
 from __future__ import annotations
