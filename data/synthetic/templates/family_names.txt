@@ -1,8 +1,9 @@
 # Client family names for the synthetic corpus (data/synthetic/generate.py).
-# Invented for this project, one per line, ASCII. The demo family comes from
-# app/config/branding.py and is not listed here. Reviewed in PR 8: no cast name, no
-# bank name, no well-known family. A surname alone identifies nobody, and no first
-# name, address or other detail is ever attached to one.
+# Chosen for this project; no well-known person. One per line, ASCII. Some are
+# ordinary real surnames: nothing is attached to them, no first name, address or
+# other detail, and a surname alone identifies nobody. The demo family comes from
+# app/config/branding.py and is not listed here. Reviewed in PR 8: no cast name and
+# no bank name.
 Albering
 Ashcombe
 Auenrieder

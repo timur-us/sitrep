@@ -10,7 +10,8 @@ Run as `python -P -m data.synthetic.generate [--out DIR]` (`make data`). It writ
   locale and no set iteration: the same templates give byte-identical files whatever
   PYTHONHASHSEED, TZ or LC_ALL say. Dates count back from `AS_OF`.
 - **Synthetic.** The cast and the demo mandate come from `app/config/branding.py`, the
-  other client families from `templates/family_names.txt` (invented names), the text from
+  other client families from `templates/family_names.txt` (chosen for this project, no
+  well-known person; some are ordinary real surnames with nothing attached), the text from
   `templates/{de,en}/*.txt`. No IBAN, phone number or street address is generated, and
   the only domain is the staff domain.
 - **No attack content.** Attacks enter from `redteam/attacks/` in M1, through placeholders.
@@ -244,7 +245,7 @@ def load_templates(root: Path = TEMPLATES) -> dict[str, dict[str, list[Template]
 
 
 def load_family_names(path: Path = TEMPLATES / "family_names.txt") -> list[str]:
-    """The invented client family names, one per line; `#` starts a comment line."""
+    """The client family names, one per line; `#` starts a comment line."""
     lines = path.read_text(encoding="utf-8").splitlines()
     return [line.strip() for line in lines if line.strip() and not line.startswith("#")]
 
@@ -497,7 +498,9 @@ def _mandate_documents(
     add(f"{mandate_id}-kyc", "kyc", variants["kyc"][0], kyc_day)
     add(f"{mandate_id}-report", "portfolio_report", variants["report"][0], REPORT_DATE)
 
-    note_days = _days_back(rng, rng.randint(*CALL_NOTES), 7, 120)
+    # The notes quote the report, so they fall between its date and AS_OF (Fable's review).
+    since_report = (AS_OF - REPORT_DATE).days
+    note_days = _days_back(rng, rng.randint(*CALL_NOTES), 1, since_report)
     for number, day in enumerate(note_days, start=1):
         values["product"] = rng.choice(products_by_lang[lang]).name
         values["next_date"] = long_date(day + timedelta(days=rng.randint(14, 45)), lang)
