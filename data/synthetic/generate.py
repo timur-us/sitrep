@@ -8,7 +8,8 @@ Run as `python -P -m data.synthetic.generate [--out DIR]` (`make data`). It writ
 - **Deterministic.** The standard library and `app.config.branding` only, one
   `random.Random(SEED)`, no clock, no
   locale and no set iteration: the same templates give byte-identical files whatever
-  PYTHONHASHSEED, TZ or LC_ALL say. Dates count back from `AS_OF`.
+  PYTHONHASHSEED, TZ or LC_ALL say. Dates count back from `AS_OF`; call notes, and
+  e-mails that name the report, fall after `REPORT_DATE`.
 - **Synthetic.** The cast and the demo mandate come from `app/config/branding.py`, the
   other client families from `templates/family_names.txt` (chosen for this project, no
   well-known person; some are ordinary real surnames with nothing attached), the text from
@@ -198,6 +199,16 @@ class Template:
     name: str  # "de/note_1.txt"
     title: str
     body: str
+
+
+# How a template names the portfolio report, per language.
+REPORT_NAMES = {"german": "Vermögensbericht", "english": "portfolio report"}
+
+
+def mentions_report(template: Template, lang: str) -> bool:
+    """Whether the template names the portfolio report: then it is dated after it."""
+    name = REPORT_NAMES[lang].lower()
+    return name in template.title.lower() or name in template.body.lower()
 
 
 def trust_for(doc_type: str) -> str:
@@ -508,18 +519,23 @@ def _mandate_documents(
 
     mail_days = _days_back(rng, rng.randint(*EMAILS), 1, 60)
     for number, day in enumerate(mail_days, start=1):
-        values["product"] = rng.choice(products_by_lang[lang]).name
-        values["next_date"] = long_date(day + timedelta(days=rng.randint(3, 14)), lang)
         # The first e-mail is the client's; replies come from the advisor's own address.
         from_client = number == 1 or rng.random() < 0.6
         kind = "mail_client" if from_client else "mail_advisor"
+        template = rng.choice(variants[kind])
+        if mentions_report(template, lang) and day < REPORT_DATE:
+            # An e-mail about the report comes after it (Timur, on #18); the others keep
+            # their date, so the numbers no longer follow the dates for these few.
+            (day,) = _days_back(rng, 1, 1, since_report)
+        values["product"] = rng.choice(products_by_lang[lang]).name
+        values["next_date"] = long_date(day + timedelta(days=rng.randint(3, 14)), lang)
         sender, recipient = (
             (client_email, advisor.email) if from_client else (advisor.email, client_email)
         )
         add(
             f"{mandate_id}-mail-{number}",
             "email",
-            rng.choice(variants[kind]),
+            template,
             day,
             sender=sender,
             recipients=(recipient,),
