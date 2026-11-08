@@ -39,6 +39,8 @@
       "Bash(gh variable delete *)",
       "Bash(gh repo delete *)",
       "Bash(gh repo edit *)",
+      "Bash(gh pr merge*)",
+      "Bash(gh api *merge*)",
       "Bash(gh api *rulesets*)",
       "Bash(gh api *secrets*)",
       "Bash(gh api *environments*)",
