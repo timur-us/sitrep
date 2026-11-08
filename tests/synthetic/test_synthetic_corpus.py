@@ -38,7 +38,7 @@ from data.synthetic import generate
 
 # The sha256 of manifest.json for the committed templates and names. A change to the
 # generator, a template or the names list changes it; update it on purpose, in the same PR.
-GOLDEN_MANIFEST_SHA256 = "9b0848e3010a03f5d9a66f348b7f028a83f11bf629a73ce94ec48d3e351a3e07"
+GOLDEN_MANIFEST_SHA256 = "0341e33fb70d69d1b68c87c284fc5176520610558d341efa761a33bcaeb36ee0"
 
 DATA_FILES = ("advisors.jsonl", "documents.jsonl", "mandates.jsonl", "product_sheets.jsonl")
 FILES = (*DATA_FILES, "manifest.json")
@@ -263,6 +263,25 @@ def test_figures_consistent(corpus: dict[str, list[dict]]) -> None:
         report = reports[note["mandate_id"]]
         problems += [f"{note['id']}: {p}" for p in figure_problems(report["body"], note["body"])]
     assert not problems, "\n".join(problems[:30])
+
+
+def test_call_notes_are_dated_after_their_report(corpus: dict[str, list[dict]]) -> None:
+    # Fable's review: a note quotes the report's figures, so it cannot predate the report.
+    documents = corpus.get("documents.jsonl", [])
+    reports = {doc["mandate_id"]: doc for doc in documents if doc["type"] == "portfolio_report"}
+    notes = [doc for doc in documents if doc["type"] == "call_note"]
+    assert len(reports) == 40 and len(notes) >= 80, (len(reports), len(notes))
+    early = [
+        f"{note['id']} {note['date']} < {reports[note['mandate_id']]['date']}"
+        for note in notes
+        if note["date"] < reports[note["mandate_id"]]["date"]  # ISO dates sort as dates
+    ]
+    assert not early, f"{len(early)} of {len(notes)} call notes predate their report:\n" + (
+        "\n".join(early[:10])
+    )
+    # Control: the check reads real dates, and the corpus' "today" bounds them.
+    assert all(note["date"] <= generate.AS_OF.isoformat() for note in notes)
+    assert all(report["date"] == generate.REPORT_DATE.isoformat() for report in reports.values())
 
 
 TEMPLATES = ROOT / "data" / "synthetic" / "templates"
