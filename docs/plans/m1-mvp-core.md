@@ -27,9 +27,9 @@ The outcome that matters: an advisor asks "What do I need to know before the cal
 | 1 | PR 8 sec-2 (recipients per mandate) and sec-3 (exact-URL links) hand M1 two allowlists, while the brief puts the output policy in M2, so that M1 can measure the unhardened rate. | Data and cases now, enforcement in M2 (the recommendation). | PR 7 loads recipients per mandate under row-level security and the exact product URLs; PR 17 records the cases unhardened; M2's output policy enforces both, measured against M1's baseline. |
 | 2 | Who writes the corpus? The app role is SELECT-only, and FORCE binds the owner. | The migrator as owner, one advisor per transaction (the recommendation), with two conditions (given in German, translated): "the loader helper in session.py must be unreachable from app/ request code, with the same scan as for issue()", and "as a Watch item for M3: in Azure the loader gets its own identity, separate from the migrator". | PR 7 carries the reachability scan (modelled on `tests/test_identity.py`) and a runtime role check; ADR 0010 carries the M3 Watch item; "Left out" lists it under M3. |
 | 3 | What do the offline gates replay? | Score transcripts (the recommendation). | ADR 0014 (PR 16): a live run, by hand, records the transcript with its prompt, tool-schema and corpus hashes; CI scores it deterministically and fails a stale one. No database, model or key in the `evals` and `redteam` jobs. Live runs log in through the dev login, in-process. |
-| 4 | Schedule: about 54 build hours and a critical path of about 31 hours, against the brief's days 4–9. | "Re-baseline with the full M1 scope; M4 absorbs the time. But order the PR sequence so that an end-to-end slice merges first as M1's cut line: loader, ONNX embedder, retrieval, the loop with the two READ tools, an answer with sources through the dev login. Then approval and the two proposal tools, then eval and red-team breadth. Mark that cut line in the plan." | The sequence below. PRs 1–12 are the slice; the cut line follows PR 12. |
+| 4 | Schedule: about 54 build hours and a critical path of about 31 hours (the draft's order, before the slice came first), against the brief's days 4–9. | "Re-baseline with the full M1 scope; M4 absorbs the time. But order the PR sequence so that an end-to-end slice merges first as M1's cut line: loader, ONNX embedder, retrieval, the loop with the two READ tools, an answer with sources through the dev login. Then approval and the two proposal tools, then eval and red-team breadth. Mark that cut line in the plan." | The sequence below. PRs 1–12 are the slice; the cut line follows PR 12. The demo moves: the cut-line hand check after PR 12 is the first demo (about day 14), and the full demo comes at M1's close (about day 21). |
 
-### Defaults (recommended in the draft; Timur may change any at plan review)
+### Defaults (recommended in the draft, accepted with the plan on 2026-11-08; a later change is a plan amendment)
 
 | # | Topic | Default | Why |
 |---|---|---|---|
@@ -148,7 +148,7 @@ A change to this contract is a plan amendment.
 ## Working protocol (every PR)
 
 M0's protocol holds unchanged:
-- **Fail-first (rule 2).** Commit 1 holds the new tests plus inert scaffolding. It is pushed alone to a **draft PR**, because CI runs on pull requests only and a branch push alone gives no red run. The check history shows the red run; later commits make it green.
+- **Fail-first (rule 2).** Commit 1 holds the new tests plus inert scaffolding. It is pushed alone to a **draft PR**, because CI runs on pull requests and on pushes to `main`, so a push to a feature branch alone gives no red run. The check history shows the red run; later commits make it green.
 - **Scanners and catalog checks** each get a planted-violation test and a non-vacuity assertion.
 - **Gate paths** make a PR sensitive and are listed in its description: `Makefile`, `pyproject.toml` `[tool.*]`, `tests/conftest.py`, `tests/ci/**`, `app/runners/**`, `evals/gate.toml`, `redteam/gate.toml` and `.github/**`.
 - **Review.** The `pr-review` skill runs the reviewers of the class, each once (sensitive: spec, test and security). Then:
@@ -190,9 +190,11 @@ New for two sessions:
 **Purpose.** Decide, before any loader code, the inputs from PR 8 sec-1, sec-8 and spec-4 and PR 5b's product sheets.
 
 **Decision content.**
-- **`origin`** is a column on every table that holds text, with a CHECK:
-  - corpus origins: `kyc_register`, `portfolio_system`, `call_notes`, `mailbox`, `product_catalogue`;
-  - runtime origins: `agent_draft`, `agent_followup`.
+- **`origin`** is a column, with a CHECK, on every table that holds document text: `documents`, `product_sheets` (PR 7), and `drafts` and `followups` (PR 14).
+  - Corpus origins: `kyc_register`, `portfolio_system`, `call_notes`, `mailbox`, `product_catalogue`.
+  - Runtime origins: `agent_draft`, `agent_followup`.
+  - `chunks` inherit their document's origin through the foreign key `(advisor_id, document_id)`, without repeating it.
+  - `advisors`, `mandates` and `mandate_contacts` hold structured fields from the corpus (names, addresses), not document text, and carry no origin.
 - **`trust`** is generated from `origin` (default 12): `mailbox` and every runtime origin are `untrusted`, the rest `internal`. Runtime-written text is always `untrusted` (Timur's answer to PR 8 sec-1). Trust is provenance, never permission: every hit is still `Untrusted` in the harness (rule 9).
 - **Product sheets** get their own table, `product_sheets`:
   - no `advisor_id`; ENABLE and FORCE row-level security; a policy that lets every advisor read every row; writes for the owner only;
@@ -269,7 +271,8 @@ New for two sessions:
 - `Makefile`: `model` downloads exactly `FILES` at `REVISION` into a git-ignored `models/` directory, checks the bytes and deletes a mismatch. `lint-test: up migrate model test` (default 6). `.gitignore` and `.dockerignore` change too.
 - `pyproject.toml` and `uv.lock`: `onnxruntime` and `tokenizers`; the import allowlist.
 - The runbook; an ADR 0005 amendment (no cache, the measured CPU speed, granite deferred).
-- The CLAUDE.md Commands line for `make model` is proposed in the description; Timur applies it (rule 11).
+- CLAUDE.md Commands changes are proposed in the description, and Timur applies them (rule 11): a new line for `make model`, and the `make lint-test` line reworded to "`make up`, `make migrate`, `make model`, then `make test`".
+- `tests/ci/test_make_targets.py` (a gate path) gains an assertion that `lint-test` runs `model` before pytest. Nothing existing breaks there, because the file pins commands and their order, not the prerequisite list.
 
 **Tests that fail before the change.**
 - Deterministic across two subprocesses; dimension 384; unit norm; query and passage inputs differ; batch equals single within a tolerance.
@@ -294,10 +297,15 @@ New for two sessions:
 - Amendments to ADR 0007 and ADR 0009; the threat model ("Dev login").
 
 **Tests that fail before the change.**
-- Without the shim: `Host: mallory.example` → 400 on `/`, `/health` and `/api/mandates`; `127.0.0.1:<port>` → 200.
+- Without the shim:
+  - `Host: mallory.example` → 400 on `/`, `/health` and `/api/mandates`;
+  - `127.0.0.1:<port>` → 200 on `/` and `/health`;
+  - `/api/mandates` → 401, since there is no login without the shim and the route answers before it touches the database.
+
+  None of these needs the database, so PR 5 stays "DB: no".
 - The plaintext refusal for each capture variable, set and empty, run as subprocesses.
 - A canary in a thread exception, an unraisable exception and an asyncio task exception reaches neither stderr nor a log record.
-- `make docker-build` stays green.
+- `make docker-build` stays green, in CI's `docker-build` job. Locally only the database-token owner runs it.
 
 **Handover rows.** PR 7 sec-1 and sec-5. **Hours** 2.5.
 
@@ -346,7 +354,7 @@ New for two sessions:
   - it replaces one advisor per transaction, then the product sheets, chunking and embedding as it goes;
   - `load_attack_documents()` applies the prefix rules (used by PR 17).
 - `app/db/queries.py`: the loader's statements.
-- `data/synthetic/generate.py`: a `url` field per product sheet. The golden manifest hash changes, as stated.
+- `data/synthetic/generate.py`: a new `url` field on each product-sheet record. Today the URL exists only inside the body text (`product_url`). The golden manifest hash changes, as stated.
 - Tests: `tests/db/test_rls_catalog.py` (the new tables and policy shapes), `tests/db/test_loader.py`, `tests/test_sql_hygiene.py`, and `tests/test_loader_scope.py` (the reachability scan).
 - An ADR 0008 amendment; the threat model, path 2; the runbook. The CLAUDE.md line for `make load` is proposed (rule 11).
 
@@ -468,7 +476,7 @@ New for two sessions:
   - The rate limit is per verified advisor, in process.
   - The model client is built lazily; without a key, the route answers 503.
 - `create_app(model_client=…)` for tests.
-- `tests/web/`: the read path in Chromium, with a scripted model. Log in as Alice, ask, and see a cited answer whose sources are Alice's documents. The `web-test` target gains `up migrate model load` (a gate path).
+- `tests/web/`: the read path in Chromium, with a scripted model. Log in as Alice, ask, and see a cited answer whose sources are Alice's documents. The `web-test` target gains `up migrate model load` (a gate path). The reworded CLAUDE.md `make web-test` line is proposed in the description, and Timur applies it (rule 11).
 
 **Tests that fail before the change.**
 - 401 without a login; 403 without the Origin.
@@ -657,7 +665,7 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
 4. Run the cut-line hand check after PR 12, and the two live recordings himself (`! uv run python -P -m app.runners.evals --live --yes`, then the red team's), each after the agent's estimate.
 5. After PR 3, rename his own `.env` lines if he has any.
 6. Decide the Bash-side guard before PR 17.
-7. Apply the CLAUDE.md Commands lines for `make model` and `make load`, plus M0's two (rule 11).
+7. Apply the CLAUDE.md Commands changes (rule 11): new lines for `make model` (PR 4) and `make load` (PR 7); the reworded `make lint-test` (PR 4) and `make web-test` (PR 12) lines; and M0's two lines.
 8. Watch `lint-test`'s time from PR 4 on: past three minutes, the verified cache becomes the fallback (default 6).
 
 **Still open from M0:** the ruleset, Dependabot #7, #16 and #17, and the `AZURE_CONFIG_DIR` folder. The merge checklist is dropped (default 18).
@@ -670,11 +678,20 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
 
 - **Total:** about 56.5 build hours, 34.5 of them for the slice (PRs 0–12). Each estimate includes the session time for tests first, the CI red run, review and fixes. Not included: Fable's own time, Timur's merge decisions and the two live runs.
 - **Critical path with two sessions** (the waves above):
-  - the slice merges after about 19 hours, about 10 days at 2 hours a day;
-  - M1 closes after about 34.5 hours, about 17 days.
-  - Ordering the slice first costs about 3 hours on the critical path against the unordered sequence (about 31.5).
+  - **The slice merges after about 18.5 hours,** about 10 days at 2 hours a day. Session B carries it:
+    - PR 4: 0–3.5 h;
+    - PR 6: to 6.5 h;
+    - PR 5: to 9.0 h;
+    - PR 9: to 11.0 h;
+    - PR 10: to 15.5 h.
+
+    Meanwhile session A runs PRs 1, 2 and 3 (0–3.5 h), PR 7 (to 8.0 h), PR 8 (to 12.5 h) and PR 11 (to 15.0 h). PR 12 waits for PR 10 and runs from 15.5 to 18.5 h.
+  - **M1 closes after about 34.5 hours,** about 17 days: 18.5 h, plus PR 14 (5.0), PR 15 (3.5), PR 16's live step (about 1.0), PR 17 (4.5) and PR 18 (2.0). PR 13 and PR 16's offline part run in session B beside PRs 12 to 15, off the critical path.
+
+    The 34.5 hours match the slice's summed build hours only by coincidence.
+  - **Ordering the slice first costs about 3 hours** on the critical path against the draft's unordered sequence (about 31.5 hours, the figure in question 4).
 - **Against M0 and the brief:** M0 took 12 days against a plan of 3–4, so these are session hours, not calendar days, and Fable stops add waiting time.
-- **Re-baselined (question 4).** The brief's days 4–9 become about days 4–20, and M4 absorbs the slip.
+- **Re-baselined (question 4).** The brief's days 4–9 become about days 4–21, with the cut-line demo at about day 14. M4 absorbs the slip.
 
 ## Left out of M1 (stated, not hidden)
 
