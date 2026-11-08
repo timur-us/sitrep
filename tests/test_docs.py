@@ -586,6 +586,36 @@ ID_FIELDS = ("id", "advisor_id", "mandate_id")
 Corpus = Mapping[str, list[dict[str, object]]]
 
 
+class DuplicateKey(yaml.YAMLError):
+    """A yaml mapping that names one key twice."""
+
+
+class UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a mapping with two equal keys: PyYAML keeps the last one
+    without a warning, while a reader of the ADR sees the first."""
+
+
+def _unique_mapping(loader: UniqueKeyLoader, node: yaml.MappingNode) -> dict[object, object]:
+    keys = [loader.construct_object(key, deep=True) for key, _ in node.value]
+    for index, key in enumerate(keys):
+        if key in keys[:index]:
+            raise DuplicateKey(f"duplicate key {key!r}")
+    return loader.construct_mapping(node, deep=True)
+
+
+UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _unique_mapping)
+
+
+def load_block(block: str) -> tuple[object, str | None]:
+    """The yaml block's value and None, or None and the problem."""
+    try:
+        return yaml.load(block, Loader=UniqueKeyLoader), None  # noqa: S506 (a SafeLoader)
+    except DuplicateKey as error:
+        return None, f"the yaml block repeats a key: {error}"
+    except yaml.YAMLError:
+        return None, "the yaml block is not yaml"
+
+
 def yaml_blocks(text: str) -> list[str]:
     """The bodies of the visible ```yaml blocks; one inside an HTML comment is not read."""
     return [
@@ -611,11 +641,9 @@ def adr_0010_problems(
     blocks = yaml_blocks(adr)
     if len(blocks) != 1:
         return [f"expected one yaml block, found {len(blocks)}"]
-    try:
-        facts = yaml.safe_load(blocks[0])
-    except yaml.YAMLError:
-        return ["the yaml block is not yaml"]
-    # Known limit: PyYAML keeps the last of two equal keys without a warning.
+    facts, problem = load_block(blocks[0])
+    if problem:
+        return [problem]
     if not isinstance(facts, dict):
         return ["the yaml block is not a mapping"]
     problems = [f"{key}: not in the block" for key in ADR_0010_KEYS if key not in facts]
@@ -686,6 +714,8 @@ def adr_0010_problems(
     # Attack documents: an untrusted corpus origin, and a prefix no generated id uses.
     if corpus_origins.get(facts["attack_origin"]) != "untrusted":
         problems.append(f"attack_origin {facts['attack_origin']!r}: not an untrusted corpus origin")
+    if facts["attack_origin"] not in tables.get("documents", []):
+        problems.append(f"attack_origin {facts['attack_origin']!r}: not a documents origin")
     if prefix != prefix.casefold() or not prefix.endswith("-"):
         problems.append(f"attack_id_prefix {prefix!r}: not lower case, or no trailing '-'")
     problems += [
@@ -706,9 +736,14 @@ def test_adr_0010_vocabulary() -> None:
     corpus = generate.build()
     # Non-vacuity: the prefix check reads every advisor, mandate, document and sheet id.
     counts = {name: len(records) for name, records in corpus.items()}
-    ids = corpus_ids(corpus)
-    assert len(ids) >= sum(counts.values()), counts
     assert counts["documents.jsonl"] and counts["product_sheets.jsonl"], counts
+    without = [
+        f"{name}: {record}"
+        for name, records in corpus.items()
+        for record in records
+        if not any(isinstance(record.get(field), str) for field in ID_FIELDS)
+    ]
+    assert not without, f"records with no id field: {without[:3]}"
     problems = adr_0010_problems(_adr_0010(), generate.ORIGIN, generate.trust_for, corpus)
     assert not problems, "ADR 0010 and data/synthetic/generate.py:\n" + "\n".join(problems)
 
@@ -837,6 +872,23 @@ def test_planted_adr_0010_blocks() -> None:
     assert _problems_0010(GOOD_0010.replace('"rt-"', '"RT-"')) == [
         "attack_id_prefix 'RT-': not lower case, or no trailing '-'"
     ]
+    # The attack origin's documents table: an untrusted origin that only sheets hold.
+    sheet_mail = GOOD_0010.replace(
+        "documents: [kyc_register, portfolio_system, call_notes, mailbox]",
+        "documents: [kyc_register, portfolio_system, call_notes]",
+    ).replace("product_sheets: [product_catalogue]", "product_sheets: [product_catalogue, mailbox]")
+    assert "attack_origin 'mailbox': not a documents origin" in _problems_0010(sheet_mail)
+    # A repeated key is refused, wherever it sits: PyYAML alone would keep the last.
+    assert _problems_0010(
+        GOOD_0010.replace(
+            "attack_origin: mailbox", "attack_origin: mailbox\nattack_origin: call_notes"
+        )
+    ) == ["the yaml block repeats a key: duplicate key 'attack_origin'"]
+    assert _problems_0010(
+        GOOD_0010.replace(
+            "  mailbox: untrusted\n", "  mailbox: untrusted\n  mailbox: internal\n", 1
+        )
+    ) == ["the yaml block repeats a key: duplicate key 'mailbox'"]
     prefixed = "starts with the attack-id prefix 'rt-'"
     assert _problems_0010(GOOD_0010, _planted_corpus(mail_id="rt-m1-mail-1")) == [
         f"documents.jsonl:id=rt-m1-mail-1: {prefixed}"
