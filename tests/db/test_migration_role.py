@@ -20,7 +20,7 @@ import pytest
 from dbtools import RECORD, SUPERUSER, SUPERUSER_URL, Connection, applied, column
 from psycopg import sql
 
-from app.config.settings import Settings, loopback_database_url
+from app.config.settings import Settings, env_name, loopback_database_url
 from app.db import migrate, names
 from app.db.connect import connect
 
@@ -155,11 +155,57 @@ def test_migrate_refuses_the_superuser(tmp_path: Path, superuser: Connection) ->
 def test_entry_point_refuses_a_bad_migration_url(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], url: str, rule: str
 ) -> None:
-    monkeypatch.setenv("MIGRATION_DATABASE_URL", url)
+    monkeypatch.setenv(env_name("migration_database_url"), url)
     assert migrate.main([]) == 1
     err = capsys.readouterr().err
     assert err.startswith("migrate: refused:") and rule in err, err
     assert "pw0rdCanary" not in err
+
+
+def test_entry_point_names_ignored_url_variables(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], superuser: Connection
+) -> None:
+    # Review finding sec-1: an old, unprefixed migrator URL is ignored, never connected
+    # to, and named on stderr without its value; the run takes the default URL.
+    marker = "notEchoedMarker"
+    url = f"postgresql://{names.MIGRATOR_ROLE}@192.0.2.1:55432/{marker}"
+    # Control: nothing set, nothing said (review finding test-r4).
+    assert migrate.main([]) == 0
+    assert "ignored" not in capsys.readouterr().err
+    monkeypatch.setenv("migration_database_url".upper(), url)
+    assert migrate.main([]) == 0
+    captured = capsys.readouterr()
+    assert "migrate: nothing to apply" in captured.out, captured.out
+    notices = [line for line in captured.err.splitlines() if line.startswith("migrate: ignored:")]
+    assert len(notices) == 1, captured.err
+    assert marker not in captured.err and "192.0.2.1" not in captured.err, captured.err
+    # The notice comes before a refusal too: it says why the variable did not help.
+    monkeypatch.setenv(env_name("migration_database_url"), url)
+    assert migrate.main([]) == 1
+    err = capsys.readouterr().err
+    heads = [
+        line.split(":", 2)[1].strip() for line in err.splitlines() if line.startswith("migrate:")
+    ]
+    assert heads == ["ignored", "refused"], err
+    assert marker not in err, err
+
+
+def test_entry_point_reads_no_dotenv(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    superuser: Connection,
+) -> None:
+    # Review finding test-r2: the runner reads the environment alone, so a migrator URL in
+    # a .env in the working directory does nothing. Read, this one would be refused.
+    url = f"postgresql://{names.MIGRATOR_ROLE}@192.0.2.1:55432/{names.DATABASE}"
+    (tmp_path / ".env").write_text(f"{env_name('migration_database_url')}={url}\n")
+    monkeypatch.chdir(tmp_path)
+    assert migrate.main([]) == 0
+    assert "migrate: nothing to apply" in capsys.readouterr().out
+    # Control: the same value from the environment is refused.
+    monkeypatch.setenv(env_name("migration_database_url"), url)
+    assert migrate.main([]) == 1
 
 
 def test_second_run_applies_nothing(settings: Settings, superuser: Connection) -> None:

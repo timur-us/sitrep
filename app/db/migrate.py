@@ -1,10 +1,11 @@
 """Apply db/migrations as the migration role: `python -P -m app.db.migrate` (ADR 0008).
 
-The runner connects with MIGRATION_DATABASE_URL, as the migrator, and runs SET ROLE to
-the owner before anything else. It refuses any other login: the app role cannot SET
-ROLE (SQLSTATE 42501), and the superuser is not the migrator. Every applied file is
-recorded in the meta schema with its sha256 and with session_user and current_user, so
-the record shows who ran it. Before any new file runs, every recorded file must still
+The runner connects with the migrator's URL (the migration_database_url setting, read
+from its prefixed variable, ADR 0009), as the migrator, and runs SET ROLE to the owner
+before anything else. It refuses any other login: the app role cannot SET ROLE
+(SQLSTATE 42501), and the superuser is not the migrator. Every applied file is recorded
+in the meta schema with its sha256 and with session_user and current_user, so the
+record shows who ran it. Before any new file runs, every recorded file must still
 be on disk with the same sha256; a changed or missing one stops the run with no DDL.
 All new files run in one transaction, under a lock on the record table; a file that ends
 that transaction or changes the role or search_path is refused (see apply()).
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -26,7 +28,7 @@ import psycopg
 from psycopg import sql
 from psycopg.pq import TransactionStatus
 
-from app.config.settings import Settings
+from app.config.settings import Settings, env_name, ignored_url_notices
 from app.db import names
 from app.db.connect import connect
 
@@ -154,10 +156,14 @@ def apply(conn: psycopg.Connection[Any], migration: Migration, session: tuple[An
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -P -m app.db.migrate",
-        description="Apply db/migrations as the migration role (MIGRATION_DATABASE_URL).",
+        description="Apply db/migrations as the migration role "
+        f"({env_name('migration_database_url')}).",
     )
     parser.add_argument("--migrations", type=Path, default=MIGRATIONS, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    # An old, unprefixed URL is not read: say so, by name (review finding sec-1).
+    for notice in ignored_url_notices(os.environ):
+        print(f"migrate: {notice}", file=sys.stderr)
     try:
         url = Settings(_env_file=None).migration_database_url
         applied = run(url, args.migrations)

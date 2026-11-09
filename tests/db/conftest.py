@@ -53,7 +53,7 @@ def seeded(database: None) -> Iterator[None]:
 
 @pytest.fixture
 def app_pool(settings: Settings, database: None) -> Iterator[ConnectionPool]:
-    """The app's pool on DATABASE_URL, one connection, opened for one test."""
+    """The app's pool on settings' database_url, one connection, opened for one test."""
     with session.make_pool(settings.database_url, max_size=1, timeout=5.0) as pool:
         yield pool
 

@@ -1,4 +1,4 @@
-"""The app role, connected through settings' DATABASE_URL (plan condition 1, role half).
+"""The app role, connected through settings' database_url (plan condition 1, role half).
 
 It is exactly the app role, with no attribute and no membership; it owns nothing in any
 database; it can create nothing; it cannot reach the runner's schema or another
@@ -107,7 +107,7 @@ def creatable_by(conn: Connection, role: str) -> list[str]:
 
 def test_app_role_attributes(app: Connection) -> None:
     users = app.execute("SELECT current_user, session_user").fetchone()
-    assert users == (APP, APP), f"DATABASE_URL logs in as {users}, expected {APP}"
+    assert users == (APP, APP), f"the app's database URL logs in as {users}, expected {APP}"
     problems = role_problems(app, APP)
     assert not problems, "\n".join(problems)
 
