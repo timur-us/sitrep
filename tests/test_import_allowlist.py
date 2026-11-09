@@ -185,6 +185,15 @@ SINGLE_FILE = {
     "onnxruntime": EMBEDDER_FILE,
     "tokenizers": EMBEDDER_FILE,
 }
+# In the model client, the SDK's names it may use, and nothing else of the package: no
+# other client, no credential helper, no beta namespace, no copied client (review
+# finding sec-r2). Attribute chains from the module and from-imports are both checked.
+ANTHROPIC_NAMES = frozenset(
+    {"Anthropic", "APIError", "APIConnectionError", "APIStatusError", "APITimeoutError", "types"}
+)
+ANTHROPIC_TYPES = frozenset({"Message"})
+# Attributes banned in the model client alone: a copy of the SDK client with other options.
+MODEL_CLIENT_ATTRIBUTES = frozenset({"copy"})
 # On the os module only: running or replacing a program.
 OS_PROGRAM = re.compile(r"system|popen|startfile|fork\w*|exec\w*|spawn\w*|posix_spawn\w*")
 
@@ -200,6 +209,7 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
     dotted: set[str] = set()  # full module names, and module.name for from-imports
     problems: list[str] = []
     os_names: set[str] = set()
+    sdk_names: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -208,6 +218,10 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
                 dotted.add(alias.name)
                 if top == "os":
                     os_names.add(alias.asname or "os")
+                if top == "anthropic" and rel == MODEL_CLIENT_FILE:
+                    if alias.name != "anthropic":
+                        problems.append(f"{rel}:{node.lineno}: import {alias.name}")
+                    sdk_names.add(alias.asname or "anthropic")
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             top = "app" if node.level else module.partition(".")[0]
@@ -215,6 +229,12 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
             if not node.level:
                 dotted.add(module)
                 dotted.update(f"{module}.{alias.name}" for alias in node.names)
+            if top == "anthropic" and rel == MODEL_CLIENT_FILE:
+                problems += [
+                    f"{rel}:{node.lineno}: from {module} import {alias.name}"
+                    for alias in node.names
+                    if module != "anthropic" or alias.name not in ANTHROPIC_NAMES
+                ]
             for alias in node.names:
                 if (
                     alias.name == "connect"
@@ -228,6 +248,21 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
                     problems.append(f"{rel}:{node.lineno}: from {module} import {alias.name}")
         elif isinstance(node, ast.Attribute):
             on_os = isinstance(node.value, ast.Name) and node.value.id in os_names
+            if rel == MODEL_CLIENT_FILE:
+                on_sdk = isinstance(node.value, ast.Name) and node.value.id in sdk_names
+                if on_sdk and node.attr not in ANTHROPIC_NAMES:
+                    problems.append(f"{rel}:{node.lineno}: anthropic.{node.attr}")
+                inner = node.value
+                if (
+                    isinstance(inner, ast.Attribute)
+                    and inner.attr == "types"
+                    and isinstance(inner.value, ast.Name)
+                    and inner.value.id in sdk_names
+                    and node.attr not in ANTHROPIC_TYPES
+                ):
+                    problems.append(f"{rel}:{node.lineno}: anthropic.types.{node.attr}")
+                if node.attr in MODEL_CLIENT_ATTRIBUTES:
+                    problems.append(f"{rel}:{node.lineno}: .{node.attr} in the model client")
             if node.attr in BANNED_ATTRIBUTES or (on_os and OS_PROGRAM.fullmatch(node.attr)):
                 problems.append(f"{rel}:{node.lineno}: .{node.attr}")
             if node.attr == "connect" and rel != DB_CONNECT_FILE:
@@ -378,6 +413,38 @@ def test_the_embedder_libraries_are_allowed_in_their_own_file() -> None:
     assert scan(source, "app/embeddings/chunking.py")[1] != []
     # The ban on from_pretrained holds there too.
     assert scan("tokenizers.Tokenizer.from_pretrained('x')\n", "app/embeddings/onnx.py")[1] != []
+
+
+MODEL_CLIENT_PLANTED = [
+    ("import anthropic\nanthropic.AsyncAnthropicFoundry()\n", "anthropic.AsyncAnthropicFoundry"),
+    ("import anthropic\nanthropic.exchange_federation_assertion()\n", "anthropic.exchange_fed"),
+    ("import anthropic as a\na.default_credentials()\n", "anthropic.default_credentials"),
+    ("import anthropic\nanthropic.lib.credentials.TokenCache\n", "anthropic.lib"),
+    ("import anthropic\nanthropic.types.beta.BetaMessage\n", "anthropic.types.beta"),
+    ("from anthropic import AsyncAnthropicBedrock\n", "import AsyncAnthropicBedrock"),
+    ("from anthropic.resources.beta.messages import Messages\n", "import Messages"),
+    ("from anthropic.types import Message\n", "from anthropic.types import Message"),
+    ("import anthropic.resources\n", "import anthropic.resources"),
+    ("self._sdk.copy(base_url='x')\n", ".copy in the model client"),
+]
+
+
+@pytest.mark.parametrize(("source", "needle"), MODEL_CLIENT_PLANTED)
+def test_the_model_client_uses_the_reviewed_sdk_names_only(source: str, needle: str) -> None:
+    problems = scan(source, MODEL_CLIENT_FILE)[1]
+    assert any(needle in problem for problem in problems), problems
+
+
+def test_the_reviewed_sdk_names_pass() -> None:
+    source = (
+        "import anthropic\nimport httpx2\nanthropic.Anthropic(api_key='x')\n"
+        "anthropic.APIError\nanthropic.APITimeoutError\nanthropic.APIConnectionError\n"
+        "anthropic.APIStatusError\nanthropic.types.Message\nhttpx2.Client()\n"
+        "from anthropic import Anthropic, APIError\n"
+    )
+    assert scan(source, MODEL_CLIENT_FILE)[1] == []
+    # Elsewhere a dict's copy is fine; in the model client it is not.
+    assert scan("d.copy()\n", "app/harness/tools.py")[1] == []
 
 
 def test_the_model_client_libraries_are_allowed_in_their_own_file() -> None:

@@ -33,7 +33,10 @@ logger after the build is not stopped.
 
 create() sends tools of exactly the registry's shape, {name, description, input_schema}
 (RequestRefused otherwise, before any request): a server tool or an extra field would
-let the API fetch a URL or change the request on the model's behalf (ADR 0012).
+let the API fetch a URL or change the request on the model's behalf (ADR 0012). The
+messages are not checked here: a document or image block with a URL source would make
+the API fetch it too. The loop builds them and must pass thinking blocks back, so that
+check is PR 10's (handed over in the PR 6 description).
 
 cost_usd() is usage times PRICES, from Anthropic's pricing page on PRICES_AS_OF.
 """
@@ -184,8 +187,9 @@ class AnthropicModelClient:
                 tools=tools,  # type: ignore[arg-type]
                 max_tokens=max_tokens,
             )
-            if not isinstance(message, anthropic.types.Message):
-                # A 200 that is not JSON comes back as its text (review finding sec-2).
+            if not _is_message(message):
+                # A 200 that is not JSON comes back as its text (review finding sec-2), and
+                # valid JSON is built leniently into a partial message (test-r2).
                 failure = ModelCallError("response")
         except anthropic.APIError as error:
             failure = _call_error(error)
@@ -196,6 +200,14 @@ class AnthropicModelClient:
         if failure is not None:
             raise failure
         return message.to_dict(mode="json")
+
+
+def _is_message(message: object) -> bool:
+    """A message the loop can read: a content list and a usage mapping, at least."""
+    if not isinstance(message, anthropic.types.Message):
+        return False
+    fields = message.to_dict(mode="json")
+    return isinstance(fields.get("content"), list) and isinstance(fields.get("usage"), dict)
 
 
 def check_tools(tools: Sequence[Mapping[str, Any]]) -> None:

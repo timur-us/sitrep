@@ -20,6 +20,7 @@ import re
 import secrets
 import socket
 import traceback
+import warnings
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
@@ -172,12 +173,33 @@ def test_every_sdk_variable_but_the_key_is_refused() -> None:
 
 # Review finding test-8: what the SDK and its HTTP library read from the environment
 # outside the prefix, excluding anthropic/lib (other clients, banned in app/). Each is
-# harmless with this client: DEFER_PYDANTIC_BUILD only times the SDK's model builds, and
-# SSL_CERT_FILE and SSL_CERT_DIR are read only with trust_env, which is off.
-UNPREFIXED_READS = frozenset({"DEFER_PYDANTIC_BUILD", "SSL_CERT_FILE", "SSL_CERT_DIR"})
+# harmless with this client: DEFER_PYDANTIC_BUILD only times the SDK's model builds;
+# SSL_CERT_FILE and SSL_CERT_DIR are read only with trust_env, which is off; APPDATA is
+# the profile directory on Windows, looked up only without an explicit credential
+# (anthropic/_client.py, has_explicit_credential), and the factory passes the key.
+UNPREFIXED_READS = frozenset({"APPDATA", "DEFER_PYDANTIC_BUILD", "SSL_CERT_FILE", "SSL_CERT_DIR"})
 # Proxy variables are read through urllib's getproxies(), only in these two files: the
 # SDK's DefaultHttpxClient (banned in app/) and httpx2 under trust_env.
 GETPROXIES_FILES = frozenset({"anthropic/_utils/_httpx.py", "httpx2/_utils.py"})
+
+
+# The SDK's other clients and runners, which app/ may not import (test_import_allowlist).
+# The rest of anthropic/lib (tracing, credentials, middleware, parsing, streaming) is
+# loaded by this client and scanned (review finding test-r4).
+OTHER_CLIENTS = tuple(
+    f"anthropic/lib/{name}"
+    for name in (
+        "aws/",
+        "bedrock/",
+        "environments/",
+        "foundry.py",
+        "google_cloud/",
+        "sessions/",
+        "threads/",
+        "tools/",
+        "vertex/",
+    )
+)
 
 
 def environment_reads() -> tuple[set[str], set[str]]:
@@ -194,7 +216,7 @@ def environment_reads() -> tuple[set[str], set[str]]:
     for top in ("anthropic", "httpx2", "httpcore2"):
         for path in (site / top).rglob("*.py"):
             rel = path.relative_to(site).as_posix()
-            if rel.startswith("anthropic/lib/"):
+            if rel.startswith(OTHER_CLIENTS):
                 continue
             text = path.read_text(encoding="utf-8")
             names |= {n for n in read.findall(text) if not n.startswith("ANTHROPIC_")}
@@ -299,6 +321,16 @@ def test_the_entry_point_refuses_before_it_binds(
     assert not value or value not in err, err
 
 
+def test_the_exported_key_is_found_in_any_folding() -> None:
+    # Review finding sec-r6: pydantic-settings lower-cases names, and the Kelvin sign
+    # lower-cases to k: the check folds the same way.
+    kelvin = KEY_VARIABLE.replace("K", "\u212a")
+    for name in (KEY_VARIABLE, KEY_VARIABLE.lower(), KEY_VARIABLE.title(), kelvin):
+        with pytest.raises(entry.StartRefused):
+            entry.check_environment({name: "x"})
+    entry.check_environment({"ANTHROPIC_API_KEYS": "x", "HOME": "/"})
+
+
 @pytest.mark.parametrize("shape", ["{} ", "a b{}", "{}é"])
 @pytest.mark.usefixtures("restore_logging")
 def test_the_entry_point_refuses_a_bad_key_unseen(
@@ -392,8 +424,9 @@ def test_a_prompt_reaches_no_log_under_a_debug_root(
     # options (the prompt) nor the response headers are logged.
     prompt = canary("prompt")
     caplog.set_level(logging.DEBUG)
-    # The fixture below restored the levels: the factory, not an earlier test, holds them.
-    assert logging.getLogger("anthropic").level == logging.NOTSET
+    # From no level at all, whatever ran before (review finding test-r3); the fixture below
+    # restores it afterwards. The factory, not an earlier test, holds it.
+    logging.getLogger("anthropic").setLevel(logging.NOTSET)
     client = build_model_client(keyed, transport=Recorder().transport())
     ask(client, prompt)
     assert prompt not in caplog.text + "".join(repr(r.args) for r in caplog.records)
@@ -446,7 +479,13 @@ def test_every_library_logger_is_held(keyed: Settings) -> None:
     assert tuple(model_client.SDK_LOGGERS) == HELD
     logging.getLogger().setLevel(logging.DEBUG)
     build_model_client(keyed)
-    low = sorted(n for n in names if logging.getLogger(n).getEffectiveLevel() < logging.INFO)
+    # And every logger the libraries actually created, computed names included.
+    live = {
+        name
+        for name, logger in logging.root.manager.loggerDict.items()
+        if isinstance(logger, logging.Logger) and name.partition(".")[0] in HELD
+    }
+    low = sorted(n for n in names | live if logging.getLogger(n).getEffectiveLevel() < logging.INFO)
     assert not low, f"loggers below INFO: {low}"
 
 
@@ -484,21 +523,55 @@ def test_the_sdk_makes_no_span(keyed: Settings, key: str) -> None:
 
 @pytest.mark.parametrize(
     ("content_type", "body"),
-    [("text/plain", "not json {}"), ("application/json", "{{ {}"), ("application/json", "[]")],
+    [
+        ("text/plain", "not json {}"),
+        ("application/json", "{{ {}"),
+        ("application/json", '["{}"]'),
+        # Valid JSON the SDK builds leniently into a partial message (review finding
+        # test-r2): the loop needs a content list and a usage mapping.
+        ("application/json", '{{"note": "{}"}}'),
+        ("application/json", '{{"type": "message", "note": "{}"}}'),
+        ("application/json", '{{"type": "message", "content": "{}", "usage": {{}}}}'),
+        ("application/json", '{{"type": "message", "content": [], "usage": "{}"}}'),
+        # A field of the wrong type (review finding sec-r1): pydantic's serializer warning
+        # would print the value to stderr, past the log redaction.
+        (
+            "application/json",
+            (
+                '{{"id": "m", "type": "message", "role": "assistant", "model": "m",'
+                ' "content": [{{"type": "text", "text": ["{}"]}}], "stop_reason": "end_turn",'
+                ' "usage": {{"input_tokens": 1, "output_tokens": 1}}}}'
+            ),
+        ),
+    ],
 )
 def test_an_unreadable_answer_is_typed(keyed: Settings, content_type: str, body: str) -> None:
     # Review findings sec-2 and test-6: a 200 the SDK cannot read as a message.
     marker = canary("body")
     text = body.format(marker)
+    assert marker in text
     recorder = Recorder(
         lambda request: httpx2.Response(200, content=text, headers={"content-type": content_type})
     )
-    with pytest.raises(ModelCallError) as failed:
-        ask(build_model_client(keyed, transport=recorder.transport()))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ModelCallError) as failed:
+            ask(build_model_client(keyed, transport=recorder.transport()))
     error = failed.value
     assert (error.kind, error.status_code) == ("response", None)
     assert marker not in str(error) and marker not in "".join(traceback.format_exception(error))
+    assert not [w for w in caught if marker in str(w.message)], "a warning carries the body"
     assert error.__cause__ is None and error.__context__ is None
+
+
+@pytest.mark.parametrize("system", [None, 1, [{"type": "text", "text": "x"}]])
+def test_the_system_prompt_is_text(keyed: Settings, system: Any) -> None:
+    # Review finding sec-r3: blocks would allow sources; the prompt is one string.
+    recorder = Recorder()
+    client = build_model_client(keyed, transport=recorder.transport())
+    with pytest.raises(model_client.RequestRefused):
+        client.create(system=system, messages=[], tools=[], max_tokens=16)
+    assert recorder.requests == []
 
 
 @pytest.mark.parametrize(
@@ -511,6 +584,11 @@ def test_an_unreadable_answer_is_typed(keyed: Settings, content_type: str, body:
         {"name": "x", "description": "x", "input_schema": {}, "cache_control": {"type": "x"}},
         {"name": "x", "input_schema": {"type": "object"}},
         "search_client_docs",
+        # The shape's types (review finding test-r1).
+        {"name": 1, "description": "x", "input_schema": {"type": "object"}},
+        {"name": "x", "description": None, "input_schema": {"type": "object"}},
+        {"name": "x", "description": "x", "input_schema": "object"},
+        [],
     ],
 )
 def test_only_registry_shaped_tools_are_sent(keyed: Settings, tool: Any) -> None:
@@ -798,9 +876,11 @@ def test_the_price_table_is_the_page() -> None:
             {"input_tokens": 3, "cache_creation_input_tokens": None, "cache_creation": None},
             "0.000006",
         ),
-        # The standard tier and speed, and no server tool used, are what the table prices.
+        # The standard tier and speed, and no server tool used, are what the table prices;
+        # output_tokens_details only breaks down output_tokens, which stays the total.
         (
             {
+                "output_tokens_details": {"thinking_tokens": 0},
                 "input_tokens": 1_000_000,
                 "service_tier": "standard",
                 "speed": "standard",
@@ -830,6 +910,13 @@ def test_cost_is_usage_times_the_table(usage: dict[str, Any], expected: str) -> 
         {"input_tokens": 1, "service_tier": "batch"},
         {"input_tokens": 1, "speed": "fast"},
         {"input_tokens": 1, "server_tool_use": {"web_search_requests": 1}},
+        # A usage field the table does not know is not priced at zero (review finding
+        # sec-r4), nor a cache-write duration it does not know.
+        {"input_tokens": 1, "new_tokens": 1_000_000_000},
+        {
+            "cache_creation_input_tokens": 3,
+            "cache_creation": {"ephemeral_5m_input_tokens": 1, "ephemeral_2h_input_tokens": 2},
+        },
         {"input_tokens": 1, "server_tool_use": {"web_fetch_requests": 2, "web_search_requests": 0}},
         # A breakdown that does not add up to the total.
         {
