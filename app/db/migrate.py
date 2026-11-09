@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -27,7 +28,7 @@ import psycopg
 from psycopg import sql
 from psycopg.pq import TransactionStatus
 
-from app.config.settings import Settings, env_name
+from app.config.settings import Settings, env_name, ignored_url_notices
 from app.db import names
 from app.db.connect import connect
 
@@ -160,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--migrations", type=Path, default=MIGRATIONS, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    # An old, unprefixed URL is not read: say so, by name (review finding sec-1).
+    for notice in ignored_url_notices(os.environ):
+        print(f"migrate: {notice}", file=sys.stderr)
     try:
         url = Settings(_env_file=None).migration_database_url
         applied = run(url, args.migrations)

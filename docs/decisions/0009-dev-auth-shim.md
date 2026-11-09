@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Timur, 2026-10-28, plan question 13: a cookie with server-side sessions; the `SITREP_` prefix on 2026-10-29, PR 3 review sec-7). Built in M0 PR 7. The database URLs prefixed in M1 PR 3 (Timur's answer 1 to the PR 7 questions).
+Accepted (Timur, 2026-10-28, plan question 13: a cookie with server-side sessions; the `SITREP_` prefix on 2026-10-29, PR 3 review sec-7). Built in M0 PR 7. Database URLs prefixed in M1 PR 3 (Timur, 2026-11-08, answer 1 to the PR 7 questions).
 
 ## Date
 

@@ -39,9 +39,22 @@ def env_name(field: str) -> str:
     return ENV_PREFIX + field.upper()
 
 
+# The fields renamed in M1 PR 3. Their old names may still be exported for this project,
+# so the entry points say they are ignored. HOST and the other M0 names are not
+# reported: shells export HOST for themselves.
+RENAMED = ("database_url", "migration_database_url")
+
+
 def ignored_url_notices(environ: Mapping[str, str]) -> list[str]:
-    """Scaffolding (review finding sec-1): one notice per unprefixed URL variable."""
-    return []
+    """One notice per unprefixed database URL variable set in environ, in any case
+    (review finding sec-1): the name as set, and the names that are read. Never a value.
+    """
+    read = " and ".join(env_name(field) for field in RENAMED)
+    return [
+        f"ignored: {name} is set, but the database URLs are read from {read} only (ADR 0009)"
+        for name in sorted(environ)
+        if name.lower() in RENAMED
+    ]
 
 
 # compose.yaml publishes the database here: not 5432, where a native PostgreSQL may listen.

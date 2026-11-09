@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Timur, 2026-10-28, in the M0 plan; recorded and amended by its review in M0 PR 5a; completed in PR 5b; URL names prefixed in M1 PR 3).
+Accepted (Timur, 2026-10-28, in the M0 plan; recorded and amended by its review in M0 PR 5a; completed in PR 5b; URLs prefixed in M1 PR 3, Timur 2026-11-08).
 
 ## Date
 
