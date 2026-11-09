@@ -6,6 +6,7 @@ without proxy variables.
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -13,15 +14,17 @@ from pathlib import Path
 
 import pytest
 import uvicorn
+from branding_scan import matches_any
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from pydantic import ValidationError
-from repo_files import ROOT
+from repo_files import ROOT, list_files, read_text
 
 from app import __main__ as entry
 from app.config import branding
-from app.config.settings import Settings, env_name
+from app.config.settings import DATABASE_PORT, Settings, env_name, loopback_database_url
+from app.db import names
 from app.main import create_app
 from app.observability import tracing
 
@@ -30,9 +33,55 @@ PROXY_VARIABLES = tuple(
     name for base in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY") for name in (base, base.lower())
 )
 LOOPBACK_PROXY = "http://127.0.0.1:9"
-# The variables the settings read (ADR 0009: prefixed, except the database URLs).
+# The variables the settings read (ADR 0009: every one prefixed, the database URLs too
+# since M1 PR 3).
 HOST, PORT = env_name("host"), env_name("port")
 DEV_AUTH, TRACE_PLAINTEXT = env_name("dev_auth"), env_name("trace_plaintext")
+URL_FIELDS = ("database_url", "migration_database_url")
+URL_ROLES = (names.APP_ROLE, names.MIGRATOR_ROLE)
+
+# The files that tell a developer, a container or CI which variables to set, and the
+# code and tests that set or name them. Decision records, plans and reports keep their
+# history and are not read.
+LIVE_FILES = (
+    ".env.example",
+    "README.md",
+    "compose.yaml",
+    "Makefile",
+    "Dockerfile",
+    ".github/**",
+    "docs/runbooks/**",
+    "docs/threat-model.md",
+    "app/**",
+    "db/**",
+    "tests/**",
+)
+# A database URL variable without the prefix: the bare name as a whole token. A prefixed
+# name does not match, since an underscore precedes the bare part, and neither does a
+# name built by an f-string or a shell expansion right before it ("}"). Built from the
+# fields, so this file does not name the variables itself.
+BARE_URL_NAME = re.compile(
+    rf"(?<![A-Za-z0-9_}}])(?:{'|'.join(field.upper() for field in URL_FIELDS)})(?![A-Za-z0-9_])"
+)
+
+
+def bare_url_names(text: str) -> list[tuple[int, str]]:
+    """(line number, name) for every unprefixed database URL variable in text."""
+    return [
+        (number, match.group(0))
+        for number, line in enumerate(text.splitlines(), start=1)
+        for match in BARE_URL_NAME.finditer(line)
+    ]
+
+
+def live_files(root: Path = ROOT) -> dict[str, str]:
+    """Repo-relative path -> text, for every live file git sees under root."""
+    found = {}
+    for rel in list_files(root):
+        if matches_any(rel, LIVE_FILES) and (text := read_text(root, rel)) is not None:
+            found[rel] = text
+    return found
+
 
 FLAG_VALUES = [
     ("1", True),
@@ -82,6 +131,7 @@ def test_settings_names_are_prefixed() -> None:
     # Review finding test-7: the prefix from branding, not from env_name() itself. The
     # literal names live in .env.example and the Dockerfile (test_env_example_is_safe,
     # tests/test_dockerfile.py); the branding scan keeps them out of Python files.
+    # M1 PR 3 (Timur's answer 1 to the PR 7 questions): the database URLs too.
     prefix = f"{branding.SLUG.upper()}_"
     assert HOST == f"{prefix}HOST", HOST
     assert {env_name(field) for field in Settings.model_fields} == {
@@ -89,9 +139,12 @@ def test_settings_names_are_prefixed() -> None:
         f"{prefix}PORT",
         f"{prefix}DEV_AUTH",
         f"{prefix}TRACE_PLAINTEXT",
-        "DATABASE_URL",
-        "MIGRATION_DATABASE_URL",
+        f"{prefix}DATABASE_URL",
+        f"{prefix}MIGRATION_DATABASE_URL",
     }
+    unprefixed = {field: env_name(field) for field in Settings.model_fields}
+    unprefixed = {k: v for k, v in unprefixed.items() if v != prefix + k.upper()}
+    assert not unprefixed, unprefixed
 
 
 @pytest.mark.parametrize("spelling", [str.upper, str.lower, str.title])
@@ -112,19 +165,74 @@ def test_unprefixed_names_are_ignored(monkeypatch: pytest.MonkeyPatch, spelling)
 def test_env_example_is_safe() -> None:
     # The file a developer copies: every flag off, the bind on loopback, both database
     # URLs written out and equal to the defaults, and the variables Settings does not
-    # know (the API key, the model) ignored.
+    # know (the API key, the model) ignored. No setting under its unprefixed name: it
+    # would do nothing (M1 PR 3 for the database URLs).
     path = ROOT / ".env.example"
     example = Settings(_env_file=path)
     assert (example.host, example.port) == ("127.0.0.1", 8000)
     assert (example.trace_plaintext_on, example.dev_auth_on) == (False, False)
     names = {line.split("=", 1)[0] for line in path.read_text().splitlines() if "=" in line}
     assert {env_name(field) for field in Settings.model_fields} <= names, sorted(names)
-    assert not {"HOST", "PORT", "DEV_AUTH", "TRACE_PLAINTEXT"} & names, sorted(names)
+    assert not {field.upper() for field in Settings.model_fields} & names, sorted(names)
     defaults = Settings(_env_file=None)
     assert (example.database_url, example.migration_database_url) == (
         defaults.database_url,
         defaults.migration_database_url,
     )
+
+
+def test_live_files_name_only_prefixed_database_urls() -> None:
+    # M1 PR 3: .env.example, the runbook, compose.yaml, the Makefile, the Dockerfile, CI,
+    # the code and the tests name the database URLs by their prefixed variables only.
+    # An unprefixed name there would be set, and silently do nothing.
+    files = live_files()
+    found = [
+        f"{rel}:{number}: {name}"
+        for rel, text in files.items()
+        for number, name in bare_url_names(text)
+    ]
+    assert not found, "unprefixed database URL variables:\n" + "\n".join(found)
+    # Non-vacuity: every named file is read, and the two that tell a developer what to
+    # set name both prefixed variables.
+    for rel in (".env.example", "docs/runbooks/local-setup.md", "compose.yaml", "Makefile"):
+        assert rel in files, f"{rel} is not read"
+    for rel in (".env.example", "docs/runbooks/local-setup.md"):
+        missing = [env_name(f) for f in URL_FIELDS if env_name(f) not in files[rel]]
+        assert not missing, f"{rel} does not name {missing}"
+    assert any(rel.startswith("app/") for rel in files) and any(
+        rel.startswith("tests/") for rel in files
+    ), sorted(files)
+
+
+def test_planted_bare_url_names() -> None:
+    bare, migration = (field.upper() for field in URL_FIELDS)
+    prefixed = f"{branding.SLUG.upper()}_{bare}"
+    text = "\n".join(
+        [
+            f"{bare}=postgresql://x",  # .env.example's shape
+            f"- **URLs.** `{migration}` (the migrator)",  # the runbook's
+            f"      {bare}: x",  # compose or CI environment
+            f"    monkeypatch.setenv({bare!r}, url)",  # a test's
+            f"export {migration}",  # a shell's
+            f"{prefixed}=postgresql://x",  # prefixed: not reported
+            f"X{bare} {bare}X {bare.lower()} {bare}_2",  # longer tokens and the field
+            f'f"{{prefix}}{bare}" ${{SLUG}}{migration}',  # built in front: not reported
+            f"${{{bare}}} {{{migration}}}",  # inside an expansion: reported
+        ]
+    )
+    assert bare_url_names(text) == [
+        (1, bare),
+        (2, migration),
+        (3, bare),
+        (4, bare),
+        (5, migration),
+        (9, bare),
+        (9, migration),
+    ]
+    # The live-file glob reads the runbooks but not the records that keep history.
+    assert matches_any("docs/runbooks/local-setup.md", LIVE_FILES)
+    for rel in ("docs/decisions/0008-data-access.md", "docs/plans/m1-mvp-core.md"):
+        assert not matches_any(rel, LIVE_FILES), rel
 
 
 def test_plaintext_needs_console_and_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,6 +342,8 @@ def test_proxy_environment_is_clean(settings: Settings) -> None:
     assert no_proxy == ("*", "*"), f"NO_PROXY, no_proxy: {no_proxy}"
     defaults = (settings.host, settings.port, settings.dev_auth, settings.trace_plaintext)
     assert defaults == ("127.0.0.1", 8000, "0", "0"), defaults
+    urls = (settings.database_url, settings.migration_database_url)
+    assert urls == tuple(map(loopback_database_url, URL_ROLES)), "a database URL leaked in"
 
 
 def test_proxy_variables_are_scrubbed() -> None:
@@ -245,6 +355,11 @@ def test_proxy_variables_are_scrubbed() -> None:
     env |= {"Host": ALL_INTERFACES, "PORT": "9", "DEV_AUTH": "1", "TRACE_PLAINTEXT": "1"}
     env |= {HOST.title(): ALL_INTERFACES, PORT: "9", DEV_AUTH.lower(): "1", TRACE_PLAINTEXT: "1"}
     env |= {"PGHOSTADDR": "192.0.2.1", "PGPORT": "5432", "PGOPTIONS": "-c x=y", "PGTZ": "UTC"}
+    # The database URLs, prefixed (valid, on another port, so a leak shows as a value)
+    # and unprefixed (M1 PR 3).
+    for field, role in zip(URL_FIELDS, URL_ROLES, strict=True):
+        env[env_name(field)] = loopback_database_url(role).replace(f":{DATABASE_PORT}/", ":9/")
+        env[field.upper()] = f"postgresql://{role}@192.0.2.1:{DATABASE_PORT}/x"
     probe = f"{Path(__file__).relative_to(ROOT).as_posix()}::test_proxy_environment_is_clean"
     result = subprocess.run(
         [sys.executable, "-P", "-m", "pytest", "-q", "-p", "no:cacheprovider", probe],

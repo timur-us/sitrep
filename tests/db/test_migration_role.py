@@ -20,7 +20,7 @@ import pytest
 from dbtools import RECORD, SUPERUSER, SUPERUSER_URL, Connection, applied, column
 from psycopg import sql
 
-from app.config.settings import Settings, loopback_database_url
+from app.config.settings import Settings, env_name, loopback_database_url
 from app.db import migrate, names
 from app.db.connect import connect
 
@@ -155,7 +155,7 @@ def test_migrate_refuses_the_superuser(tmp_path: Path, superuser: Connection) ->
 def test_entry_point_refuses_a_bad_migration_url(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], url: str, rule: str
 ) -> None:
-    monkeypatch.setenv("MIGRATION_DATABASE_URL", url)
+    monkeypatch.setenv(env_name("migration_database_url"), url)
     assert migrate.main([]) == 1
     err = capsys.readouterr().err
     assert err.startswith("migrate: refused:") and rule in err, err
