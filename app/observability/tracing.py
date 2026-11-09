@@ -69,6 +69,11 @@ OTHER_METHOD = "_OTHER"
 REDACTED_NAME = "redacted"
 
 
+def capture_variables(environ: Mapping[str, str]) -> list[str]:
+    """Scaffolding for M1 PR 5, inert until the next commit."""
+    return []
+
+
 class PlaintextRefused(ValueError):
     """trace_plaintext at "1" where it is not allowed. The message names the variable
     (PLAINTEXT), never a value."""

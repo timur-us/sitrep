@@ -62,6 +62,9 @@ ALLOWED = frozenset(
         "stat",
         "starlette",
         "sys",
+        # app/observability/logs.py replaces threading.excepthook (M1 PR 5); no thread is
+        # started in app/.
+        "threading",
         # The model's tokenizer (ADR 0005), in app/embeddings/onnx.py only. It can reach
         # the network through Tokenizer.from_pretrained(), which is banned below; the lock
         # leaves out the Hub client it would call (tests/test_lock.py).

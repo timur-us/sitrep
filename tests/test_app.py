@@ -86,7 +86,13 @@ def traced(settings: Settings) -> tuple[FastAPI, InMemorySpanExporter]:
 
 
 def _client(app: FastAPI) -> TestClient:
-    return TestClient(app, follow_redirects=False, raise_server_exceptions=False)
+    # The Host the app allows by default (M1 PR 5): loopback on the settings' port.
+    return TestClient(
+        app,
+        base_url="http://127.0.0.1:8000",
+        follow_redirects=False,
+        raise_server_exceptions=False,
+    )
 
 
 def _spans(memory: InMemorySpanExporter, name: str) -> list:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import errno
 import logging
 import sys
+import threading
 
 from app.observability.tracing import current_trace_id
 
@@ -119,3 +120,25 @@ LOG_CONFIG: dict = {
     "loggers": {name: {"level": "INFO", "filters": ["redact"]} for name in REDACTED_LOGGERS},
     "root": {"level": "INFO", "handlers": ["stderr"]},
 }
+
+
+# Scaffolding for M1 PR 5, inert until the next commit: Python's own hooks.
+THREAD_MESSAGE = "an unhandled exception in a thread"
+UNRAISABLE_MESSAGE = "an exception that could not be raised"
+ASYNCIO_MESSAGE = "an unhandled exception in an asyncio task"
+
+
+def thread_excepthook(args: object) -> None:
+    threading.__excepthook__(args)  # type: ignore[arg-type]
+
+
+def unraisable_hook(unraisable: object) -> None:
+    sys.__unraisablehook__(unraisable)  # type: ignore[arg-type]
+
+
+def asyncio_exception_handler(loop: object, context: dict) -> None:
+    loop.default_exception_handler(context)  # type: ignore[attr-defined]
+
+
+def install_exception_hooks() -> None:
+    return None

@@ -55,7 +55,11 @@ TARGET_COMMANDS = {
     "docker-build": [
         "docker build",
         "id -u",
-        "-p 127.0.0.1::8000",
+        # M1 PR 5: the published port is chosen before the start, so the allowlist can
+        # name it, and a foreign Host is refused inside the image.
+        "-p 127.0.0.1:$port:8000",
+        f"-e {env_name('allowed_hosts')}=127.0.0.1:$port",
+        "-H 'Host: 192.0.2.1:8000'",
         f"-e {env_name('trace_plaintext')}=1",
         # The dev login shim is not in the image, and asking for it refuses to start.
         "import app.auth.dev_shim",
