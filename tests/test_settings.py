@@ -5,6 +5,7 @@ without proxy variables.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import socket
@@ -25,7 +26,11 @@ from app import __main__ as entry
 from app.config import branding
 from app.config.settings import (
     DATABASE_PORT,
+    DEFAULT_MODEL,
+    KEY_VARIABLE,
+    SETTINGS_DEBUG,
     Settings,
+    SettingsRefused,
     env_name,
     ignored_url_notices,
     loopback_database_url,
@@ -45,6 +50,7 @@ HOST, PORT = env_name("host"), env_name("port")
 DEV_AUTH, TRACE_PLAINTEXT = env_name("dev_auth"), env_name("trace_plaintext")
 URL_FIELDS = ("database_url", "migration_database_url")
 URL_ROLES = (names.APP_ROLE, names.MIGRATOR_ROLE)
+KEY_FIELD = "anthropic_api_key"
 
 # Every file git sees is read (review finding test-1), except the records that keep their
 # history (decision records, plans, reports name the old variables on purpose) and the
@@ -141,6 +147,8 @@ def test_settings_names_are_prefixed() -> None:
     # literal names live in .env.example and the Dockerfile (test_env_example_is_safe,
     # tests/test_dockerfile.py); the branding scan keeps them out of Python files.
     # M1 PR 3 (Timur's answer 1 to the PR 7 questions): the database URLs too.
+    # M1 PR 6: the model too; the API key alone keeps its name (the plan's default 7: the
+    # secret hook and the GitHub checklist key on it).
     prefix = f"{branding.SLUG.upper()}_"
     assert HOST == f"{prefix}HOST", HOST
     assert {env_name(field) for field in Settings.model_fields} == {
@@ -150,9 +158,12 @@ def test_settings_names_are_prefixed() -> None:
         f"{prefix}TRACE_PLAINTEXT",
         f"{prefix}DATABASE_URL",
         f"{prefix}MIGRATION_DATABASE_URL",
+        f"{prefix}MODEL",
+        "ANTHROPIC_API_KEY",
     }
     assert {field: env_name(field) for field in Settings.model_fields} == {
-        field: prefix + field.upper() for field in Settings.model_fields
+        field: "ANTHROPIC_API_KEY" if field == KEY_FIELD else prefix + field.upper()
+        for field in Settings.model_fields
     }
 
 
@@ -173,19 +184,26 @@ def test_unprefixed_names_are_ignored(monkeypatch: pytest.MonkeyPatch, spelling)
 
 def test_env_example_is_safe() -> None:
     # The file a developer copies: every flag off, the bind on loopback, both database
-    # URLs written out and equal to the defaults, and the variables Settings does not
-    # know (the API key, the model) ignored. No setting under its unprefixed name: it
-    # would do nothing (M1 PR 3 for the database URLs).
+    # URLs written out and equal to the defaults, the model the default, and the key
+    # empty, which is no key (M1 PR 6). No setting under its unprefixed name: it would do
+    # nothing (M1 PR 3 for the database URLs, PR 6 for the model).
     path = ROOT / ".env.example"
     example = Settings(_env_file=path)
     assert (example.host, example.port) == ("127.0.0.1", 8000)
     assert (example.trace_plaintext_on, example.dev_auth_on) == (False, False)
+    assert (example.model, example.anthropic_api_key) == (DEFAULT_MODEL, None)
     lines = path.read_text().splitlines()
     variables = {line.split("=", 1)[0] for line in lines if "=" in line}
-    assert {env_name(field) for field in Settings.model_fields} <= variables, sorted(variables)
+    assert {env_name(field) for field in Settings.model_fields} == variables, sorted(variables)
     # Settings match names in any case (review finding sec-4).
-    bare = {name for name in variables if name.lower() in Settings.model_fields}
+    bare = {
+        name
+        for name in variables
+        if name.lower() in Settings.model_fields and name != env_name(KEY_FIELD)
+    }
     assert not bare, sorted(variables)
+    # The model's old name (the M0 plan): the model client refuses it at start.
+    assert "ANTHROPIC_MODEL" not in variables
     defaults = Settings(_env_file=None)
     assert (example.database_url, example.migration_database_url) == (
         defaults.database_url,
@@ -473,6 +491,13 @@ def test_proxy_environment_is_clean(settings: Settings) -> None:
     # them (review finding test-9).
     bare = sorted(name for name in os.environ if name.lower() in URL_FIELDS)
     assert not bare, f"unprefixed database URL variables visible to tests: {bare}"
+    # M1 PR 6: every SDK variable, the key included, and the settings' debug switch
+    # (review finding sec-3 of M1 PR 3).
+    sdk = sorted(name for name in os.environ if name.upper().startswith("ANTHROPIC_"))
+    debug = sorted(name for name in os.environ if name.upper() == SETTINGS_DEBUG)
+    assert not sdk, f"SDK variables visible to tests: {sdk}"
+    assert not debug, f"the settings debug switch is visible to tests: {debug}"
+    assert (settings.model, settings.anthropic_api_key) == (DEFAULT_MODEL, None)
 
 
 def test_proxy_variables_are_scrubbed() -> None:
@@ -484,6 +509,10 @@ def test_proxy_variables_are_scrubbed() -> None:
     env |= {"Host": ALL_INTERFACES, "PORT": "9", "DEV_AUTH": "1", "TRACE_PLAINTEXT": "1"}
     env |= {HOST.title(): ALL_INTERFACES, PORT: "9", DEV_AUTH.lower(): "1", TRACE_PLAINTEXT: "1"}
     env |= {"PGHOSTADDR": "192.0.2.1", "PGPORT": "5432", "PGOPTIONS": "-c x=y", "PGTZ": "UTC"}
+    # M1 PR 6: the key, the model, SDK variables in any case, and the debug switch.
+    env |= {KEY_VARIABLE: "not-a-key", env_name("model"): "claude-other", "MODEL": "x"}
+    env |= {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9", "anthropic_log": "debug"}
+    env |= {"Anthropic_Custom_Headers": "x: y", SETTINGS_DEBUG: "1", "pydantic_settings_debug": "1"}
     # The database URLs, prefixed (valid, on another port, so a leak shows as a value)
     # and unprefixed (M1 PR 3).
     for field, role in zip(URL_FIELDS, URL_ROLES, strict=True):
@@ -501,3 +530,114 @@ def test_proxy_variables_are_scrubbed() -> None:
     )
     assert result.returncode == 0, result.stdout[-3000:]
     assert "1 passed" in result.stdout, result.stdout[-3000:]
+
+
+# --- M1 PR 6: the model, the API key, and the settings' debug switch ---------------------
+
+
+def test_the_model_is_read_from_its_prefixed_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(_env_file=None).model == DEFAULT_MODEL
+    monkeypatch.setenv("MODEL", "claude-bare")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-old")
+    assert Settings(_env_file=None).model == DEFAULT_MODEL
+    monkeypatch.setenv(env_name("model").lower(), "claude-prefixed")
+    assert Settings(_env_file=None).model == "claude-prefixed"
+
+
+@pytest.mark.parametrize("spelling", [str.upper, str.lower])
+def test_the_key_is_a_secret(monkeypatch: pytest.MonkeyPatch, spelling) -> None:
+    key = "canary-key-" + os.urandom(12).hex()
+    monkeypatch.setenv(spelling(KEY_VARIABLE), key)
+    settings = Settings(_env_file=None)
+    assert settings.anthropic_api_key is not None
+    assert settings.anthropic_api_key.get_secret_value() == key
+    for text in (repr(settings), str(settings), settings.model_dump_json()):
+        assert key not in text, "the key is shown"
+    # The prefixed spelling is not the key: the key keeps its name (default 7).
+    monkeypatch.delenv(spelling(KEY_VARIABLE))
+    monkeypatch.setenv(f"{branding.SLUG.upper()}_{KEY_VARIABLE}", key)
+    assert Settings(_env_file=None).anthropic_api_key is None
+
+
+def test_an_empty_key_is_no_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # The empty line of the example file, from the environment or from a dotenv file.
+    monkeypatch.setenv(KEY_VARIABLE, "")
+    assert Settings(_env_file=None).anthropic_api_key is None
+    monkeypatch.delenv(KEY_VARIABLE)
+    (tmp_path / "dotenv").write_text(f"{KEY_VARIABLE}=\n")
+    assert Settings(_env_file=tmp_path / "dotenv").anthropic_api_key is None
+
+
+@pytest.mark.parametrize("shape", ["{} ", " {}", "{}\n", "a b{}", "{}é", "{}\x00"])
+def test_a_key_of_another_shape_is_refused_unseen(
+    monkeypatch: pytest.MonkeyPatch, shape: str
+) -> None:
+    # A header cannot carry it, and the HTTP library's error would quote it.
+    key = shape.format("canary-key-" + os.urandom(12).hex())
+    with pytest.raises(ValidationError) as refused:
+        Settings(_env_file=None, anthropic_api_key=key)
+    assert key.strip() not in str(refused.value)
+    assert KEY_VARIABLE in str(refused.value)
+
+
+def _debug_dotenv(tmp_path: Path) -> tuple[Path, str]:
+    key = "canary-key-" + os.urandom(12).hex()
+    path = tmp_path / "dotenv"
+    path.write_text(f"{KEY_VARIABLE}={key}\n")
+    return path, key
+
+
+@pytest.mark.parametrize("value", ["1", "true", "", "0"])
+def test_the_settings_debug_switch_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    value: str,
+) -> None:
+    # Review finding sec-3 of M1 PR 3: with the switch on and DEBUG logging,
+    # pydantic-settings logs every source's raw values, a dotenv key included. Set at
+    # all, whatever its value, Settings refuses to build, before any source is read.
+    path, key = _debug_dotenv(tmp_path)
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv(SETTINGS_DEBUG, value)
+    with pytest.raises(SettingsRefused) as refused:
+        Settings(_env_file=path)
+    assert SETTINGS_DEBUG in str(refused.value)
+    assert key not in caplog.text and key not in str(refused.value)
+
+
+def test_the_debug_leak_is_real(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Control: a plain BaseSettings with the same field logs the key under the switch, so
+    # the refusal above guards a real path.
+    from pydantic_settings import BaseSettings
+
+    class Plain(BaseSettings):
+        anthropic_api_key: str | None = None
+
+    path, key = _debug_dotenv(tmp_path)
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setenv(SETTINGS_DEBUG, "1")
+    assert Plain(_env_file=path).anthropic_api_key == key
+    assert key in caplog.text
+
+
+def _no_bind(self: uvicorn.Config) -> socket.socket:
+    raise AssertionError("the entry point bound a socket before refusing")
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_the_entry_point_refuses_the_settings_debug_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", _no_bind)
+    monkeypatch.setattr(uvicorn.Server, "run", _no_server)
+    path, key = _debug_dotenv(tmp_path)
+    path.rename(tmp_path / ("." + "env"))  # the file the entry point reads
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(SETTINGS_DEBUG.lower(), "on")
+    assert entry.main() == 2
+    err = capsys.readouterr().err
+    assert "refused to start" in err and SETTINGS_DEBUG.lower() in err, err
+    assert key not in err

@@ -21,11 +21,17 @@ APP = ROOT / "app"
 ALLOWED = frozenset(
     {
         "__future__",
+        # The model client (ADR 0012), in app/harness/model_client.py only. It connects on
+        # its own, to the one base URL that file passes; anthropic.lib (Bedrock, Vertex,
+        # Foundry, the tool and environment runners) is banned below.
+        "anthropic",
         "app",
         "argparse",
         "collections",
         "contextlib",
         "dataclasses",
+        # app/harness/model_client.py: the cost, exact to the table's cents.
+        "decimal",
         # app/harness/mvp_tools.py: the follow-up's due date. No clock is read in app/.
         "datetime",
         "enum",
@@ -35,6 +41,10 @@ ALLOWED = frozenset(
         # app/auth/dev_shim.py signs the session cookie (ADR 0009).
         "hmac",
         "html",
+        # The model client's HTTP library (ADR 0012), in app/harness/model_client.py only:
+        # the file builds the client itself, with trust_env off, because the SDK's
+        # DefaultHttpxClient mounts proxies from the environment whatever trust_env says.
+        "httpx2",
         "ipaddress",
         "json",
         "logging",
@@ -78,6 +88,9 @@ ALLOWED = frozenset(
 BANNED_MODULES = frozenset(
     {
         "aiohttp",
+        # The SDK's other clients and runners: Bedrock, Vertex, Foundry, AWS, the tool
+        # runner's toolset and the environments worker (ADR 0012).
+        "anthropic.lib",
         "ctypes",
         "ftplib",
         "http",
@@ -118,6 +131,11 @@ BANNED_ATTRIBUTES = frozenset(
         "create_subprocess_shell",
         "create_unix_connection",
         "add_external_initializers",
+        # The SDK's HTTP clients read proxy variables from the environment even with
+        # trust_env off (ADR 0012).
+        "DefaultAioHttpClient",
+        "DefaultAsyncHttpxClient",
+        "DefaultHttpxClient",
         "add_external_initializers_from_files_in_memory",
         "enable_profiling",
         "from_file",
@@ -142,8 +160,12 @@ DB_CONNECT_FILE = "app/db/connect.py"
 POOL_FILE = "app/db/session.py"
 # The embedder: the one file that loads a model, from checked bytes (ADR 0005).
 EMBEDDER_FILE = "app/embeddings/onnx.py"
+# The model client: the one file that talks to the model API (ADR 0012).
+MODEL_CLIENT_FILE = "app/harness/model_client.py"
 # Modules that one file alone may import.
 SINGLE_FILE = {
+    "anthropic": MODEL_CLIENT_FILE,
+    "httpx2": MODEL_CLIENT_FILE,
     "psycopg_pool": POOL_FILE,
     "numpy": EMBEDDER_FILE,
     "onnxruntime": EMBEDDER_FILE,
@@ -230,6 +252,7 @@ def test_import_allowlist() -> None:
         "app/observability/tracing.py",
         "app/db/connect.py",
         EMBEDDER_FILE,
+        MODEL_CLIENT_FILE,
     ):
         assert required in sources, f"{required} was not scanned"
     modules, problems = check(sources)
@@ -288,6 +311,17 @@ PLANTED = [
     ("options.profile_file_prefix = 'p'\n", ".profile_file_prefix"),
     ("options.optimized_model_filepath = 'm.onnx'\n", ".optimized_model_filepath"),
     ("tokenizers.Tokenizer.from_file('tokenizer.json')\n", ".from_file"),
+    # The model client's libraries, outside app/harness/model_client.py (ADR 0012).
+    ("import anthropic\n", "anthropic outside app/harness/model_client.py"),
+    ("from anthropic import Anthropic\n", "anthropic outside app/harness/model_client.py"),
+    ("import httpx2\n", "httpx2 outside app/harness/model_client.py"),
+    ("from httpx2 import Client\n", "httpx2 outside"),
+    # Anywhere: the SDK's other clients, and its HTTP clients that read proxy variables.
+    ("from anthropic.lib.bedrock import AnthropicBedrock\n", "banned module anthropic.lib"),
+    ("import anthropic.lib.tools\n", "banned module anthropic.lib"),
+    ("anthropic.DefaultHttpxClient(trust_env=False)\n", ".DefaultHttpxClient"),
+    ("from anthropic import DefaultAsyncHttpxClient\n", "import DefaultAsyncHttpxClient"),
+    ("from anthropic import DefaultAioHttpClient\n", "import DefaultAioHttpClient"),
 ]
 
 
@@ -320,6 +354,17 @@ def test_the_embedder_libraries_are_allowed_in_their_own_file() -> None:
     assert scan(source, "app/embeddings/chunking.py")[1] != []
     # The ban on from_pretrained holds there too.
     assert scan("tokenizers.Tokenizer.from_pretrained('x')\n", "app/embeddings/onnx.py")[1] != []
+
+
+def test_the_model_client_libraries_are_allowed_in_their_own_file() -> None:
+    source = "import anthropic\nimport httpx2\n"
+    assert scan(source, MODEL_CLIENT_FILE)[1] == []
+    assert scan(source, "app/harness/model.py")[1] != []
+    # The bans hold there too.
+    assert scan("anthropic.DefaultHttpxClient()\n", MODEL_CLIENT_FILE)[1] != []
+    assert scan("import anthropic.lib.vertex\n", MODEL_CLIENT_FILE)[1] != []
+    # The near miss: httpx2 is not httpx, and httpx stays banned.
+    assert banned_module("httpx2") is None and banned_module("httpx") == "httpx"
 
 
 def test_connect_is_allowed_in_its_own_file() -> None:

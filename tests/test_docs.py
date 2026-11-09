@@ -1032,3 +1032,148 @@ def test_planted_adr_0011_blocks() -> None:
     assert adr_0011_problems(GOOD_0011.replace(joined, joined + ", 7")) == [
         "binding: 7 is not a binding"
     ]
+
+
+# ADR 0012 (M1 PR 6): the model client's facts, as the ADR's one yaml block, pinned to
+# app/harness/model_client.py and the settings, so the ADR and the code cannot drift.
+ADR_0012_KEYS = (
+    "base_url",
+    "key_variable",
+    "model_variable",
+    "default_model",
+    "refused_prefix",
+    "max_retries",
+    "timeout_seconds",
+    "connect_timeout_seconds",
+    "prices_as_of",
+    "prices_usd_per_mtok",
+)
+
+
+def adr_0012_facts() -> dict[str, object]:
+    """What the code says, in the block's terms. Prices as Decimal, the date as text."""
+    from app.config import settings
+    from app.harness import model_client
+
+    return {
+        "base_url": model_client.BASE_URL,
+        "key_variable": settings.KEY_VARIABLE,
+        "model_variable": settings.env_name("model"),
+        "default_model": settings.DEFAULT_MODEL,
+        "refused_prefix": model_client.SDK_PREFIX,
+        "max_retries": model_client.MAX_RETRIES,
+        "timeout_seconds": model_client.TIMEOUT_SECONDS,
+        "connect_timeout_seconds": model_client.CONNECT_TIMEOUT_SECONDS,
+        "prices_as_of": model_client.PRICES_AS_OF,
+        "prices_usd_per_mtok": {
+            model: {name: getattr(price, name) for name in PRICE_FIELDS}
+            for model, price in model_client.PRICES.items()
+        },
+    }
+
+
+PRICE_FIELDS = ("input", "cache_write_5m", "cache_write_1h", "cache_read", "output")
+
+
+def _as_decimal(value: object) -> object:
+    from decimal import Decimal, InvalidOperation
+
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return value
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        return value
+
+
+def adr_0012_problems(adr: str, expected: dict[str, object]) -> list[str]:
+    """One line per way ADR 0012's block differs from the code."""
+    blocks = yaml_blocks(adr)
+    if len(blocks) != 1:
+        return [f"expected one yaml block, found {len(blocks)}"]
+    facts, problem = load_block(blocks[0])
+    if problem:
+        return [problem]
+    if not isinstance(facts, dict):
+        return ["the yaml block is not a mapping"]
+    problems = [f"{key}: not in the block" for key in ADR_0012_KEYS if key not in facts]
+    problems += [f"{key}: in the block, not expected" for key in facts if key not in ADR_0012_KEYS]
+    if problems:
+        return problems
+    for key in ADR_0012_KEYS:
+        found, wanted = facts[key], expected[key]
+        if key == "prices_as_of":
+            found = str(found)
+        elif key == "prices_usd_per_mtok":
+            found = (
+                {
+                    model: {name: _as_decimal(value) for name, value in price.items()}
+                    if isinstance(price, dict)
+                    else price
+                    for model, price in found.items()
+                }
+                if isinstance(found, dict)
+                else found
+            )
+        elif isinstance(wanted, float) and type(found) in (int, float):
+            found = float(found)
+        if found != wanted or type(found) is bool is not type(wanted):
+            problems.append(f"{key}: {found!r} in the block, {wanted!r} in the code")
+    return problems
+
+
+def _adr_0012() -> str:
+    found = sorted(DECISIONS.glob("0012-*.md")) if DECISIONS.is_dir() else []
+    assert len(found) == 1, f"expected one ADR 0012 in docs/decisions, found {len(found)}"
+    return found[0].read_text(encoding="utf-8")
+
+
+def test_adr_0012_block() -> None:
+    problems = adr_0012_problems(_adr_0012(), adr_0012_facts())
+    assert not problems, "ADR 0012 and app/harness/model_client.py:\n" + "\n".join(problems)
+
+
+def test_planted_adr_0012_blocks() -> None:
+    from decimal import Decimal
+
+    expected = {
+        "base_url": "https://api.example",
+        "key_variable": "K",
+        "model_variable": "M",
+        "default_model": "m-1",
+        "refused_prefix": "P_",
+        "max_retries": 0,
+        "timeout_seconds": 120.0,
+        "connect_timeout_seconds": 5.0,
+        "prices_as_of": "2026-11-09",
+        "prices_usd_per_mtok": {"m-1": {"input": Decimal(2), "output": Decimal(10)}},
+    }
+    good = (
+        "```yaml\nbase_url: https://api.example\nkey_variable: K\nmodel_variable: M\n"
+        "default_model: m-1\nrefused_prefix: P_\nmax_retries: 0\ntimeout_seconds: 120\n"
+        "connect_timeout_seconds: 5\nprices_as_of: 2026-11-09\n"
+        'prices_usd_per_mtok:\n  m-1: {input: 2, output: "10.00"}\n```\n'
+    )
+    assert adr_0012_problems(good, expected) == []
+    assert adr_0012_problems("no block\n", expected) == ["expected one yaml block, found 0"]
+    assert adr_0012_problems(good.replace("max_retries: 0", "max_retries: 2"), expected) == [
+        "max_retries: 2 in the block, 0 in the code"
+    ]
+    assert adr_0012_problems(good.replace("max_retries: 0", "max_retries: false"), expected) == [
+        "max_retries: False in the block, 0 in the code"
+    ]
+    assert adr_0012_problems(good.replace("input: 2", "input: 3"), expected) == [
+        (
+            "prices_usd_per_mtok: {'m-1': {'input': Decimal('3'), 'output': Decimal('10.00')}}"
+            " in the block, {'m-1': {'input': Decimal('2'), 'output': Decimal('10')}} in the code"
+        )
+    ]
+    assert adr_0012_problems(good.replace("key_variable: K\n", ""), expected) == [
+        "key_variable: not in the block"
+    ]
+    assert adr_0012_problems(
+        good.replace("key_variable: K", "key_variable: K\nnote: x"), expected
+    ) == ["note: in the block, not expected"]
+    assert adr_0012_problems(good.replace("2026-11-09", "2026-11-08"), expected) == [
+        "prices_as_of: '2026-11-08' in the block, '2026-11-09' in the code"
+    ]

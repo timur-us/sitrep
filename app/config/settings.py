@@ -39,6 +39,16 @@ def env_name(field: str) -> str:
     return ENV_PREFIX + field.upper()
 
 
+# Scaffolding for M1 PR 6, inert until the next commit.
+KEY_VARIABLE = "ANTHROPIC_API_KEY"
+DEFAULT_MODEL = "claude-sonnet-5-5"
+SETTINGS_DEBUG = "PYDANTIC_SETTINGS_DEBUG"
+
+
+class SettingsRefused(ValueError):
+    pass
+
+
 # The fields renamed in M1 PR 3. Their old names may still be exported for this project,
 # so the entry points say they are ignored. HOST and the other M0 names are not
 # reported: shells export HOST for themselves.
