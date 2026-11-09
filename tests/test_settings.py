@@ -54,7 +54,9 @@ HISTORY = ("docs/decisions/**", "docs/plans/**", "docs/reports/**", "uv.lock")
 # name does not match, since an underscore precedes the bare part, and neither does a
 # name built by an f-string or a shell expansion right before it ("}"). Built from the
 # fields, so this file does not name the variables itself; it must keep building them,
-# since the scan reads this file too.
+# since the scan reads this file too. Known gaps (review finding test-r5): a real bare
+# name right after "}" or glued to a flag (-eNAME), and a lower-case name in Python,
+# where it is the field; the settings tests set variables through env_name() instead.
 _BARE = rf"(?<![A-Za-z0-9_}}])(?:{'|'.join(field.upper() for field in URL_FIELDS)})(?![A-Za-z0-9_])"
 # Settings match names in any case, so outside Python any case is reported (review
 # finding test-2). In Python the lower-case spelling is the field itself.
@@ -368,7 +370,10 @@ def _start_without_binding(monkeypatch: pytest.MonkeyPatch) -> list[Settings]:
 
 @pytest.mark.usefixtures("restore_logging")
 def test_entry_point_with_an_old_dotenv(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, settings: Settings
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    settings: Settings,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     # Review finding test-5: a .env from before M1 PR 3, through `python -m app` itself.
     # It starts, and serves the default URLs.
@@ -383,6 +388,10 @@ def test_entry_point_with_an_old_dotenv(
     assert [(s.database_url, s.migration_database_url) for s in served] == [
         (settings.database_url, settings.migration_database_url)
     ]
+    # Dropped without a word: the entry point does not read the file's names or values
+    # (review finding test-r3).
+    err = capsys.readouterr().err
+    assert "ignored" not in err and NOT_ECHOED not in err, err
     # Control: the same file with the prefixed names is read, and refused.
     (tmp_path / ".env").write_text("".join(f"{branding.SLUG.upper()}_{line}" for line in lines))
     with pytest.raises(ValidationError):
@@ -395,13 +404,17 @@ def test_ignored_url_notices() -> None:
     environ = {
         bare: _old_url(names.APP_ROLE),
         migration.lower(): _old_url(names.MIGRATOR_ROLE),
+        bare.title(): _old_url(names.APP_ROLE),
         env_name(URL_FIELDS[0]): loopback_database_url(names.APP_ROLE),
         "HOST": ALL_INTERFACES,
         f"X{bare}": "x",
     }
     notices = ignored_url_notices(environ)
-    assert len(notices) == 2, notices
-    assert [bare in notices[0], migration.lower() in notices[1]] == [True, True], notices
+    # Each names the variable as set (sorted); the tail names the prefixed ones for all
+    # (review finding test-r1: the bare name is inside the prefixed one, so the head is
+    # what pins it).
+    heads = [notice.split(", but ", 1)[0] for notice in notices]
+    assert heads == [f"ignored: {name} is set" for name in (bare, bare.title(), migration.lower())]
     for notice in notices:
         assert all(env_name(field) in notice for field in URL_FIELDS), notice
         assert NOT_ECHOED not in notice and "192.0.2.1" not in notice, notice
