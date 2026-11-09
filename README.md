@@ -10,7 +10,7 @@ Status: M0, the local foundation, closes with PR 9; its report, with what is sha
 
 ## Local database
 
-`make up` starts PostgreSQL 17 with pgvector in Docker Compose, `make migrate` applies `db/migrations` as the migration role, and `make test` needs both. The database uses trust auth for all connections into the container, reachable only through a 127.0.0.1 publish (port 55432): a local convenience for synthetic data. Azure is Entra-only from M3. On Linux, use Docker Engine 28 or later; earlier engines expose localhost-published ports to the local network segment. To see the server, run `docker compose exec db psql -U postgres -d sitrep -c 'SELECT version()'` (PostgreSQL 17.11). Roles and migrations: ADR 0008 and `docs/runbooks/local-setup.md`. The four tables (`advisors`, `mandates`, `documents`, `chunks`) have row-level security, forced on their owner too: the app role sees an advisor's rows only inside a transaction that names that advisor, and zero rows otherwise. The residual risk (a forged `set_config` through SQL injection) and its mitigations are in `docs/threat-model.md`.
+`make up` starts PostgreSQL 17 with pgvector in Docker Compose, `make migrate` applies `db/migrations` as the migration role, and `make test` needs both (and the embedding model, below). The database uses trust auth for all connections into the container, reachable only through a 127.0.0.1 publish (port 55432): a local convenience for synthetic data. Azure is Entra-only from M3. On Linux, use Docker Engine 28 or later; earlier engines expose localhost-published ports to the local network segment. To see the server, run `docker compose exec db psql -U postgres -d sitrep -c 'SELECT version()'` (PostgreSQL 17.11). Roles and migrations: ADR 0008 and `docs/runbooks/local-setup.md`. The four tables (`advisors`, `mandates`, `documents`, `chunks`) have row-level security, forced on their owner too: the app role sees an advisor's rows only inside a transaction that names that advisor, and zero rows otherwise. The residual risk (a forged `set_config` through SQL injection) and its mitigations are in `docs/threat-model.md`.
 
 ## Harness interfaces (M0)
 
@@ -19,6 +19,10 @@ Status: M0, the local foundation, closes with PR 9; its report, with what is sha
 ## Synthetic corpus (M0)
 
 `make data` regenerates the synthetic corpus into `data/synthetic/out/` (git-ignored), offline, from the standard library, branding and a fixed seed, so two runs give the same bytes: three advisors, 40 mandates (the Weber family among Alice's 14), and per mandate a KYC profile, a portfolio report, call notes and mailbox e-mails, plus six global product sheets, about 70 % German. Each document carries its origin and trust, set from its type: the mailbox is always untrusted. No IBAN, phone number, street address or domain outside `feistel.example`, and no attack content; the loader is M1. Details: `docs/runbooks/local-setup.md`, "The synthetic corpus (M0)".
+
+## Embedding model (M1)
+
+`make model` downloads the three pinned files of `intfloat/multilingual-e5-small` (about 490 MB) from Hugging Face into the git-ignored `models/` and checks each sha256; `make test` needs it, as it needs the database. The embedder runs on the CPU in onnxruntime and loads only bytes whose hash matches, after a check of the ONNX graph that refuses external data and non-standard operators; nothing downloads at runtime. Passages are cut with the model's own tokenizer to 400 tokens or fewer. ADR 0005; details in `docs/runbooks/local-setup.md`, "The embedding model (M1)".
 
 ## Dev login (M0)
 

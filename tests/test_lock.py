@@ -173,6 +173,62 @@ def test_planted_violations() -> None:
     ]
 
 
+# tokenizers requires huggingface-hub for Tokenizer.from_pretrained() alone, which app/
+# never calls. pyproject.toml excludes it (uv's exclude-dependencies), so the lock holds
+# neither the Hub client nor the HTTP stack under it, and nothing installs them (ADR 0005,
+# M1 PR 4). The packages it would bring, at the time of the decision:
+EXCLUDED = "huggingface-hub"
+HUB_STACK = frozenset(
+    {EXCLUDED, "fsspec", "hf-xet", "httpcore2", "httpx2", "httpx2-jsfetch", "tqdm", "truststore"}
+)
+
+
+def excluded_problems(lock: dict[str, Any]) -> list[str]:
+    """One line per way the lock could install the Hub client."""
+    excludes = lock.get("manifest", {}).get("excludes", [])
+    problems = [] if excludes == [EXCLUDED] else [f"manifest excludes {excludes!r}"]
+    for package in lock.get("package", []):
+        name = package.get("name")
+        if name in HUB_STACK:
+            problems.append(f"{name} is in the lock")
+        problems += [
+            f"{name} requires {dependency.get('name')}"
+            for dependency in package.get("dependencies", [])
+            if dependency.get("name") in HUB_STACK
+        ]
+    return problems
+
+
+def test_the_hub_client_is_excluded() -> None:
+    lock = tomllib.loads(LOCK.read_text(encoding="utf-8"))
+    problems = excluded_problems(lock)
+    assert not problems, "uv.lock:\n" + "\n".join(problems)
+    # Non-vacuity: the package that requires it upstream is in the lock.
+    assert any(package["name"] == "tokenizers" for package in lock["package"])
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pyproject["tool"]["uv"]["exclude-dependencies"] == [EXCLUDED]
+
+
+def test_planted_hub_entries() -> None:
+    manifest = {"excludes": [EXCLUDED]}
+    good = {"manifest": manifest, "package": [{"name": "tokenizers"}]}
+    assert excluded_problems(good) == []
+    planted = {
+        "package": [
+            {"name": "tokenizers", "dependencies": [{"name": EXCLUDED}]},
+            {"name": "hf-xet"},
+        ]
+    }
+    assert excluded_problems(planted) == [
+        "manifest excludes []",
+        f"tokenizers requires {EXCLUDED}",
+        "hf-xet is in the lock",
+    ]
+    assert excluded_problems({"manifest": {"excludes": ["other"]}, "package": []}) == [
+        "manifest excludes ['other']"
+    ]
+
+
 def test_planted_project_entries() -> None:
     # The project's own entry skips the per-file checks, so it must be exactly
     # one editable entry with nothing to download.

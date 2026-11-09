@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from types import MappingProxyType
 
 __all__ = (
+    "CHUNK_TOKENS",
     "DIM",
     "FILES",
     "MAX_TOKENS",
@@ -26,11 +27,15 @@ DIM = 384  # hidden_size in config.json
 # The embedder adds these; e5 was trained with them and degrades without.
 QUERY_PREFIX = "query: "
 PASSAGE_PREFIX = "passage: "
-MAX_TOKENS = 512  # max_position_embeddings; chunks stay at 400 tokens or fewer (ADR 0005)
+MAX_TOKENS = 512  # max_position_embeddings: the embedder refuses a longer input
+# A stored passage, PASSAGE_PREFIX and the special tokens included, counts at most this
+# many tokens of the model's own tokenizer (app/embeddings/chunking.py; ADR 0005).
+CHUNK_TOKENS = 400
 
 # Path in the model repository at REVISION -> sha256 of its content. Only these
-# files are downloaded, and each is checked before every load (M1). The two ONNX
-# runtime files are git LFS objects: their sha256 is the LFS oid at REVISION.
+# files are downloaded (`make model`), and each is checked before every load
+# (app/embeddings/model_files.py). The two ONNX runtime files are git LFS objects:
+# their sha256 is the LFS oid at REVISION, and the downloaded bytes match it.
 FILES: Mapping[str, str] = MappingProxyType(
     {
         "config.json": "69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959",

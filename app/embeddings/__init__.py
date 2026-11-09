@@ -1,1 +1,1 @@
-"""Embeddings (ADR 0005): the Embedder interface and the fake that stands in until M1."""
+"""Embeddings (ADR 0005): the Embedder interface, the real ONNX embedder, and the fake."""

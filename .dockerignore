@@ -11,6 +11,8 @@
 .git
 .claude
 data/synthetic/out
+# The embedding model (make model): the image carries none in M1 (plan, "Left out").
+models
 tests
 # The dev login shim never ships (ADR 0009); `make docker-build` checks the image.
 app/auth/dev_shim.py

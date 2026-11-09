@@ -277,6 +277,10 @@ SEQUENCE = (
     "make docker-build",
     "make web-test",
 )
+# M1 PR 4: `make test` needs the embedding model (tests/embeddings fails, never skips,
+# without it), so the runbook's block runs `make model` before `make test`. M1's close
+# (PR 18) pins the block to the M1 plan's sequence instead.
+RUNBOOK_SEQUENCE = (*SEQUENCE[:2], "make model", *SEQUENCE[2:])
 
 
 def read(path: Path) -> str:
@@ -313,7 +317,8 @@ def fresh_clone_problems(runbook: str, sequence: list[str]) -> list[str]:
 def test_fresh_clone_block() -> None:
     sequence = verification_sequence(read(PLAN))
     assert sequence == list(SEQUENCE), f"the plan's fresh-clone line is {sequence}"
-    problems = fresh_clone_problems(read(RUNBOOK), sequence)
+    assert RUNBOOK_SEQUENCE.index("make model") < RUNBOOK_SEQUENCE.index("make test")
+    problems = fresh_clone_problems(read(RUNBOOK), list(RUNBOOK_SEQUENCE))
     assert not problems, "runbook:\n" + "\n".join(problems)
 
 

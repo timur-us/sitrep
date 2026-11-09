@@ -5,6 +5,8 @@ description = "Advisor copilot for a fictional private bank, built on synthetic 
 requires-python = "==3.12.*"
 dependencies = [
     "fastapi==0.159.1",
+    "numpy==2.5.4",
+    "onnxruntime==1.31.1",
     "opentelemetry-api==1.45.1",
     "opentelemetry-instrumentation-fastapi==0.66b1",
     "opentelemetry-sdk==1.45.1",
@@ -13,6 +15,7 @@ dependencies = [
     "pydantic==2.14.1",
     "pydantic-settings==2.16.1",
     "starlette==1.9.0",
+    "tokenizers==0.23.3",
     "uvicorn==0.54.0",
 ]
 
@@ -36,6 +39,11 @@ required-version = ">=0.13.5,<0.14"
 # Minimum release age: nothing uploaded in the last 7 days is resolved. uv stores
 # the span in uv.lock (exclude-newer-span = "P7D"), so the lock does not go stale.
 exclude-newer = "7 days"
+# tokenizers requires huggingface-hub for Tokenizer.from_pretrained() alone, which
+# app/ never calls (tests/test_import_allowlist.py bans it). Excluding it keeps the Hub
+# client and its HTTP stack out of the lock, so nothing installed can download a model
+# (ADR 0005, amended in M1 PR 4; tests/test_lock.py).
+exclude-dependencies = ["huggingface-hub"]
 
 [tool.uv.build-backend]
 module-name = "app"

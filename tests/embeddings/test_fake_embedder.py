@@ -1,6 +1,7 @@
 """The fake embedder has the real model's shape and cannot be mistaken for it (plan PR 6).
 
-FakeEmbedder stands in for intfloat/multilingual-e5-small until M1 (ADR 0005): DIM
+FakeEmbedder stands in for intfloat/multilingual-e5-small in tests that load no model
+(ADR 0005; the real one is app/embeddings/onnx.py): DIM
 dimensions, unit length, the query and passage prefixes applied inside, deterministic
 from a hash of the prefixed text (not Python's hash(), which changes per process). Its
 model id starts with "fake/" and its revision is "fake", and both are stored with every

@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Timur, 2026-10-28, in the M0 plan).
+Accepted (Timur, 2026-10-28, in the M0 plan); the M1 PR 4 amendment is Proposed.
 
 ## Date
 
@@ -33,10 +33,19 @@ SITREP (situation report) retrieves from German and English documents; the synth
 - **Model:** e5-small at a pinned commit, 384 dimensions, `query: ` and `passage: ` prefixes added by the embedder, a 512-token cap with chunks of 400 tokens or fewer.
 - **Licence:** MIT in the card metadata only; the repository has no LICENSE file.
 - **Runtime:** onnxruntime plus `tokenizers`, with `onnx/model.onnx` (fp32, 470.3 MB) and `onnx/tokenizer.json` (17.1 MB).
-- **Supply chain:** only the files in `FILES` are fetched, and each is checked against its sha256 before every load. `HF_HUB_OFFLINE=1` at runtime. Model id and revision are stored with every vector.
+- **Supply chain:** only the files in `FILES` are fetched, and each is checked against its sha256 before every load. No download at runtime. Model id and revision are stored with every vector.
 - **Anchor:** the model's `config.json` at the revision is committed as `app/config/embedding_model_config.json`; a test checks its sha256 and that `hidden_size` equals `DIM`.
 - **Evals:** recordings compare vectors with a tolerance, not byte for byte.
-- **CI in M1:** an anonymous `make model` step outside pytest, verified against `FILES`, cached by revision plus manifest hash. That `ci.yml` change needs Timur's yes.
+
+### Amendment (M1 PR 4, 2026-11-08)
+
+It replaces the cached CI step, `HF_HUB_OFFLINE=1`, the unmeasured-speed and LFS-oid caveats, and the loader's Watch item:
+- **CI:** `make model` in `lint-test`, uncached; past three minutes, a sha256-verified cache (default 6).
+- **Loading:** verified bytes, never a path, after a protobuf walk refuses external data and non-standard domains; CPU only.
+- **No Hub client** in the lock; `from_pretrained` banned.
+- **Chunks:** `chunk_tokens` at most, prefix included; nothing is truncated.
+- **Measured:** downloads match the LFS oids; Apple M1: load 1.5 s, about 60 passages/s; same-language queries rank first, German to English third.
+- **granite-r2** waits for M2.
 
 ```yaml
 model_id: intfloat/multilingual-e5-small
@@ -45,6 +54,7 @@ dim: 384
 query_prefix: "query: "
 passage_prefix: "passage: "
 max_tokens: 512
+chunk_tokens: 400
 files:
   config.json: 69137736cab8b8903a07fe8afaafdda25aac55415a12a55d1bffa9f581abf959
   onnx/model.onnx: ca456c06b3a9505ddfd9131408916dd79290368331e7d76bb621f1cba6bc8665
@@ -55,15 +65,16 @@ files:
 
 - **Easier:** the vector column, the fake embedder (PR 6) and the real one agree from day one, and a changed model shows up as a failing test, not as silently worse retrieval.
 - **Harder, recorded honestly:**
-  - CPU speed is unmeasured; M1 benchmarks e5-small against granite-r2.
   - The German evidence is public MTEB, not banking text. The plan's German average (64.65 over 7 tasks) was not re-verified here: the leaderboard is an app we could not read.
   - e5's training data includes MS MARCO.
-  - The ONNX sha256 values are git LFS oids from the Hugging Face API, not hashes of a download; `make model` checks the bytes in M1.
-- **Watch:** a new revision means a new ADR-backed change to `FILES`, and re-embedding everything. The M1 loader rejects ONNX external-data paths and custom operator domains.
+  - The graph walk is our own reading of onnx.proto.
+- **Watch:** a new revision means a new ADR-backed change to `FILES`, and re-embedding everything.
 
 ## Sources
 
-- Hugging Face, `intfloat/multilingual-e5-small` model card at the revision, https://huggingface.co/intfloat/multilingual-e5-small/blob/614241f622f53c4eeff9890bdc4f31cfecc418b3/README.md (revision dated 2026-04-02; accessed 2026-10-29).
+- Hugging Face, `intfloat/multilingual-e5-small` model card at the revision, https://huggingface.co/intfloat/multilingual-e5-small/blob/614241f622f53c4eeff9890bdc4f31cfecc418b3/README.md (revision dated 2026-04-02; accessed 2026-10-29; its usage code, `average_pool` and `F.normalize`, re-read 2026-11-08).
+- ONNX, `onnx/onnx.proto` at v1.23.2, field numbers and the default domain (`OperatorSetIdProto.domain`), https://github.com/onnx/onnx/blob/v1.23.2/onnx/onnx.proto (release 2026-10-06; accessed 2026-11-08).
+- uv, settings reference, `exclude-dependencies`, https://docs.astral.sh/uv/reference/settings/ (accessed 2026-11-08).
 - Hugging Face API, file tree and LFS oids at the revision, https://huggingface.co/api/models/intfloat/multilingual-e5-small/tree/614241f622f53c4eeff9890bdc4f31cfecc418b3/onnx (queried 2026-10-29).
 - Wang et al., "Multilingual E5 Text Embeddings: A Technical Report", arXiv:2402.05672, https://arxiv.org/abs/2402.05672 (2024-02-08).
 - Hugging Face, `ibm-granite/granite-embedding-97m-multilingual-r2` at `835ad14087e140460703cf0fae09f97d469d65c2`, https://huggingface.co/ibm-granite/granite-embedding-97m-multilingual-r2 (revision dated 2026-05-18; accessed 2026-10-29).

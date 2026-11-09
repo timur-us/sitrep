@@ -1,6 +1,7 @@
 """The fake embedder: the real model's shape, and a name that cannot pass for it.
 
-FakeEmbedder stands in for the model of app/config/embedding.py until M1. Its vectors
+FakeEmbedder stands in for the model of app/config/embedding.py in tests that load no
+model (the real one is app/embeddings/onnx.py). Its vectors
 have DIM dimensions and unit length, are deterministic (SHAKE-256 of the prefixed text,
 not Python's hash(), which changes per process), and carry no meaning: similar texts get
 unrelated vectors. Its model id is "fake/" plus the real one and its revision is "fake";

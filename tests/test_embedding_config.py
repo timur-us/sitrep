@@ -31,6 +31,7 @@ CONSTANTS = (
     "QUERY_PREFIX",
     "PASSAGE_PREFIX",
     "MAX_TOKENS",
+    "CHUNK_TOKENS",
     "FILES",
 )
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -121,6 +122,8 @@ def test_dim_anchored_to_model() -> None:
     assert 0 < embedding.MAX_TOKENS <= config["max_position_embeddings"], (
         f"MAX_TOKENS {embedding.MAX_TOKENS} outside 1..{config['max_position_embeddings']}"
     )
+    # A stored passage leaves room below the model's cap (ADR 0005: 400 or fewer).
+    assert 0 < embedding.CHUNK_TOKENS <= 400 < embedding.MAX_TOKENS, embedding.CHUNK_TOKENS
 
 
 def test_files_is_read_only() -> None:
@@ -150,12 +153,17 @@ def test_planted_mismatches() -> None:
         QUERY_PREFIX="query: ",
         PASSAGE_PREFIX="passage: ",
         MAX_TOKENS=512,
+        CHUNK_TOKENS=400,
         FILES={"config.json": "b" * 64, "onnx/model.onnx": "c" * 64},
     )
     good = (
         "```yaml\nmodel_id: org/model\nrevision: " + "a" * 40 + "\ndim: 384\n"
         'query_prefix: "query: "\npassage_prefix: "passage: "\nmax_tokens: 512\n'
-        "files:\n  config.json: " + "b" * 64 + "\n  onnx/model.onnx: " + "c" * 64 + "\n```\n"
+        "chunk_tokens: 400\nfiles:\n  config.json: "
+        + "b" * 64
+        + "\n  onnx/model.onnx: "
+        + "c" * 64
+        + "\n```\n"
     )
     assert yaml_mismatches(good, module) == []
 
