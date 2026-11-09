@@ -23,6 +23,9 @@ ALLOWED = frozenset(
         "__future__",
         "app",
         "argparse",
+        # app/main.py sets the loop's exception handler (M1 PR 5); the connecting and
+        # serving calls of asyncio stay banned below.
+        "asyncio",
         "collections",
         "contextlib",
         "dataclasses",

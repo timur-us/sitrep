@@ -150,6 +150,7 @@ def test_settings_names_are_prefixed() -> None:
         f"{prefix}TRACE_PLAINTEXT",
         f"{prefix}DATABASE_URL",
         f"{prefix}MIGRATION_DATABASE_URL",
+        f"{prefix}ALLOWED_HOSTS",
     }
     assert {field: env_name(field) for field in Settings.model_fields} == {
         field: prefix + field.upper() for field in Settings.model_fields

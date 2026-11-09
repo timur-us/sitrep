@@ -122,23 +122,48 @@ LOG_CONFIG: dict = {
 }
 
 
-# Scaffolding for M1 PR 5, inert until the next commit: Python's own hooks.
+# Python's own hooks print an exception whole, message and traceback, to stderr: one in a
+# thread, one that cannot be raised (a __del__, a finaliser), one in an asyncio task that
+# nobody retrieved. These replace them (ADR 0007's Watch item for M1, M1 PR 5): a fixed
+# message on the "app" logger, which RedactFilter guards, with the exception's type and
+# the trace id as fields. No message, no traceback, no exception object on the record,
+# and nothing of the thread, the object or the task (their reprs can carry data).
+HOOK_LOGGER = "app"
 THREAD_MESSAGE = "an unhandled exception in a thread"
 UNRAISABLE_MESSAGE = "an exception that could not be raised"
 ASYNCIO_MESSAGE = "an unhandled exception in an asyncio task"
 
 
-def thread_excepthook(args: object) -> None:
-    threading.__excepthook__(args)  # type: ignore[arg-type]
+def _log_unhandled(message: str, exc: BaseException | None) -> None:
+    trace_id = getattr(exc, TRACE_ID_ATTRIBUTE, None) if exc is not None else None
+    logging.getLogger(HOOK_LOGGER).error(
+        message,
+        extra={
+            "exc_type": exception_type(type(exc)) if exc is not None else None,
+            "trace_id": trace_id or current_trace_id() or NO_TRACE,
+        },
+    )
 
 
-def unraisable_hook(unraisable: object) -> None:
-    sys.__unraisablehook__(unraisable)  # type: ignore[arg-type]
+def thread_excepthook(args: threading.ExceptHookArgs) -> None:
+    # SystemExit in a thread ends it quietly, as threading's own hook does.
+    if args.exc_type is SystemExit:
+        return
+    _log_unhandled(THREAD_MESSAGE, args.exc_value)
+
+
+def unraisable_hook(unraisable: sys.UnraisableHookArgs) -> None:
+    _log_unhandled(UNRAISABLE_MESSAGE, unraisable.exc_value)
 
 
 def asyncio_exception_handler(loop: object, context: dict) -> None:
-    loop.default_exception_handler(context)  # type: ignore[attr-defined]
+    """For loop.set_exception_handler(): the context's message, task and transport are
+    left out; they are reprs."""
+    exc = context.get("exception")
+    _log_unhandled(ASYNCIO_MESSAGE, exc if isinstance(exc, BaseException) else None)
 
 
 def install_exception_hooks() -> None:
-    return None
+    """The process-wide hooks; the asyncio handler is per loop (app/main.py's lifespan)."""
+    threading.excepthook = thread_excepthook
+    sys.unraisablehook = unraisable_hook

@@ -16,6 +16,7 @@ check reads them as the connection will. A rejected value is not echoed in the e
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 
 from psycopg import ProgrammingError
@@ -65,6 +66,30 @@ URL_KEYS = frozenset({"user", "host", "port", "dbname"})
 URL_REQUIRED = URL_KEYS
 # The role each URL must log in as.
 URL_ROLES = {"database_url": names.APP_ROLE, "migration_database_url": names.MIGRATOR_ROLE}
+
+
+# One Host the app answers (M1 PR 5): a lower-case DNS name or a dotted IPv4 address,
+# optionally with a port of 1 to 65535 without a leading zero. The Host header must equal
+# one of them byte for byte; no wildcard, scheme, path, user or IPv6 literal.
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+HOST_ITEM = re.compile(rf"{_LABEL}(?:\.{_LABEL})*(?::[1-9][0-9]{{0,4}})?")
+
+
+def check_allowed_hosts(value: str) -> str:
+    """The allowlist unchanged, or ValueError naming the rule it breaks (never a value).
+    Empty means the default, 127.0.0.1 on the app's port."""
+    if value == "":
+        return value
+    for item in value.split(","):
+        if not HOST_ITEM.fullmatch(item):
+            raise ValueError(
+                "a comma-separated list of lower-case host[:port], without spaces,"
+                " wildcards, schemes or paths"
+            )
+        _, _, port = item.partition(":")
+        if port and int(port) > 65535:
+            raise ValueError("a port must be from 1 to 65535")
+    return value
 
 
 def flag(value: str) -> bool:
@@ -122,6 +147,10 @@ class Settings(BaseSettings):
     # Spans to the console without the allowlist, for local debugging only: refused
     # unless the exporter is the console and the entry point binds 127.0.0.1 (ADR 0007).
     trace_plaintext: str = "0"
+    # The Hosts the app answers, on every route, with or without the dev login (M1 PR 5,
+    # ADR 0009): empty for exactly 127.0.0.1:<port>; the image's smoke test names its
+    # published address, M3 the Azure host. Anything else is 400.
+    allowed_hosts: str = Field(default="", validation_alias=env_name("allowed_hosts"))
 
     @field_validator("database_url", "migration_database_url")
     @classmethod
@@ -137,6 +166,18 @@ class Settings(BaseSettings):
     @property
     def dev_auth_on(self) -> bool:
         return flag(self.dev_auth)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _allowed_hosts(cls, value: str) -> str:
+        return check_allowed_hosts(value)
+
+    @property
+    def allowed_host_values(self) -> tuple[str, ...]:
+        """The Host values the app answers, the default filled in."""
+        if self.allowed_hosts == "":
+            return (f"{LOOPBACK}:{self.port}",)
+        return tuple(self.allowed_hosts.split(","))
 
     @property
     def trace_plaintext_on(self) -> bool:

@@ -56,7 +56,8 @@ def test_the_default_is_loopback_on_the_port(settings: Settings) -> None:
 )
 @pytest.mark.parametrize("path", ROUTES)
 def test_another_host_is_refused_without_the_shim(settings: Settings, host: str, path: str) -> None:
-    response = client(settings, host).get(path)
+    # The header itself: httpx would refuse or normalise some of these in a URL.
+    response = client(settings).get(path, headers={"host": host})
     assert response.status_code == 400, (host, path, response.status_code)
     assert response.text == "Bad Request"
     # The refusal carries the app's headers, and is no redirect.

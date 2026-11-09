@@ -100,21 +100,25 @@ redteam: ## The red-team gate, offline: check the attacks against redteam/gate.t
 data: ## Regenerate the synthetic corpus (fixed seed) into data/synthetic/out/ (git-ignored)
 	uv run python -P -m data.synthetic.generate
 
-docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-root, plaintext and dev login refused
+docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, a foreign Host refused, non-root, plaintext and dev login refused
 	docker build -t $(IMAGE) .
 	@set -eu; \
 	uid="$$(docker run --rm $(IMAGE) id -u)"; \
 	echo "smoke: image runs as uid $$uid"; \
 	test "$$uid" != 0
 	@set -eu; \
-	cid="$$(docker run -d -p 127.0.0.1::8000 $(IMAGE))"; \
+	port="$$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"; \
+	cid="$$(docker run -d -p 127.0.0.1:$$port:8000 -e SITREP_ALLOWED_HOSTS=127.0.0.1:$$port $(IMAGE))"; \
 	trap 'docker rm -f "$$cid" >/dev/null' EXIT; \
 	addr="$$(docker port "$$cid" 8000/tcp)"; \
 	echo "smoke: published on $$addr"; \
-	case "$$addr" in 127.0.0.1:*) ;; *) echo "smoke: not on 127.0.0.1 only"; exit 1;; esac; \
+	test "$$addr" = "127.0.0.1:$$port" || { echo "smoke: not on 127.0.0.1:$$port only"; exit 1; }; \
 	for i in $$(seq 1 40); do \
 	  curl --noproxy '*' -fsS -o /dev/null "http://$$addr/health" 2>/dev/null && break; sleep 0.25; \
 	done; \
+	code="$$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' -H 'Host: 192.0.2.1:8000' "http://$$addr/health")"; \
+	echo "smoke: a foreign Host: $$code"; \
+	test "$$code" = 400; \
 	canary="cnry$$$$$$(date +%s)"; \
 	body="$$(curl --noproxy '*' -fsS -H "X-Canary: $$canary" "http://$$addr/health?q=$$canary")"; \
 	echo "smoke: /health $$body"; \

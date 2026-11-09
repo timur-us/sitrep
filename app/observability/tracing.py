@@ -13,6 +13,7 @@ or baggage header is never adopted.
 
 from __future__ import annotations
 
+import os
 import secrets
 import sys
 from collections.abc import Mapping, Sequence
@@ -69,9 +70,15 @@ OTHER_METHOD = "_OTHER"
 REDACTED_NAME = "redacted"
 
 
+# OpenTelemetry's HTTP instrumentations copy the headers these variables name into span
+# attributes: the allowlist drops them, plaintext would print them (the dev login's
+# session cookie among them). Timur's answer 5 to the PR 7 questions.
+CAPTURE_PREFIX = "OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_"
+
+
 def capture_variables(environ: Mapping[str, str]) -> list[str]:
-    """Scaffolding for M1 PR 5, inert until the next commit."""
-    return []
+    """The names, sorted, of every header-capture variable set in environ, in any case."""
+    return sorted(name for name in environ if name.upper().startswith(CAPTURE_PREFIX))
 
 
 class PlaintextRefused(ValueError):
@@ -222,6 +229,12 @@ def exporter_chain(
     if bind_host != LOOPBACK:
         raise PlaintextRefused(
             f"{PLAINTEXT}=1 is allowed only when the entry point binds 127.0.0.1"
+        )
+    capture = capture_variables(os.environ)
+    if capture:
+        raise PlaintextRefused(
+            f"{PLAINTEXT}=1 is refused while {', '.join(capture)} is set: the spans would"
+            " carry the captured headers, the session cookie among them (ADR 0007)"
         )
     return exporter
 

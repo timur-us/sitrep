@@ -98,7 +98,11 @@ def running(
     monkeypatch.setenv("OTEL_SERVICE_NAME", canary)
 
     memory = InMemorySpanExporter()
-    local = settings.model_copy(update={"port": 0})
+    # The canary Host must reach the routes, so the app allows it (M1 PR 5's Host check;
+    # a foreign Host's refusal is tests/test_host_check.py).
+    local = settings.model_copy(
+        update={"port": 0, "allowed_hosts": f"{canary}.{branding.DOMAINS.canary}"}
+    )
     # Built here, in setup: uvicorn.Config applies the log config, which replaces the
     # root handlers, and pytest adds its capturing handler for the test call afterwards.
     if request.param == "redacted":

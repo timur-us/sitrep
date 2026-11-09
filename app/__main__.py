@@ -33,7 +33,7 @@ from opentelemetry.sdk.trace import TracerProvider
 
 from app.config.settings import LOOPBACK, Settings, env_name, ignored_url_notices
 from app.main import create_app
-from app.observability.logs import LOG_CONFIG
+from app.observability.logs import LOG_CONFIG, install_exception_hooks
 from app.observability.tracing import PlaintextRefused
 
 # Exit code for a configuration the entry point refuses to start with.
@@ -120,6 +120,9 @@ class VerifiedServer(uvicorn.Server):
 
 
 def main(argv: Sequence[str] = ()) -> int:
+    # An exception in a thread or one that cannot be raised logs its type and the trace id
+    # only, not Python's full traceback on stderr (ADR 0007, M1 PR 5).
+    install_exception_hooks()
     # An old, unprefixed URL in the environment is not read: say so, by name (review
     # finding sec-1). One in .env is dropped without a word (the runbook says so).
     for notice in ignored_url_notices(os.environ):
