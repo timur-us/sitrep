@@ -87,7 +87,9 @@ def check_environment(environ: Mapping[str, str]) -> None:
     remove it (ADR 0012; review finding sec-1 of M1 PR 6). Runners that build Settings
     from the environment alone are not affected: only python -m app reads .env.
     """
-    exported = sorted(name for name in environ if name.upper() == KEY_VARIABLE)
+    # Folded as pydantic-settings folds names, lower-case: the Kelvin sign in a name
+    # lower-cases to k and is read as the key (review finding sec-r6).
+    exported = sorted(name for name in environ if name.lower() == KEY_VARIABLE.lower())
     if exported:
         raise StartRefused(
             f"{', '.join(exported)} is set in the environment; python -m app reads the key"

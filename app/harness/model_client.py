@@ -177,8 +177,11 @@ class AnthropicModelClient:
         tools: Sequence[Mapping[str, Any]],
         max_tokens: int,
     ) -> Mapping[str, Any]:
+        if not isinstance(system, str):
+            raise RequestRefused("system must be one text, not blocks")
         check_tools(tools)
         failure: ModelCallError | None = None
+        answer: dict[str, Any] = {}
         try:
             message = self._sdk.messages.create(
                 model=self.model,
@@ -187,10 +190,12 @@ class AnthropicModelClient:
                 tools=tools,  # type: ignore[arg-type]
                 max_tokens=max_tokens,
             )
-            if not _is_message(message):
-                # A 200 that is not JSON comes back as its text (review finding sec-2), and
-                # valid JSON is built leniently into a partial message (test-r2).
+            # Inside the try, without pydantic's serializer warnings: they quote values
+            # and go to stderr past the log redaction (review finding sec-r1).
+            answer = _readable(message)
+            if not answer:
                 failure = ModelCallError("response")
+            del message
         except anthropic.APIError as error:
             failure = _call_error(error)
         except Exception:  # noqa: BLE001 - a body the SDK cannot parse, e.g. invalid JSON
@@ -199,15 +204,18 @@ class AnthropicModelClient:
         # the context: it holds the request (the key's header) and the response body.
         if failure is not None:
             raise failure
-        return message.to_dict(mode="json")
+        return answer
 
 
-def _is_message(message: object) -> bool:
-    """A message the loop can read: a content list and a usage mapping, at least."""
+def _readable(message: object) -> dict[str, Any]:
+    """The message as a mapping, or {} for one the loop cannot read: a 200 that is not
+    JSON comes back as its text (review finding sec-2); valid JSON without a content list
+    or a usage mapping (test-r2). Strict validation in the factory refuses wrong types."""
     if not isinstance(message, anthropic.types.Message):
-        return False
-    fields = message.to_dict(mode="json")
-    return isinstance(fields.get("content"), list) and isinstance(fields.get("usage"), dict)
+        return {}
+    fields = message.to_dict(mode="json", warnings=False)
+    readable = isinstance(fields.get("content"), list) and isinstance(fields.get("usage"), dict)
+    return fields if readable else {}
 
 
 def check_tools(tools: Sequence[Mapping[str, Any]]) -> None:
@@ -267,8 +275,31 @@ def build_model_client(
         timeout=timeout,
         http_client=http_client,
         open_telemetry={"traces": False, "propagation": False},
+        # A body that does not fit the SDK's types raises APIResponseValidationError
+        # ("response") instead of being built leniently; an unknown content-block type
+        # fails closed too (review finding sec-r1).
+        _strict_response_validation=True,
     )
     return AnthropicModelClient(sdk, settings.model)
+
+
+# The usage fields of anthropic 2.3.0's Usage type. Another field is not priced at zero
+# (review finding sec-r4): output_tokens_details only breaks down output_tokens.
+USAGE_KEYS = frozenset(
+    {
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation",
+        "inference_geo",
+        "output_tokens_details",
+        "server_tool_use",
+        "service_tier",
+        "speed",
+    }
+)
+CACHE_CREATION_KEYS = frozenset({"ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"})
 
 
 def _count(usage: Mapping[str, Any], key: str) -> int:
@@ -285,6 +316,8 @@ def cost_usd(model: str, usage: Mapping[str, Any]) -> Decimal:
     price = PRICES.get(model)
     if price is None:
         raise PriceUnknown("no price for this model")
+    if not set(usage) <= USAGE_KEYS:
+        raise PriceUnknown("a usage field the table does not know")
     # The table prices the standard tier and speed, without server tools (review finding
     # sec-6): priority, batch and fast are priced differently, server tools per request.
     if usage.get("service_tier") not in (None, "standard"):
@@ -303,8 +336,8 @@ def cost_usd(model: str, usage: Mapping[str, Any]) -> Decimal:
     written = _count(usage, "cache_creation_input_tokens")
     breakdown = usage.get("cache_creation")
     if breakdown:
-        if not isinstance(breakdown, Mapping):
-            raise PriceUnknown("cache_creation is not a breakdown")
+        if not isinstance(breakdown, Mapping) or not set(breakdown) <= CACHE_CREATION_KEYS:
+            raise PriceUnknown("cache_creation is not a breakdown the table knows")
         write_5m = _count(breakdown, "ephemeral_5m_input_tokens")
         write_1h = _count(breakdown, "ephemeral_1h_input_tokens")
         if write_5m + write_1h != written:
