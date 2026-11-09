@@ -59,11 +59,11 @@ sdk_loggers_min_level: INFO
   - An exported `ANTHROPIC_*` refuses start until unset.
   - Seven packages enter the lock (`httpx2`, `httpcore2`, `truststore`, `jiter` among them).
   - We rely on SDK internals (`open_telemetry=`, `DefaultHttpxClient`, the DEBUG records); tests read the source, yet an upgrade can change them.
-  - The logger hold is process-wide, and code that lowers a logger later is not stopped.
+  - The logger hold is process-wide; a logger lowered later stays lowered.
   - Without retries a 429 or 529 fails the call until the loop (PR 10) retries.
   - Prices are by hand; a priority, batch, fast or server-tool response cannot be priced.
   - Answers arrive whole, within 120 seconds.
-- **Watch:** every SDK upgrade, through the source scans; Haiku 5.5's prompt-length tiers (M2); the trusted TLS roots, the OS store on macOS; EU-only inference (ADR 0003); streaming.
+- **Watch:** SDK upgrades (the source scans); Haiku 5.5's tiers (M2); TLS roots, the OS store on macOS; how M3 passes the key, since an exported one is refused; EU-only inference; streaming.
 
 ## Sources
 
