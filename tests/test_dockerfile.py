@@ -13,7 +13,7 @@ import tomllib
 
 from repo_files import ROOT
 
-from app.config.settings import env_name
+from app.config.settings import Settings, env_name
 
 SHIM = "app/auth/dev_shim.py"
 DOCKERFILE = ROOT / "Dockerfile"
@@ -150,7 +150,8 @@ def test_runtime_stage() -> None:
     assert env.get(env_name("host")) == "0.0.0.0", env  # noqa: S104 - the container's own
     plaintext = env_name("trace_plaintext")
     assert plaintext not in env or env[plaintext] == "0", env
-    stale = sorted({"HOST", "PORT", "DEV_AUTH", "TRACE_PLAINTEXT"} & env.keys())
+    # Any setting under its bare name, in any case (review finding sec-4).
+    stale = sorted(name for name in env if name.lower() in Settings.model_fields)
     assert not stale, f"unprefixed settings in the image: {stale}"
 
     cmds = [arguments for keyword, arguments in runtime if keyword == "CMD"]

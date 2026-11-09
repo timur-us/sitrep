@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Timur, 2026-10-28, plan question 13: a cookie with server-side sessions; the `SITREP_` prefix on 2026-10-29, PR 3 review sec-7). Built in M0 PR 7.
+Accepted (Timur, 2026-10-28, plan question 13: a cookie with server-side sessions; the `SITREP_` prefix on 2026-10-29, PR 3 review sec-7). Built in M0 PR 7. Database URLs prefixed in M1 PR 3 (Timur, 2026-11-08, answer 1 to the PR 7 questions).
 
 ## Date
 
@@ -26,7 +26,7 @@ The last option, `app/auth/dev_shim.py`:
 - **Browser defences.** The TCP peer must be `127.0.0.1` (403), whoever serves the app. Host is exactly `127.0.0.1:<port>`, otherwise 400. Every method but GET needs `Origin: http://127.0.0.1:<port>` exactly, and `Sec-Fetch-Site: same-origin` when sent, otherwise 403. The login page sets its referrer policy to `same-origin`: under the app's `no-referrer`, a browser sends `Origin: null` even on a same-origin POST.
 - **Sessions.** `POST /dev/login` with the form Content-Type and exactly `advisor=<id>`, advisors only. The cookie is `<id>.<HMAC-SHA256>` under a key drawn per app instance: HttpOnly, SameSite=Strict, Path=/. Logout and a new login end the session. Two session cookies count as none.
 - **Identity.** The middleware attaches an issued `VerifiedAdvisor` to the ASGI scope; `current_advisor()` reads that and nothing else. Without the shim, routes that need it answer 401.
-- **Settings.** `SITREP_HOST`, `SITREP_PORT`, `SITREP_DEV_AUTH`, `SITREP_TRACE_PLAINTEXT`. The database URLs keep their names for now.
+- **Settings.** `SITREP_HOST`, `SITREP_PORT`, `SITREP_DEV_AUTH`, `SITREP_TRACE_PLAINTEXT`, and since M1 PR 3 `SITREP_DATABASE_URL` and `SITREP_MIGRATION_DATABASE_URL`. Unprefixed names are ignored, never refused.
 
 ## Consequences
 
@@ -37,11 +37,10 @@ The last option, `app/auth/dev_shim.py`:
   - Sessions never expire, and the store is unbounded (kept in M0). Two session cookies end neither session.
   - Plaintext traces with OpenTelemetry's header capture print the session cookie; M1 refuses that.
   - Without the shim, no Host check runs; M1 adds one.
-  - The database URLs get the prefix in M1's first infrastructure PR (PR 5a review sec-11).
 
 ## Sources
 
-- Timur's answers to the PR 7 questions (the last four Watch items), `docs/plans/m0-foundation.md`, amendment recorded in PR 9 (2026-11-08).
+- Timur's answers to the PR 7 questions (the last three Watch items; answer 1, the database URLs, built in M1 PR 3, `docs/plans/m1-mvp-core.md`), `docs/plans/m0-foundation.md`, amendment recorded in PR 9 (2026-11-08).
 - `docs/plans/m0-foundation.md`, "Dev shim" and PR 7 (2026-10-28).
 - PR 3 review findings sec-1 (Host allowlist) and sec-7 (prefix), https://github.com/timur-us/sitrep/pull/5 (2026-10-29).
 - Fetch Standard, "Serializing a request origin" (no-referrer gives `null` for non-GET requests), https://fetch.spec.whatwg.org/ (read 2026-11-04; measured in `tests/web/test_dev_login.py`).

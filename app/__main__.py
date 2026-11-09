@@ -4,8 +4,9 @@ uvicorn runs without an access log (it would log paths and query strings), witho
 trusting proxy headers, without a server header, and with the redacting log config.
 
 Settings are named here by their fields (host, port, dev_auth, trace_plaintext); each is
-read from a variable with the product prefix (env_name(), ADR 0009). The entry point
-refuses to start, with exit code 2 and before it binds anything:
+read from a variable with the product prefix (env_name(), ADR 0009). An unprefixed
+database URL variable in the environment is named on stderr as ignored, never with its
+value. The entry point refuses to start, with exit code 2 and before it binds anything:
 - any command-line argument, --uds and --fd included, with or without the dev login:
   the bind is the host and port settings, on TCP only;
 - trace_plaintext at "1" anywhere but 127.0.0.1 (ADR 0007);
@@ -23,13 +24,14 @@ the host it was validated for through create_app(bind_host=...).
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Sequence
 
 import uvicorn
 from opentelemetry.sdk.trace import TracerProvider
 
-from app.config.settings import LOOPBACK, Settings, env_name
+from app.config.settings import LOOPBACK, Settings, env_name, ignored_url_notices
 from app.main import create_app
 from app.observability.logs import LOG_CONFIG
 from app.observability.tracing import PlaintextRefused
@@ -118,6 +120,10 @@ class VerifiedServer(uvicorn.Server):
 
 
 def main(argv: Sequence[str] = ()) -> int:
+    # An old, unprefixed URL in the environment is not read: say so, by name (review
+    # finding sec-1). One in .env is dropped without a word (the runbook says so).
+    for notice in ignored_url_notices(os.environ):
+        print(notice, file=sys.stderr)
     settings = Settings(_env_file=".env")
     try:
         check_start(settings, argv)

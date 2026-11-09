@@ -16,6 +16,8 @@ check reads them as the connection will. A rejected value is not echoed in the e
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from psycopg import ProgrammingError
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field, ValidationInfo, field_validator
@@ -26,15 +28,33 @@ from app.db import names
 
 LOOPBACK = "127.0.0.1"
 # Every setting is read from a variable with the slug as prefix (ADR 0009), so a
-# shell's own HOST (tcsh exports one) cannot move the bind. The database URLs keep their
-# names: libpq's conventions, and the prefix for them is an open question for Timur.
+# shell's own HOST (tcsh exports one) cannot move the bind. The database URLs too, since
+# M1 PR 3 (Timur's answer 1 to the PR 7 questions): a URL exported for another tool
+# under the bare name is ignored, never refused, and never connected to.
 ENV_PREFIX = f"{branding.SLUG.upper()}_"
-UNPREFIXED = frozenset({"database_url", "migration_database_url"})
 
 
 def env_name(field: str) -> str:
     """The environment variable a settings field is read from."""
-    return field.upper() if field in UNPREFIXED else ENV_PREFIX + field.upper()
+    return ENV_PREFIX + field.upper()
+
+
+# The fields renamed in M1 PR 3. Their old names may still be exported for this project,
+# so the entry points say they are ignored. HOST and the other M0 names are not
+# reported: shells export HOST for themselves.
+RENAMED = ("database_url", "migration_database_url")
+
+
+def ignored_url_notices(environ: Mapping[str, str]) -> list[str]:
+    """One notice per unprefixed database URL variable set in environ, in any case
+    (review finding sec-1): the name as set, and the names that are read. Never a value.
+    """
+    read = " and ".join(env_name(field) for field in RENAMED)
+    return [
+        f"ignored: {name} is set, but the database URLs are read from {read} only (ADR 0009)"
+        for name in sorted(environ)
+        if name.lower() in RENAMED
+    ]
 
 
 # compose.yaml publishes the database here: not 5432, where a native PostgreSQL may listen.
@@ -84,8 +104,8 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,
     )
 
-    # The app connects as the app role; the migration runner as the migrator. An alias
-    # replaces the prefix (env_name()).
+    # The app connects as the app role; the migration runner as the migrator. The alias
+    # is the prefixed name (env_name()), so a refusal names the variable, not the field.
     database_url: str = Field(
         default=loopback_database_url(names.APP_ROLE), validation_alias=env_name("database_url")
     )

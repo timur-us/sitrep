@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Timur, 2026-10-28, in the M0 plan; recorded and amended by its review in M0 PR 5a; completed in PR 5b).
+Accepted (Timur, 2026-10-28, in the M0 plan; recorded and amended by its review in M0 PR 5a; completed in PR 5b; URLs prefixed in M1 PR 3, Timur 2026-11-08).
 
 ## Date
 
@@ -20,10 +20,10 @@ SITREP (situation report) keeps every advisor's mandates in one PostgreSQL datab
 
 ## Decision
 
-The third option: roles and runner in PR 5a; tables, policies and pool in PR 5b.
+The third option.
 
 - **Driver:** `psycopg[binary]` 3.3.6, bundling libpq 18. Only `app/db/connect.py` opens connections.
-- **URLs**, parsed by libpq's `conninfo_to_dict`: exactly `user`, `host` (`127.0.0.1`, one host), `port` and `dbname`, all required, nothing else. `DATABASE_URL` logs in as the app role, `MIGRATION_DATABASE_URL` as the migrator, both to `sitrep`. Values are never echoed.
+- **URLs**, parsed by libpq's `conninfo_to_dict`: exactly `user`, `host` (`127.0.0.1`, one host), `port` and `dbname`, all required, nothing else. `SITREP_DATABASE_URL` logs in as the app role, `SITREP_MIGRATION_DATABASE_URL` as the migrator, both to `sitrep`; the bare names are ignored. Values are never echoed.
 - **`connect()`** refuses while any `PG*` variable is set (libpq would fill or override parameters from them), takes no connection parameter as a keyword, and pins `hostaddr` and `options`.
 - **Roles** (`db/init/00-roles.sql`, every attribute written out):
   - `sitrep_owner`: NOLOGIN; owns the database, the schemas and everything in them;
@@ -55,3 +55,4 @@ The third option: roles and runner in PR 5a; tables, policies and pool in PR 5b.
 - PostgreSQL 17 documentation, `GRANT` (membership options `INHERIT` and `SET`) and libpq's environment variables, https://www.postgresql.org/docs/17/. The behaviour relied on here is measured in `tests/db/` on `pgvector/pgvector:0.8.7-pg17-bookworm` (PostgreSQL 17.11) with psycopg 3.3.6 and libpq 18 (2026-10-30).
 - psycopg 3.3.6 on PyPI, uploaded 2026-09-18, https://pypi.org/project/psycopg/ (lock resolved 2026-10-30).
 - psycopg-pool 3.3.3 on PyPI, uploaded 2026-09-22, https://pypi.org/project/psycopg-pool/ (locked 2026-10-31); its `pool.py` read for how `connection_class`, `configure` and `check` are called.
+- Timur's answer 1 to the PR 7 questions (the `SITREP_` prefix for both URLs), `docs/plans/m0-foundation.md`, amendment recorded in PR 9 (2026-11-08); built in M1 PR 3, `docs/plans/m1-mvp-core.md` (2026-11-08).

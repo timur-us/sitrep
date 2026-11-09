@@ -3,8 +3,8 @@
 The pool is lazy: opening it in the lifespan connects nobody, and a connection is made
 when a request first needs one. So a database that is down, or slow to start, never
 keeps the app from serving the routes that need none. A real uvicorn server from
-server_config() runs in a thread, with DATABASE_URL on a loopback port where nothing
-listens.
+server_config() runs in a thread, with the app's database URL on a loopback port where
+nothing listens.
 """
 
 from __future__ import annotations
