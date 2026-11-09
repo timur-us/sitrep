@@ -12,7 +12,12 @@ value. The entry point refuses to start, with exit code 2 and before it binds an
 - trace_plaintext at "1" anywhere but 127.0.0.1 (ADR 0007);
 - dev_auth at "1" (the dev login, ADR 0009) unless the host is exactly 127.0.0.1 and
   the port is not 0, and unless app.auth.dev_shim can be imported (the image leaves it
-  out).
+  out);
+- PYDANTIC_SETTINGS_DEBUG set, in any case, whatever its value: Settings refuses to read
+  anything (M1 PR 6, review finding sec-3 of PR 3);
+- any model SDK variable but the key, and a model without a price (the model client's
+  check_start(), ADR 0012). Without a key the app starts: the model client is built
+  only when a route needs it.
 
 It always binds through uvicorn.Config.bind_socket() and hands the socket to the
 server, with the dev login off too, so uvicorn never binds on its own. With
@@ -31,7 +36,14 @@ from collections.abc import Sequence
 import uvicorn
 from opentelemetry.sdk.trace import TracerProvider
 
-from app.config.settings import LOOPBACK, Settings, env_name, ignored_url_notices
+from app.config.settings import (
+    LOOPBACK,
+    Settings,
+    SettingsRefused,
+    env_name,
+    ignored_url_notices,
+)
+from app.harness import model_client
 from app.main import create_app
 from app.observability.logs import LOG_CONFIG
 from app.observability.tracing import PlaintextRefused
@@ -124,11 +136,17 @@ def main(argv: Sequence[str] = ()) -> int:
     # finding sec-1). One in .env is dropped without a word (the runbook says so).
     for notice in ignored_url_notices(os.environ):
         print(notice, file=sys.stderr)
-    settings = Settings(_env_file=".env")
     try:
+        settings = Settings(_env_file=".env")
         check_start(settings, argv)
+        model_client.check_start(settings, os.environ)
         config = server_config(settings)
-    except (StartRefused, PlaintextRefused) as refused:
+    except (
+        StartRefused,
+        PlaintextRefused,
+        SettingsRefused,
+        model_client.ModelClientRefused,
+    ) as refused:
         print(f"refused to start: {refused}", file=sys.stderr)
         return REFUSED
     sock = config.bind_socket()

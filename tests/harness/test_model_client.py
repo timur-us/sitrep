@@ -275,8 +275,8 @@ def test_the_entry_point_starts_with_a_key_and_no_sdk_variable(
 
 def _echo_key(request: httpx2.Request) -> httpx2.Response:
     # A hostile or broken server that sends the key back in its error.
-    echoed = request.headers.get("x-api-key", "")
-    error = {"type": "authentication_error", "message": f"invalid x-api-key {echoed}"}
+    echoed = request.headers.get("authorization", "")
+    error = {"type": "authentication_error", "message": f"invalid credentials {echoed}"}
     return httpx2.Response(401, json={"type": "error", "error": error}, headers={"x": echoed})
 
 
@@ -296,9 +296,9 @@ def test_the_key_reaches_no_repr_log_span_or_error(
         span.record_exception(failed.value)
     error = failed.value
 
-    # Control: the key was sent, as the header the API reads, so its absence below means
-    # something.
-    assert [request.headers.get("x-api-key") for request in recorder.requests] == [key]
+    # Control: the key was sent, as the header anthropic 2.3.0 sends it, so its absence
+    # below means something.
+    assert [r.headers.get("authorization") for r in recorder.requests] == [f"Bearer {key}"]
     assert (error.kind, error.status_code) == ("status", 401)
     texts = {
         "repr(settings)": repr(keyed),
@@ -320,20 +320,37 @@ def test_the_key_reaches_no_repr_log_span_or_error(
     assert len(exporter.get_finished_spans()) == 1
 
 
-def test_a_prompt_reaches_no_log_at_the_apps_level(
+def test_a_prompt_reaches_no_log_under_a_debug_root(
     keyed: Settings, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The app logs at INFO (LOG_CONFIG). At DEBUG the SDK logs its request options, the
-    # prompt included: the control shows that, so the INFO check can fail.
+    # The root logger at DEBUG: the SDK's loggers stay at INFO, so neither the request
+    # options (the prompt) nor the response headers are logged.
     prompt = canary("prompt")
+    caplog.set_level(logging.DEBUG)
     client = build_model_client(keyed, transport=Recorder().transport())
-    with caplog.at_level(logging.INFO):
-        ask(client, prompt)
+    ask(client, prompt)
     assert prompt not in caplog.text + "".join(repr(r.args) for r in caplog.records)
+    assert all(
+        logging.getLogger(name).getEffectiveLevel() >= logging.INFO
+        for name in model_client.SDK_LOGGERS
+    )
+    # Control: the SDK's own logger at DEBUG does log the prompt, so the check above can
+    # fail. The factory holds the level; it does not stop code that lowers it later.
     caplog.clear()
-    with caplog.at_level(logging.DEBUG):
-        ask(client, prompt)
+    caplog.set_level(logging.DEBUG, logger="anthropic")
+    ask(client, prompt)
     assert prompt in caplog.text + "".join(repr(r.args) for r in caplog.records)
+
+
+def test_a_quieter_sdk_logger_stays_quiet(keyed: Settings) -> None:
+    logger = logging.getLogger("httpx2")
+    before = logger.level
+    try:
+        logger.setLevel(logging.ERROR)
+        build_model_client(keyed)
+        assert logger.level == logging.ERROR
+    finally:
+        logger.setLevel(before)
 
 
 # --- the request ----------------------------------------------------------------------
@@ -365,8 +382,10 @@ def test_a_request_carries_exactly_the_registry_schemas(keyed: Settings, key: st
     assert "tool_choice" not in body
     assert body["model"] == keyed.model == DEFAULT_MODEL
     assert (body["system"], body["max_tokens"]) == (SYSTEM, 1024)
-    assert request.headers["x-api-key"] == key
-    assert "authorization" not in request.headers
+    # The key once, as anthropic 2.3.0 sends an API key: a bearer token. No second
+    # credential header, and no beta header.
+    assert request.headers.get_list("authorization") == [f"Bearer {key}"]
+    assert "x-api-key" not in request.headers
     assert "anthropic-beta" not in request.headers
     assert answer == message_body()
 
