@@ -84,6 +84,7 @@ ALLOWED = frozenset(
 BANNED_MODULES = frozenset(
     {
         "aiohttp",
+        "asyncio.subprocess",
         "ctypes",
         "ftplib",
         "http",
@@ -123,6 +124,20 @@ BANNED_ATTRIBUTES = frozenset(
         "create_subprocess_exec",
         "create_subprocess_shell",
         "create_unix_connection",
+        # asyncio's own lookup, servers, programs, pipes and raw sends (review finding
+        # sec-2 of M1 PR 5): asyncio is reviewed in for the loop's exception handler only.
+        "connect_read_pipe",
+        "connect_write_pipe",
+        "create_unix_server",
+        "getaddrinfo",
+        "getnameinfo",
+        "sock_sendall",
+        "sock_sendfile",
+        "sock_sendto",
+        "start_unix_server",
+        "subprocess_exec",
+        "subprocess_shell",
+        "to_thread",
         "add_external_initializers",
         "add_external_initializers_from_files_in_memory",
         "enable_profiling",
@@ -150,6 +165,9 @@ POOL_FILE = "app/db/session.py"
 EMBEDDER_FILE = "app/embeddings/onnx.py"
 # Modules that one file alone may import.
 SINGLE_FILE = {
+    # The loop's exception handler, set in the lifespan; the hooks (M1 PR 5).
+    "asyncio": "app/main.py",
+    "threading": "app/observability/logs.py",
     "psycopg_pool": POOL_FILE,
     "numpy": EMBEDDER_FILE,
     "onnxruntime": EMBEDDER_FILE,
@@ -294,6 +312,20 @@ PLANTED = [
     ("options.profile_file_prefix = 'p'\n", ".profile_file_prefix"),
     ("options.optimized_model_filepath = 'm.onnx'\n", ".optimized_model_filepath"),
     ("tokenizers.Tokenizer.from_file('tokenizer.json')\n", ".from_file"),
+    # Review finding sec-2 of M1 PR 5: asyncio's other ways out, and one file each.
+    ("import asyncio\nasyncio.get_running_loop().getaddrinfo('x', 1)\n", ".getaddrinfo"),
+    ("loop.subprocess_exec(p, 'x')\n", ".subprocess_exec"),
+    ("loop.subprocess_shell(p, 'x')\n", ".subprocess_shell"),
+    ("asyncio.start_unix_server(h, 'p')\n", ".start_unix_server"),
+    ("loop.create_unix_server(f, 'p')\n", ".create_unix_server"),
+    ("loop.connect_write_pipe(p, f)\n", ".connect_write_pipe"),
+    ("loop.sock_sendto(s, b'x', a)\n", ".sock_sendto"),
+    ("loop.sock_sendall(s, b'x')\n", ".sock_sendall"),
+    ("asyncio.to_thread(f)\n", ".to_thread"),
+    ("import asyncio.subprocess\n", "banned module asyncio.subprocess"),
+    ("from asyncio import subprocess\n", "banned module asyncio.subprocess"),
+    ("import asyncio\n", "asyncio outside app/main.py"),
+    ("import threading\n", "threading outside app/observability/logs.py"),
 ]
 
 

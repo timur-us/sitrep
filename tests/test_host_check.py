@@ -164,6 +164,80 @@ def test_a_websocket_is_closed() -> None:
     assert messages[-1] == {"reached": False}
 
 
+def test_the_shim_allows_loopback_alone_whatever_the_setting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Review findings test-4 and sec-8: with another host allowed for the app, the shim
+    # still refuses it, and loopback on the port still passes both checks.
+    monkeypatch.setenv(env_name("dev_auth"), "1")
+    port = Settings(_env_file=None).port
+    staff = f"{branding.SLUG}.{branding.DOMAINS.staff}"
+    monkeypatch.setenv(ALLOWED_HOSTS, f"{staff},127.0.0.1:{port}")
+    shimmed = Settings(_env_file=None)
+    app = create_app(shimmed, bind_host="127.0.0.1")
+    base = f"http://127.0.0.1:{port}"
+    with TestClient(app, base_url=base, client=("127.0.0.1", 50000)) as c:
+        assert c.get("/health").status_code == 200
+        assert c.get("/health", headers={"host": staff}).status_code == 400
+
+
+@pytest.mark.parametrize("variant", [str.upper, lambda h: h + ".", lambda h: h + " ", str.title])
+def test_a_configured_host_is_matched_exactly(monkeypatch: pytest.MonkeyPatch, variant) -> None:
+    # Review finding test-8: no case folding, no trimming, no trailing dot.
+    staff = f"{branding.SLUG}.{branding.DOMAINS.staff}"
+    monkeypatch.setenv(ALLOWED_HOSTS, staff)
+    settings = Settings(_env_file=None)
+    served = client(settings, staff)
+    assert served.get("/health").status_code == 200
+    assert served.get("/health", headers={"host": variant(staff)}).status_code == 400
+
+
+def test_the_port_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review finding test-11.
+    monkeypatch.setenv(ALLOWED_HOSTS, "127.0.0.1:65535,127.0.0.1:1")
+    assert Settings(_env_file=None).allowed_host_values == ("127.0.0.1:65535", "127.0.0.1:1")
+    monkeypatch.setenv(ALLOWED_HOSTS, "127.0.0.1:65536")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_the_bare_name_is_ignored(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
+    monkeypatch.setenv("ALLOWED_HOSTS", f"{branding.DOMAINS.attacker}")
+    assert Settings(_env_file=None).allowed_host_values == (f"127.0.0.1:{settings.port}",)
+
+
+@pytest.mark.parametrize(
+    "name", [branding.SLUG, f"{branding.SLUG}:8000", "advisor-box.local", "x.local:8000"]
+)
+def test_a_name_that_is_resolved_locally_is_refused(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    # Review finding sec-5: a single-label name (search domains, LLMNR) or a .local name
+    # (mDNS) can be answered by anyone on the network, which reopens DNS rebinding.
+    monkeypatch.setenv(ALLOWED_HOSTS, name)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+    monkeypatch.setenv(ALLOWED_HOSTS, "localhost:8000")
+    assert Settings(_env_file=None).allowed_host_values == ("localhost:8000",)
+
+
+def test_the_lifespan_passes_through() -> None:
+    reached: list[str] = []
+
+    async def app(scope: dict, receive: Any, send: Any) -> None:
+        reached.append(scope["type"])
+
+    async def nothing() -> dict:
+        return {}
+
+    async def ignore(message: dict) -> None:
+        return None
+
+    middleware = host_check.HostCheckMiddleware(app, frozenset({b"127.0.0.1:8000"}))
+    asyncio.run(middleware({"type": "lifespan"}, nothing, ignore))
+    assert reached == ["lifespan"]
+
+
 def test_the_shim_checks_with_the_same_function(
     monkeypatch: pytest.MonkeyPatch, settings: Settings
 ) -> None:

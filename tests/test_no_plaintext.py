@@ -173,6 +173,11 @@ def _send_canaries(running: Running) -> list[tuple[str, int, dict[str, str]]]:
         status, response_headers = _request(running.port, method, target, headers, body)
         label = f"{method} {target.split('?')[0]}".replace(canary.upper(), "<CANARY>")
         sent.append((label.replace(canary, "<canary>"), status, response_headers))
+    # A Host the app does not allow, with a canary in it: refused before the routing
+    # (M1 PR 5), and still nowhere in spans or logs (review finding test-9).
+    foreign = headers | {"Host": f"{canary}.{branding.DOMAINS.attacker}"}
+    status, response_headers = _request(running.port, "GET", f"/health?q={canary}", foreign)
+    sent.append(("GET /health, foreign Host", status, response_headers))
     return sent
 
 
@@ -221,6 +226,7 @@ def test_no_plaintext_in_traces_or_logs(
         ("GET /boom", 500),
         ("POST /health", 405),
         ("<CANARY> /health", 405),
+        ("GET /health, foreign Host", 400),
     ], sent
     for label, _, response_headers in sent:
         assert "server" not in response_headers, f"{label}: server header sent"
@@ -235,7 +241,9 @@ def test_no_plaintext_in_traces_or_logs(
         response_headers.get("x-trace-id", "") for _, _, response_headers in sent
     ), "a response's X-Trace-Id is not its span's trace id"
     assert sorted(span.name for span in spans) == sorted(
-        ["GET /health", "GET", "GET /boom", "POST /health", tracing.REDACTED_NAME]
+        # The refused Host's span carries the route template the instrumentation matched
+        # before the Host check ran: a template, not plaintext.
+        ["GET /health", "GET", "GET /boom", "POST /health", tracing.REDACTED_NAME, "GET /health"]
     ), [span.name for span in spans]
     failed = [span for span in spans if span.status.status_code is StatusCode.ERROR]
     assert [span.name for span in failed] == ["GET /boom"], [span.name for span in spans]
@@ -280,7 +288,7 @@ def test_canary_reaches_unfiltered_spans_and_default_logs(
     # proves the canary, the capture variables and the exception path are live.
     canary = running.canary
     sent = _send_canaries(running)
-    assert [status for _, status, _ in sent] == [200, 404, 500, 405, 405], sent
+    assert [status for _, status, _ in sent] == [200, 404, 500, 405, 405, 400], sent
     _wait_for(lambda: len(running.memory.get_finished_spans()) >= len(sent), "the spans")
     spans = running.memory.get_finished_spans()
     leaking = {key for span in spans for key, value in (span.attributes or {}).items()}

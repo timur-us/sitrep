@@ -20,8 +20,10 @@ import sys
 from pathlib import Path
 
 import pytest
+import uvicorn
 from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
+from app import __main__ as entry
 from app.config.settings import Settings, env_name
 from app.observability import tracing
 
@@ -54,12 +56,6 @@ def scrubbed_env(home: Path, **variables: str) -> dict[str, str]:
     return env | {"no_proxy": "*"} | variables
 
 
-def refused_connection(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.settimeout(1.0)
-        return probe.connect_ex(("127.0.0.1", port)) != 0
-
-
 def run_entry(workdir: Path, env: dict[str, str]) -> tuple[int | None, str]:
     """(exit code, stderr); None when the app still ran at the timeout: it served."""
     log = workdir / "stderr.log"  # a file, not a pipe: a full pipe would block the app
@@ -83,10 +79,10 @@ def run_entry(workdir: Path, env: dict[str, str]) -> tuple[int | None, str]:
 
 
 @pytest.mark.parametrize("name", CAPTURE)
-@pytest.mark.parametrize("value", ["cookie,set-cookie", ""])
-def test_plaintext_refuses_to_start_with_header_capture(
-    tmp_path: Path, name: str, value: str
-) -> None:
+def test_plaintext_refuses_to_start_with_header_capture(tmp_path: Path, name: str) -> None:
+    # The real entry point, once per name. An empty value, and the order before the bind,
+    # are pinned in process below (review findings test-3 and test-10).
+    value = "cookie,set-cookie"
     port = free_port()
     env = scrubbed_env(
         tmp_path, **{PLAINTEXT: "1", HOST: "127.0.0.1", PORT: str(port), name: value}
@@ -94,8 +90,28 @@ def test_plaintext_refuses_to_start_with_header_capture(
     code, err = run_entry(tmp_path, env)
     assert code == 2, (code, err)
     assert "refused to start" in err and name in err and PLAINTEXT in err, err
-    assert not value or value not in err, err
-    assert refused_connection(port), "the app bound its port before refusing"
+    assert value not in err, err
+
+
+def _no_bind(self: uvicorn.Config) -> socket.socket:
+    raise AssertionError("the entry point bound a socket before refusing")
+
+
+@pytest.mark.parametrize("value", ["x-probe-header", ""])
+@pytest.mark.usefixtures("restore_logging")
+def test_the_refusal_comes_before_the_bind(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", _no_bind)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv(PLAINTEXT, "1")
+    monkeypatch.setenv(f"{PREFIX}SERVER_RESPONSE", value)
+    assert entry.main() == 2
+    err = capsys.readouterr().err
+    assert f"{PREFIX}SERVER_RESPONSE" in err and (not value or value not in err), err
 
 
 def test_the_chain_refuses_in_process(monkeypatch: pytest.MonkeyPatch) -> None:

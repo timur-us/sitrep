@@ -126,6 +126,27 @@ def test_docker_smoke_refuses_the_dev_login_on_both_hosts() -> None:
         assert needle in body, f"the dev-login loop lacks {needle!r}:\n{body}"
 
 
+def test_docker_smoke_refuses_a_foreign_host_after_it_is_up() -> None:
+    # Review findings test-7 and sec-6: the checks that make the smoke test fail, and
+    # their order: the port probed in isolated mode, the container created and cleaned
+    # up before it starts, the publish checked, the app up, then the foreign Host refused.
+    out = dry_run("docker-build")
+    needles = [
+        "python3 -I -c",
+        "-p 127.0.0.1:$port:8000",
+        "trap 'docker rm -f \"$cid\" >/dev/null' EXIT",
+        'docker start "$cid"',
+        'test "$addr" = "127.0.0.1:$port"',
+        '"http://$addr/health" 2>/dev/null && break',
+        "-H 'Host: 192.0.2.1:8000'",
+        'test "$code" = 400',
+    ]
+    positions = [out.find(needle) for needle in needles]
+    assert -1 not in positions, [n for n, p in zip(needles, positions, strict=True) if p < 0]
+    assert positions == sorted(positions), list(zip(needles, positions, strict=True))
+    assert "docker create" in out[: positions[3]], "the container is not created first"
+
+
 def test_lint_test_starts_and_migrates_the_database_before_pytest() -> None:
     # The tests in tests/db fail, never skip, without a migrated database.
     out = dry_run("lint-test")
