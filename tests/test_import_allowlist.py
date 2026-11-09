@@ -136,6 +136,20 @@ BANNED_ATTRIBUTES = frozenset(
         "DefaultAioHttpClient",
         "DefaultAsyncHttpxClient",
         "DefaultHttpxClient",
+        # The SDK's other clients and helpers, which anthropic re-exports at its top level,
+        # outside anthropic.lib: Bedrock, Vertex, Foundry, AWS, Google Cloud, the tool
+        # runner's decorator and the refusal-fallback middleware. And the paths that leave
+        # the factory's configuration: the beta namespace and a client copied with other
+        # options (ADR 0012; review finding sec-5).
+        "AnthropicAWS",
+        "AnthropicBedrock",
+        "AnthropicFoundry",
+        "AnthropicGoogleCloud",
+        "AnthropicVertex",
+        "BetaRefusalFallbackMiddleware",
+        "beta",
+        "beta_tool",
+        "with_options",
         "add_external_initializers_from_files_in_memory",
         "enable_profiling",
         "from_file",
@@ -322,6 +336,16 @@ PLANTED = [
     ("anthropic.DefaultHttpxClient(trust_env=False)\n", ".DefaultHttpxClient"),
     ("from anthropic import DefaultAsyncHttpxClient\n", "import DefaultAsyncHttpxClient"),
     ("from anthropic import DefaultAioHttpClient\n", "import DefaultAioHttpClient"),
+    # Review finding sec-5: the re-exports, and the paths out of the factory's options.
+    ("anthropic.AnthropicFoundry(resource='x')\n", ".AnthropicFoundry"),
+    ("from anthropic import AnthropicBedrock\n", "import AnthropicBedrock"),
+    ("from anthropic import AnthropicVertex as V\n", "import AnthropicVertex"),
+    ("anthropic.AnthropicAWS()\n", ".AnthropicAWS"),
+    ("anthropic.AnthropicGoogleCloud()\n", ".AnthropicGoogleCloud"),
+    ("from anthropic import beta_tool\n", "import beta_tool"),
+    ("anthropic.BetaRefusalFallbackMiddleware()\n", ".BetaRefusalFallbackMiddleware"),
+    ("sdk.beta.messages.create()\n", ".beta"),
+    ("sdk.with_options(base_url='x').messages.create()\n", ".with_options"),
 ]
 
 

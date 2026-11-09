@@ -8,6 +8,7 @@ The README says what the project shows and what it does not.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Mapping
 from datetime import date
@@ -1047,6 +1048,9 @@ ADR_0012_KEYS = (
     "connect_timeout_seconds",
     "prices_as_of",
     "prices_usd_per_mtok",
+    "geo_multipliers",
+    "sdk_loggers",
+    "sdk_loggers_min_level",
 )
 
 
@@ -1069,6 +1073,9 @@ def adr_0012_facts() -> dict[str, object]:
             model: {name: getattr(price, name) for name in PRICE_FIELDS}
             for model, price in model_client.PRICES.items()
         },
+        "geo_multipliers": dict(model_client.GEO_MULTIPLIERS),
+        "sdk_loggers": list(model_client.SDK_LOGGERS),
+        "sdk_loggers_min_level": logging.getLevelName(model_client.SDK_LOGGERS_MIN_LEVEL),
     }
 
 
@@ -1104,6 +1111,8 @@ def adr_0012_problems(adr: str, expected: dict[str, object]) -> list[str]:
         found, wanted = facts[key], expected[key]
         if key == "prices_as_of":
             found = str(found)
+        elif key == "geo_multipliers" and isinstance(found, dict):
+            found = {geo: _as_decimal(value) for geo, value in found.items()}
         elif key == "prices_usd_per_mtok":
             found = (
                 {
@@ -1147,12 +1156,17 @@ def test_planted_adr_0012_blocks() -> None:
         "connect_timeout_seconds": 5.0,
         "prices_as_of": "2026-11-09",
         "prices_usd_per_mtok": {"m-1": {"input": Decimal(2), "output": Decimal(10)}},
+        "geo_multipliers": {"global": Decimal(1), "us": Decimal("1.1")},
+        "sdk_loggers": ["a", "b"],
+        "sdk_loggers_min_level": "INFO",
     }
     good = (
         "```yaml\nbase_url: https://api.example\nkey_variable: K\nmodel_variable: M\n"
         "default_model: m-1\nrefused_prefix: P_\nmax_retries: 0\ntimeout_seconds: 120\n"
         "connect_timeout_seconds: 5\nprices_as_of: 2026-11-09\n"
-        'prices_usd_per_mtok:\n  m-1: {input: 2, output: "10.00"}\n```\n'
+        'prices_usd_per_mtok:\n  m-1: {input: 2, output: "10.00"}\n'
+        'geo_multipliers: {global: 1, us: "1.1"}\nsdk_loggers: [a, b]\n'
+        "sdk_loggers_min_level: INFO\n```\n"
     )
     assert adr_0012_problems(good, expected) == []
     assert adr_0012_problems("no block\n", expected) == ["expected one yaml block, found 0"]
@@ -1174,6 +1188,15 @@ def test_planted_adr_0012_blocks() -> None:
     assert adr_0012_problems(
         good.replace("key_variable: K", "key_variable: K\nnote: x"), expected
     ) == ["note: in the block, not expected"]
+    assert adr_0012_problems(good.replace('us: "1.1"', 'us: "1.0"'), expected) == [
+        (
+            "geo_multipliers: {'global': Decimal('1'), 'us': Decimal('1.0')} in the block,"
+            " {'global': Decimal('1'), 'us': Decimal('1.1')} in the code"
+        )
+    ]
+    assert adr_0012_problems(good.replace("[a, b]", "[a]"), expected) == [
+        "sdk_loggers: ['a'] in the block, ['a', 'b'] in the code"
+    ]
     assert adr_0012_problems(good.replace("2026-11-09", "2026-11-08"), expected) == [
         "prices_as_of: '2026-11-08' in the block, '2026-11-09' in the code"
     ]

@@ -569,13 +569,29 @@ def test_an_empty_key_is_no_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 
 
 @pytest.mark.parametrize("shape", ["{} ", " {}", "{}\n", "a b{}", "{}é", "{}\x00"])
+@pytest.mark.parametrize("source", ["init", "environment", "dotenv"])
 def test_a_key_of_another_shape_is_refused_unseen(
-    monkeypatch: pytest.MonkeyPatch, shape: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str, source: str
 ) -> None:
-    # A header cannot carry it, and the HTTP library's error would quote it.
+    # A header cannot carry it, and the HTTP library's error would quote it. Through
+    # every source Settings reads (review finding test-10). The environment cannot hold
+    # a NUL, so that one shape goes through the other two sources only.
     key = shape.format("canary-key-" + os.urandom(12).hex())
+    kwargs: dict[str, object] = {"_env_file": None}
+    if source == "init":
+        kwargs["anthropic_api_key"] = key
+    elif source == "environment":
+        if "\x00" in key:
+            return
+        monkeypatch.setenv(KEY_VARIABLE, key)
+    else:
+        dotenv = tmp_path / "dotenv"
+        # Raw, inside double quotes: python-dotenv keeps spaces, line breaks and every
+        # character there, and does not decode \u escapes.
+        dotenv.write_text(f'{KEY_VARIABLE}="{key}"\n', encoding="utf-8")
+        kwargs["_env_file"] = dotenv
     with pytest.raises(ValidationError) as refused:
-        Settings(_env_file=None, anthropic_api_key=key)
+        Settings(**kwargs)
     assert key.strip() not in str(refused.value)
     assert KEY_VARIABLE in str(refused.value)
 

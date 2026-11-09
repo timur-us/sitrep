@@ -170,6 +170,47 @@ def test_every_sdk_variable_but_the_key_is_refused() -> None:
     assert refused_variables({KEY_VARIABLE: "x", KEY_VARIABLE.lower(): "x", "HOME": "/"}) == []
 
 
+# Review finding test-8: what the SDK and its HTTP library read from the environment
+# outside the prefix, excluding anthropic/lib (other clients, banned in app/). Each is
+# harmless with this client: DEFER_PYDANTIC_BUILD only times the SDK's model builds, and
+# SSL_CERT_FILE and SSL_CERT_DIR are read only with trust_env, which is off.
+UNPREFIXED_READS = frozenset({"DEFER_PYDANTIC_BUILD", "SSL_CERT_FILE", "SSL_CERT_DIR"})
+# Proxy variables are read through urllib's getproxies(), only in these two files: the
+# SDK's DefaultHttpxClient (banned in app/) and httpx2 under trust_env.
+GETPROXIES_FILES = frozenset({"anthropic/_utils/_httpx.py", "httpx2/_utils.py"})
+
+
+def environment_reads() -> tuple[set[str], set[str]]:
+    """(names read by literal outside the prefix, files that call getproxies())."""
+    site = Path(anthropic.__file__).parent.parent
+    # os.environ and os.getenv only: httpx2's WSGI transport fills a request environ
+    # (CONTENT_LENGTH), which is not the process environment.
+    read = re.compile(
+        r"""(?:os\.environ\.get\(|os\.environ\[|getenv\()\s*["']([A-Za-z0-9_]+)["']"""
+    )
+    alias = re.compile(r"from os import[^\n]*\benviron\b|import os as ")
+    names: set[str] = set()
+    proxies: set[str] = set()
+    for top in ("anthropic", "httpx2", "httpcore2"):
+        for path in (site / top).rglob("*.py"):
+            rel = path.relative_to(site).as_posix()
+            if rel.startswith("anthropic/lib/"):
+                continue
+            text = path.read_text(encoding="utf-8")
+            names |= {n for n in read.findall(text) if not n.startswith("ANTHROPIC_")}
+            # A renamed os would hide reads from the pattern above.
+            assert not alias.search(text), rel
+            if "getproxies()" in text:
+                proxies.add(rel)
+    return names, proxies
+
+
+def test_the_unprefixed_environment_reads_are_known() -> None:
+    names, proxies = environment_reads()
+    assert names == UNPREFIXED_READS, sorted(names)
+    assert proxies == GETPROXIES_FILES, sorted(proxies)
+
+
 @pytest.mark.parametrize("name", [n for n in SDK_VARIABLES if n != KEY_VARIABLE])
 @pytest.mark.parametrize("value", ["set", ""])
 def test_the_factory_refuses_each_sdk_variable(
@@ -226,14 +267,18 @@ def _no_bind(self: uvicorn.Config) -> socket.socket:
 
 
 @pytest.mark.parametrize(
-    "variables",
+    ("name", "value"),
     [
-        {"ANTHROPIC_BASE_URL": f"https://{branding.DOMAINS.attacker}"},
-        {"ANTHROPIC_AUTH_TOKEN": ""},
-        {"ANTHROPIC_LOG": "debug"},
-        {"ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE": "content"},
-        {"ANTHROPIC_MODEL": DEFAULT_MODEL},
-        {env_name("model"): "claude-without-a-price"},
+        ("ANTHROPIC_BASE_URL", f"https://{branding.DOMAINS.attacker}/{canary('url')}"),
+        ("ANTHROPIC_AUTH_TOKEN", ""),
+        ("ANTHROPIC_LOG", canary("level")),
+        ("ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE", canary("mode")),
+        ("ANTHROPIC_MODEL", canary("old-model")),
+        (env_name("model"), canary("model")),
+        # Review finding sec-1: an exported key would win over the one in the dotenv
+        # file, the workspace key with its spend limit. Set, even empty, it is refused.
+        (KEY_VARIABLE, canary("exported-key")),
+        (KEY_VARIABLE.lower(), ""),
     ],
 )
 @pytest.mark.usefixtures("restore_logging")
@@ -241,18 +286,38 @@ def test_the_entry_point_refuses_before_it_binds(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    variables: dict[str, str],
+    name: str,
+    value: str,
 ) -> None:
     monkeypatch.setattr(uvicorn.Config, "bind_socket", _no_bind)
     monkeypatch.setattr(uvicorn.Server, "run", _no_server)
     monkeypatch.chdir(tmp_path)
-    for name, value in variables.items():
-        monkeypatch.setenv(name, value)
+    monkeypatch.setenv(name, value)
     assert entry.main() == 2
     err = capsys.readouterr().err
-    assert "refused to start" in err and next(iter(variables)) in err, err
-    for value in variables.values():
-        assert not value or value not in err, err
+    assert "refused to start" in err and name in err, err
+    assert not value or value not in err, err
+
+
+@pytest.mark.parametrize("shape", ["{} ", "a b{}", "{}é"])
+@pytest.mark.usefixtures("restore_logging")
+def test_the_entry_point_refuses_a_bad_key_unseen(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    shape: str,
+) -> None:
+    # Review finding sec-3: a ValidationError keeps its input in errors() and json(), and
+    # uncaught it ends in a traceback. The entry point names the field only, and exits 2.
+    key = shape.format(canary("bad-key"))
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", _no_bind)
+    monkeypatch.setattr(uvicorn.Server, "run", _no_server)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(f'{KEY_VARIABLE}="{key}"\n', encoding="utf-8")
+    assert entry.main() == 2
+    err = capsys.readouterr().err
+    assert "refused to start" in err and KEY_VARIABLE in err, err
+    assert key.strip() not in err and "Traceback" not in err, err
 
 
 @pytest.mark.usefixtures("restore_logging")
@@ -327,13 +392,11 @@ def test_a_prompt_reaches_no_log_under_a_debug_root(
     # options (the prompt) nor the response headers are logged.
     prompt = canary("prompt")
     caplog.set_level(logging.DEBUG)
+    # The fixture below restored the levels: the factory, not an earlier test, holds them.
+    assert logging.getLogger("anthropic").level == logging.NOTSET
     client = build_model_client(keyed, transport=Recorder().transport())
     ask(client, prompt)
     assert prompt not in caplog.text + "".join(repr(r.args) for r in caplog.records)
-    assert all(
-        logging.getLogger(name).getEffectiveLevel() >= logging.INFO
-        for name in model_client.SDK_LOGGERS
-    )
     # Control: the SDK's own logger at DEBUG does log the prompt, so the check above can
     # fail. The factory holds the level; it does not stop code that lowers it later.
     caplog.clear()
@@ -351,6 +414,111 @@ def test_a_quieter_sdk_logger_stays_quiet(keyed: Settings) -> None:
         assert logger.level == logging.ERROR
     finally:
         logger.setLevel(before)
+
+
+# Review finding test-2: the loggers the SDK and its HTTP library write to, read from
+# their source. Written out here, not taken from the module, so the module's list is
+# checked against the libraries, not against itself.
+HELD = ("anthropic", "httpx2", "httpcore2")
+
+
+def library_loggers() -> set[str]:
+    """Every logger name the three libraries create: getLogger("...") literals, and
+    getLogger(__name__) as the module's own dotted name."""
+    site = Path(anthropic.__file__).parent.parent
+    literal = re.compile(r"""getLogger\(["']([A-Za-z0-9_.]+)["']\)""")
+    names: set[str] = set()
+    for top in HELD:
+        for path in (site / top).rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            names |= set(literal.findall(text))
+            if "getLogger(__name__)" in text:
+                module = path.relative_to(site).with_suffix("").as_posix().replace("/", ".")
+                names.add(module.removesuffix(".__init__"))
+    return names
+
+
+def test_every_library_logger_is_held(keyed: Settings) -> None:
+    names = library_loggers()
+    # Non-vacuity: the ones that log a request or a response at DEBUG are found.
+    assert {"anthropic._base_client", "httpcore2.http11", "httpx2"} <= names, sorted(names)
+    assert {name.partition(".")[0] for name in names} == set(HELD)
+    assert tuple(model_client.SDK_LOGGERS) == HELD
+    logging.getLogger().setLevel(logging.DEBUG)
+    build_model_client(keyed)
+    low = sorted(n for n in names if logging.getLogger(n).getEffectiveLevel() < logging.INFO)
+    assert not low, f"loggers below INFO: {low}"
+
+
+def test_a_lowered_child_logger_is_raised(keyed: Settings) -> None:
+    # Review finding sec-7: a child set below INFO before the build is held too.
+    for name in ("anthropic._base_client", "httpcore2.http11"):
+        logging.getLogger(name).setLevel(logging.DEBUG)
+    build_model_client(keyed)
+    for name in ("anthropic._base_client", "httpcore2.http11"):
+        assert logging.getLogger(name).getEffectiveLevel() >= logging.INFO, name
+
+
+def test_the_sdk_makes_no_span(keyed: Settings, key: str) -> None:
+    # Review finding test-1: the SDK traces through the global provider when it is given
+    # none. The global one is replaced here by a recording one, for this test only.
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # Its own context: the conftest's monkeypatch outlives the provider check below.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(trace, "get_tracer_provider", lambda: provider)
+        ask(build_model_client(keyed, transport=Recorder().transport()))
+        assert exporter.get_finished_spans() == ()
+        # Control: the SDK's defaults make one span per call through that provider.
+        control = anthropic.Anthropic(
+            api_key=key,
+            max_retries=0,
+            http_client=httpx2.Client(transport=Recorder().transport()),
+        )
+        control.messages.create(
+            model=DEFAULT_MODEL, max_tokens=16, messages=[{"role": "user", "content": "Hello"}]
+        )
+    assert len(exporter.get_finished_spans()) == 1
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body"),
+    [("text/plain", "not json {}"), ("application/json", "{{ {}"), ("application/json", "[]")],
+)
+def test_an_unreadable_answer_is_typed(keyed: Settings, content_type: str, body: str) -> None:
+    # Review findings sec-2 and test-6: a 200 the SDK cannot read as a message.
+    marker = canary("body")
+    text = body.format(marker)
+    recorder = Recorder(
+        lambda request: httpx2.Response(200, content=text, headers={"content-type": content_type})
+    )
+    with pytest.raises(ModelCallError) as failed:
+        ask(build_model_client(keyed, transport=recorder.transport()))
+    error = failed.value
+    assert (error.kind, error.status_code) == ("response", None)
+    assert marker not in str(error) and marker not in "".join(traceback.format_exception(error))
+    assert error.__cause__ is None and error.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        # A server tool: the API would fetch a URL itself (review finding sec-4).
+        {"type": "web_fetch_20260209", "name": "web_fetch"},
+        {"type": "web_search_20260209", "name": "web_search"},
+        {"name": "x", "description": "x", "input_schema": {"type": "object"}, "type": "custom"},
+        {"name": "x", "description": "x", "input_schema": {}, "cache_control": {"type": "x"}},
+        {"name": "x", "input_schema": {"type": "object"}},
+        "search_client_docs",
+    ],
+)
+def test_only_registry_shaped_tools_are_sent(keyed: Settings, tool: Any) -> None:
+    recorder = Recorder()
+    client = build_model_client(keyed, transport=recorder.transport())
+    with pytest.raises(model_client.RequestRefused):
+        ask(client, tools=[*registry_tools(), tool])
+    assert recorder.requests == []
 
 
 # --- the request ----------------------------------------------------------------------
@@ -371,7 +539,7 @@ def registry_tools() -> list[dict[str, Any]]:
 def test_a_request_carries_exactly_the_registry_schemas(keyed: Settings, key: str) -> None:
     recorder = Recorder()
     tools = registry_tools()
-    assert len(tools) == 4
+    assert [tool["name"] for tool in tools] == list(mvp_tools.build_registry().names())
     answer = ask(build_model_client(keyed, transport=recorder.transport()), tools=tools)
 
     [request] = recorder.requests
@@ -406,7 +574,6 @@ def test_a_refusal_is_an_answer(keyed: Settings) -> None:
     recorder = Recorder(lambda request: httpx2.Response(200, json=refusal))
     answer = ask(build_model_client(keyed, transport=recorder.transport()))
     assert answer["stop_reason"] == "refusal"
-    assert isinstance(answer, dict)
 
 
 def test_no_trace_context_leaves_with_a_request(keyed: Settings, key: str) -> None:
@@ -615,6 +782,16 @@ def test_the_price_table_is_the_page() -> None:
             {"input_tokens": 3, "cache_creation_input_tokens": None, "cache_creation": None},
             "0.000006",
         ),
+        # The standard tier and speed, and no server tool used, are what the table prices.
+        (
+            {
+                "input_tokens": 1_000_000,
+                "service_tier": "standard",
+                "speed": "standard",
+                "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+            },
+            "2",
+        ),
     ],
 )
 def test_cost_is_usage_times_the_table(usage: dict[str, Any], expected: str) -> None:
@@ -631,6 +808,13 @@ def test_cost_is_usage_times_the_table(usage: dict[str, Any], expected: str) -> 
         {"input_tokens": 1.5},
         {"input_tokens": True},
         {"input_tokens": "1"},
+        # Review findings sec-6 and test-11: tiers, speeds and server tools the table does
+        # not price.
+        {"input_tokens": 1, "service_tier": "priority"},
+        {"input_tokens": 1, "service_tier": "batch"},
+        {"input_tokens": 1, "speed": "fast"},
+        {"input_tokens": 1, "server_tool_use": {"web_search_requests": 1}},
+        {"input_tokens": 1, "server_tool_use": {"web_fetch_requests": 2, "web_search_requests": 0}},
         # A breakdown that does not add up to the total.
         {
             "cache_creation_input_tokens": 3,
@@ -653,6 +837,17 @@ def test_cost_of_a_real_answer(keyed: Settings) -> None:
     recorder = Recorder(lambda request: httpx2.Response(200, json=message_body(usage=usage)))
     answer = ask(build_model_client(keyed, transport=recorder.transport()))
     assert cost_usd(DEFAULT_MODEL, answer["usage"]) == Decimal("0.0054")
+
+
+@pytest.fixture(autouse=True)
+def _restore_library_loggers() -> Iterator[None]:
+    # Review finding test-3: the factory sets levels on process-wide loggers; each test
+    # here starts from, and leaves, the levels it found. The root's level too.
+    names = [""] + sorted(library_loggers())
+    saved = {name: logging.getLogger(name).level for name in names}
+    yield
+    for name, level in saved.items():
+        logging.getLogger(name).setLevel(level)
 
 
 @pytest.fixture(autouse=True)
