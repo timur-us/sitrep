@@ -107,21 +107,26 @@ def check_applied(applied: dict[str, tuple[str, str]], migrations: list[Migratio
 
 
 def become_owner(conn: psycopg.Connection[Any]) -> None:
-    """Scaffolding for the tests that come first (M1 PR 7)."""
-    raise NotImplementedError("M1 PR 7: built in the next commit")
+    """SET ROLE to the owner, then refuse unless the login is the migrator.
+
+    The app role cannot SET ROLE (InsufficientPrivilege, SQLSTATE 42501); the superuser
+    can, and is refused here. The loader (app/db/load.py) starts its session this way
+    too, so the SQL stays composed in this file alone.
+    """
+    conn.execute(SET_OWNER)
+    roles = conn.execute("SELECT session_user, current_user").fetchone()
+    if roles != (names.MIGRATOR_ROLE, names.OWNER_ROLE):
+        raise MigrationError(
+            f"session_user, current_user are {roles}, "
+            f"expected ({names.MIGRATOR_ROLE}, {names.OWNER_ROLE})"
+        )
 
 
 def run(url: str, directory: Path = MIGRATIONS) -> list[str]:
     """Apply the new migrations; return their file names."""
     migrations = load(directory)
     with connect(url, autocommit=True) as conn:
-        conn.execute(SET_OWNER)
-        roles = conn.execute("SELECT session_user, current_user").fetchone()
-        if roles != (names.MIGRATOR_ROLE, names.OWNER_ROLE):
-            raise MigrationError(
-                f"session_user, current_user are {roles}, "
-                f"expected ({names.MIGRATOR_ROLE}, {names.OWNER_ROLE})"
-            )
+        become_owner(conn)
         with conn.transaction():
             for statement in BOOTSTRAP:
                 conn.execute(statement)
