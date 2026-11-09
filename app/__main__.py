@@ -17,7 +17,10 @@ value. The entry point refuses to start, with exit code 2 and before it binds an
   anything (M1 PR 6, review finding sec-3 of PR 3);
 - any model SDK variable but the key, and a model without a price (the model client's
   check_start(), ADR 0012). Without a key the app starts: the model client is built
-  only when a route needs it.
+  only when a route needs it;
+- the key itself exported, even empty: it would win over the one in .env;
+- a setting Settings refuses (a ValidationError): the field and the rule are named,
+  never the value, which the error's details would carry.
 
 It always binds through uvicorn.Config.bind_socket() and hands the socket to the
 server, with the dev login off too, so uvicorn never binds on its own. With
@@ -31,12 +34,14 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import uvicorn
 from opentelemetry.sdk.trace import TracerProvider
+from pydantic import ValidationError
 
 from app.config.settings import (
+    KEY_VARIABLE,
     LOOPBACK,
     Settings,
     SettingsRefused,
@@ -71,6 +76,31 @@ def server_config(
         log_config=LOG_CONFIG,
         http="h11",
         ws="none",
+    )
+
+
+def check_environment(environ: Mapping[str, str]) -> None:
+    """Raise StartRefused while the API key is exported, in any case, even empty.
+
+    The environment wins over .env in Settings, so an exported key (another workspace's,
+    without the spend limit) would replace the one in .env unseen, and an empty one would
+    remove it (ADR 0012; review finding sec-1 of M1 PR 6). Runners that build Settings
+    from the environment alone are not affected: only python -m app reads .env.
+    """
+    exported = sorted(name for name in environ if name.upper() == KEY_VARIABLE)
+    if exported:
+        raise StartRefused(
+            f"{', '.join(exported)} is set in the environment; python -m app reads the key"
+            " from .env only (ADR 0012)"
+        )
+
+
+def invalid_settings(error: ValidationError) -> str:
+    """The settings a ValidationError refuses and why, without their values: errors()
+    carries the input itself even with hide_input_in_errors (review finding sec-3)."""
+    details = error.errors(include_input=False, include_context=False, include_url=False)
+    return "; ".join(
+        f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}" for detail in details
     )
 
 
@@ -137,10 +167,14 @@ def main(argv: Sequence[str] = ()) -> int:
     for notice in ignored_url_notices(os.environ):
         print(notice, file=sys.stderr)
     try:
+        check_environment(os.environ)
         settings = Settings(_env_file=".env")
         check_start(settings, argv)
         model_client.check_start(settings, os.environ)
         config = server_config(settings)
+    except ValidationError as invalid:
+        print(f"refused to start: invalid settings: {invalid_settings(invalid)}", file=sys.stderr)
+        return REFUSED
     except (
         StartRefused,
         PlaintextRefused,

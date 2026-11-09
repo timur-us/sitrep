@@ -11,7 +11,7 @@ Accepted in outline (Timur, 2026-11-08: the M1 plan, PR 6); this text awaits Fab
 ## Context
 
 SITREP (situation report) sends client data to Sonnet 5.5 on the direct Messages API (ADR 0003). The API key is the system's only secret (threat model, "Assets"). Read in `anthropic` 2.3.0:
-- **The SDK reads its environment.** `ANTHROPIC_BASE_URL` redirects it; `ANTHROPIC_AUTH_TOKEN`, profiles under `ANTHROPIC_CONFIG_DIR` and workload-identity variables authenticate it; `ANTHROPIC_CUSTOM_HEADERS` adds headers; `ANTHROPIC_LOG` lowers its logging; `ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE=content` puts prompts into its spans. About forty names in all.
+- **The SDK reads its environment** (about forty names): `ANTHROPIC_BASE_URL` redirects it; a token, profiles and workload identity authenticate it; `ANTHROPIC_CUSTOM_HEADERS` adds headers; `ANTHROPIC_LOG` lowers its logging; a content mode puts prompts into spans.
 - **`DefaultHttpxClient` mounts proxy variables** whatever `trust_env` says.
 - **At DEBUG** the SDK logs request options (the prompt) and response headers.
 - **The key goes out as `Authorization: Bearer`.**
@@ -19,21 +19,21 @@ SITREP (situation report) sends client data to Sonnet 5.5 on the direct Messages
 
 ## Options
 
-- **Let the SDK configure itself** (`Anthropic()`): little code. Any of those variables redirects, re-authenticates or logs the client unseen.
-- **Refuse a list of variables:** misses the name the next SDK adds.
-- **Refuse the prefix, build the HTTP client ourselves:** an exported `ANTHROPIC_*` stops the app, Claude Code's own included; we own the HTTP options.
-- **Raw HTTP:** no SDK surface; we would rebuild typed errors, requests and ADR 0003's switch.
+- **Let the SDK configure itself** (`Anthropic()`): little code; any of those variables moves the client unseen.
+- **Refuse a list of variables:** misses the next SDK's names.
+- **Refuse the prefix, build the HTTP client ourselves:** any exported `ANTHROPIC_*` stops the app; we own the HTTP options.
+- **Raw HTTP:** we would rebuild typed errors, requests and ADR 0003's switch.
 
 ## Decision
 
 The third option, in `app/harness/model_client.py`:
-- **One factory** refuses, naming variables only: every `ANTHROPIC_*` in any case but the key, a missing key, a model without a price. The entry point checks the same before it binds; without a key the app starts.
-- **The client.** The key is passed explicitly, so no profile is read; the base URL is a constant. Our httpx2 client has `trust_env=False` (no proxies, `SSL_CERT_*` or netrc), no redirects, no retries (the loop's). SDK spans and propagation are off; its loggers stay at INFO or above.
-- **Errors** are a kind and an HTTP status. The SDK's exception, with the request and the body, is dropped, not chained.
-- **Settings.** `ANTHROPIC_API_KEY` keeps its name (plan default 7) as a `SecretStr` (empty is none); a key that is not printable ASCII is refused unseen. `ANTHROPIC_MODEL` becomes `SITREP_MODEL`. `Settings` refuses to build while `PYDANTIC_SETTINGS_DEBUG` is set.
-- **Imports.** `anthropic` and `httpx2` in that file only; `anthropic.lib` and the SDK's HTTP clients banned. The HTTP stack enters the lock as the SDK's; the Hub client stays out (ADR 0005).
-- **Cost** is usage times a dated price table: Sonnet 5.5 only, 1.1× for US-only inference.
-- **The key** (Timur): a Console workspace for SITREP alone with a spend limit he sets; one key, only in his `.env`, never in CI, the image or a GitHub secret. Rotation: new key, `.env` updated, old key revoked, at once on a suspected leak. Every live run starts with a cost estimate (plan default 17).
+- **One factory** refuses, by name only: any `ANTHROPIC_*` but the key, no key, a model without a price. `python -m app` also refuses before binding, and refuses an exported key, which would beat `.env`'s.
+- **The client.** Explicit key (no profile read), constant base URL. Our httpx2 client: `trust_env=False` (no proxies, `SSL_CERT_*` or netrc), no redirects, no retries (the loop's). SDK spans and propagation off; the three libraries' loggers held at INFO or above. Only registry-shaped tools are sent, so no server tool.
+- **Errors** are a kind and an HTTP status; the SDK's exception (request, body) is dropped, not chained.
+- **Settings.** The key keeps its name (default 7), a `SecretStr`; empty is none, a bad shape refused unseen. `SITREP_MODEL` replaces `ANTHROPIC_MODEL`. `PYDANTIC_SETTINGS_DEBUG` refuses `Settings`.
+- **Imports.** `anthropic` and `httpx2` in that file only; `anthropic.lib`, the other clients and the SDK's HTTP clients banned. The HTTP stack enters the lock as the SDK's; the Hub client stays out (ADR 0005).
+- **Cost:** usage times a dated table, Sonnet 5.5, standard tier only.
+- **The key** (Timur): a Console workspace for SITREP alone with his spend limit; one key, only in his `.env`, never in CI, the image or a GitHub secret. Rotation: new key, `.env` updated, old key revoked, at once on a suspected leak. A cost estimate before every live run (default 17).
 
 ```yaml
 base_url: https://api.anthropic.com
@@ -47,21 +47,23 @@ connect_timeout_seconds: 5
 prices_as_of: 2026-11-09
 prices_usd_per_mtok:
   claude-sonnet-5-5: {input: "2", cache_write_5m: "2.50", cache_write_1h: "4", cache_read: "0.10", output: "10"}
+geo_multipliers: {global: "1", us: "1.1"}
+sdk_loggers: [anthropic, httpx2, httpcore2]
+sdk_loggers_min_level: INFO
 ```
 
 ## Consequences
 
-- **Easier:** no variable moves the client, its key or its logs unseen; the spend limit caps a runaway loop or a leaked key; the factory is ADR 0003's place for the Foundry switch.
+- **Easier:** no variable moves the client, key or logs unseen; the spend limit caps a runaway loop or leaked key; the factory hosts ADR 0003's switch.
 - **Harder:**
-  - An exported `ANTHROPIC_*` refuses start, until it is unset.
-  - Prices are by hand: a price change needs a dated edit here and in the code.
-  - The workspace, key and spend limit are Timur's steps.
-  - Each response waits for the whole answer, up to 120 seconds.
-- **Watch:**
-  - every SDK upgrade, through the source scan;
-  - Haiku 5.5 (M2) needs its prompt-length tiers;
-  - EU-only inference (ADR 0003);
-  - streaming, if 120 seconds is too short.
+  - An exported `ANTHROPIC_*` refuses start until unset.
+  - Seven packages enter the lock (`httpx2`, `httpcore2`, `truststore`, `jiter` among them).
+  - We rely on SDK internals (`open_telemetry=`, `DefaultHttpxClient`, the DEBUG records); tests read the source, yet an upgrade can change them.
+  - The logger hold is process-wide, and code that lowers a logger later is not stopped.
+  - Without retries a 429 or 529 fails the call until the loop (PR 10) retries.
+  - Prices are by hand; a priority, batch, fast or server-tool response cannot be priced.
+  - Answers arrive whole, within 120 seconds.
+- **Watch:** every SDK upgrade, through the source scans; Haiku 5.5's prompt-length tiers (M2); the trusted TLS roots, the OS store on macOS; EU-only inference (ADR 0003); streaming.
 
 ## Sources
 

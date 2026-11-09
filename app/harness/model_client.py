@@ -24,10 +24,16 @@ The client it builds:
   carries the response body and the request, so it is dropped, not chained.
 
 At DEBUG the SDK logs each request's options, the prompt included, and each response's
-headers, which a hostile server could fill with the key it was sent. The factory holds
-the SDK's loggers (SDK_LOGGERS) at INFO or above, so a root logger at DEBUG does not
-reach them; ANTHROPIC_LOG, which would lower them, is refused. Code that lowers them
-itself is not stopped.
+headers, which a hostile server could fill with the key it was sent; httpcore2 logs the
+response headers too. The factory holds the three libraries' loggers (SDK_LOGGERS) at
+INFO or above, a child set lower included, so a root logger at DEBUG does not reach
+them. ANTHROPIC_LOG would lower them: `import anthropic` applies it at import, before
+any refusal, and the factory and the entry point then refuse it. Code that lowers a
+logger after the build is not stopped.
+
+create() sends tools of exactly the registry's shape, {name, description, input_schema}
+(RequestRefused otherwise, before any request): a server tool or an extra field would
+let the API fetch a URL or change the request on the model's behalf (ADR 0012).
 
 cost_usd() is usage times PRICES, from Anthropic's pricing page on PRICES_AS_OF.
 """
@@ -59,6 +65,9 @@ CONNECT_TIMEOUT_SECONDS = 5.0
 MODEL_VARIABLE = env_name("model")
 # The SDK's loggers and its HTTP library's: never below INFO (the docstring says why).
 SDK_LOGGERS = ("anthropic", "httpx2", "httpcore2")
+SDK_LOGGERS_MIN_LEVEL = logging.INFO
+# The one shape a tool may have: the registry's (app/harness/tools.py, ToolRegistry).
+TOOL_KEYS = frozenset({"name", "description", "input_schema"})
 
 # USD per million tokens, from https://platform.claude.com/docs/en/about-claude/pricing
 # as read on PRICES_AS_OF. Global routing; a change is a dated edit, here and in ADR 0012.
@@ -106,6 +115,11 @@ class ModelCallError(Exception):
         super().__init__(f"the model call failed: {kind}{status}")
         self.kind = kind
         self.status_code = status_code
+
+
+class RequestRefused(ValueError):
+    """A request the client does not send: a tool not of the registry's shape. A
+    programming error in the caller; the message names the rule, never a value."""
 
 
 class PriceUnknown(ValueError):
@@ -160,6 +174,7 @@ class AnthropicModelClient:
         tools: Sequence[Mapping[str, Any]],
         max_tokens: int,
     ) -> Mapping[str, Any]:
+        check_tools(tools)
         failure: ModelCallError | None = None
         try:
             message = self._sdk.messages.create(
@@ -169,13 +184,46 @@ class AnthropicModelClient:
                 tools=tools,  # type: ignore[arg-type]
                 max_tokens=max_tokens,
             )
+            if not isinstance(message, anthropic.types.Message):
+                # A 200 that is not JSON comes back as its text (review finding sec-2).
+                failure = ModelCallError("response")
         except anthropic.APIError as error:
             failure = _call_error(error)
+        except Exception:  # noqa: BLE001 - a body the SDK cannot parse, e.g. invalid JSON
+            failure = ModelCallError("response")
         # Raised outside the except block, so the SDK's exception is neither the cause nor
         # the context: it holds the request (the key's header) and the response body.
         if failure is not None:
             raise failure
         return message.to_dict(mode="json")
+
+
+def check_tools(tools: Sequence[Mapping[str, Any]]) -> None:
+    """RequestRefused unless every tool has exactly the registry's shape."""
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, Mapping) or set(tool) != TOOL_KEYS:
+            raise RequestRefused(
+                f"tool {index}: not exactly {{name, description, input_schema}}"
+                " (no server tool, no other field)"
+            )
+        name, description, schema = tool["name"], tool["description"], tool["input_schema"]
+        if not (isinstance(name, str) and isinstance(description, str)):
+            raise RequestRefused(f"tool {index}: name and description must be text")
+        if not isinstance(schema, Mapping):
+            raise RequestRefused(f"tool {index}: input_schema must be an object")
+
+
+def hold_loggers() -> None:
+    """Every logger of the three libraries at SDK_LOGGERS_MIN_LEVEL or above: the parents,
+    and any child that was set lower."""
+    for name in SDK_LOGGERS:
+        logger = logging.getLogger(name)
+        logger.setLevel(max(logger.getEffectiveLevel(), SDK_LOGGERS_MIN_LEVEL))
+    for name, logger in list(logging.root.manager.loggerDict.items()):
+        if not isinstance(logger, logging.Logger):
+            continue  # a placeholder for a child not yet created
+        if name.partition(".")[0] in SDK_LOGGERS and logging.NOTSET < logger.level:
+            logger.setLevel(max(logger.level, SDK_LOGGERS_MIN_LEVEL))
 
 
 def _call_error(error: anthropic.APIError) -> ModelCallError:
@@ -195,9 +243,7 @@ def build_model_client(
     check_start(settings, os.environ)
     if settings.anthropic_api_key is None:
         raise ModelClientRefused(f"{KEY_VARIABLE} is not set")
-    for name in SDK_LOGGERS:
-        logger = logging.getLogger(name)
-        logger.setLevel(max(logger.getEffectiveLevel(), logging.INFO))
+    hold_loggers()
     timeout = httpx2.Timeout(TIMEOUT_SECONDS, connect=CONNECT_TIMEOUT_SECONDS)
     http_client = httpx2.Client(
         transport=transport, trust_env=False, follow_redirects=False, timeout=timeout
@@ -227,6 +273,17 @@ def cost_usd(model: str, usage: Mapping[str, Any]) -> Decimal:
     price = PRICES.get(model)
     if price is None:
         raise PriceUnknown("no price for this model")
+    # The table prices the standard tier and speed, without server tools (review finding
+    # sec-6): priority, batch and fast are priced differently, server tools per request.
+    if usage.get("service_tier") not in (None, "standard"):
+        raise PriceUnknown("no price for this service tier")
+    if usage.get("speed") not in (None, "standard"):
+        raise PriceUnknown("no price for this speed")
+    server_tools = usage.get("server_tool_use") or {}
+    if not isinstance(server_tools, Mapping) or any(
+        _count(server_tools, key) for key in server_tools
+    ):
+        raise PriceUnknown("no price for server tool use")
     geo = usage.get("inference_geo") or "global"
     multiplier = GEO_MULTIPLIERS.get(geo) if isinstance(geo, str) else None
     if multiplier is None:

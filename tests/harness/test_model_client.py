@@ -558,6 +558,22 @@ def test_a_request_carries_exactly_the_registry_schemas(keyed: Settings, key: st
     assert answer == message_body()
 
 
+def test_the_key_comes_from_settings_not_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The mutation check found this: with the key exported, the SDK would find it by
+    # itself. Here the key is in a dotenv file only, and HOME is an empty directory, so
+    # neither the environment nor a profile on disk can stand in for the explicit key.
+    key = canary("dotenv-key")
+    dotenv = tmp_path / "dotenv"
+    dotenv.write_text(f"{KEY_VARIABLE}={key}\n")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv(KEY_VARIABLE, raising=False)
+    recorder = Recorder()
+    ask(build_model_client(Settings(_env_file=dotenv), transport=recorder.transport()))
+    assert recorder.requests[0].headers.get_list("authorization") == [f"Bearer {key}"]
+
+
 def test_the_model_comes_from_settings(monkeypatch: pytest.MonkeyPatch, key: str) -> None:
     planted = "claude-planted-model"
     prices = dict(model_client.PRICES) | {planted: model_client.PRICES[DEFAULT_MODEL]}
