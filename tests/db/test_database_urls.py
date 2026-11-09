@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from app.config import branding
 from app.config.settings import DATABASE_PORT, Settings, env_name, loopback_database_url
-from app.db import names
+from app.db import migrate, names
 
 FIELDS = {"database_url": names.APP_ROLE, "migration_database_url": names.MIGRATOR_ROLE}
 # The variable each URL is read from -> its role.
@@ -129,7 +129,7 @@ OTHER_PORT = "host=127.0.0.1 port=55433 user={role} dbname=" + DB
 FOREIGN_HOST = "postgresql://{role}@192.0.2.1:" + f"{PORT}/{DB}"
 
 
-@pytest.mark.parametrize("spelling", [str.upper, str.lower])
+@pytest.mark.parametrize("spelling", [str.upper, str.lower, str.title])
 def test_prefixed_names_are_read(monkeypatch: pytest.MonkeyPatch, spelling) -> None:
     for field, role in FIELDS.items():
         monkeypatch.setenv(spelling(PREFIX + field.upper()), OTHER_PORT.format(role=role))
@@ -166,3 +166,13 @@ def test_unprefixed_names_in_a_dotenv_change_nothing(settings: Settings, tmp_pat
     new.write_text("".join(f"{PREFIX}{field.upper()}={url}\n" for field, url in lines.items()))
     with pytest.raises(ValidationError, match="host must be"):
         Settings(_env_file=new)
+
+
+def test_migrate_help_names_the_prefixed_variable(capsys: pytest.CaptureFixture[str]) -> None:
+    # Review finding test-4: the help text is built with env_name(), which the file scan
+    # cannot see; this pins what it prints.
+    with pytest.raises(SystemExit) as exit_code:
+        migrate.main(["--help"])
+    assert exit_code.value.code == 0
+    out = capsys.readouterr().out
+    assert f"({PREFIX}MIGRATION_DATABASE_URL)" in " ".join(out.split()), out

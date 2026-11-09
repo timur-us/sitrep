@@ -162,6 +162,22 @@ def test_entry_point_refuses_a_bad_migration_url(
     assert "pw0rdCanary" not in err
 
 
+def test_entry_point_names_ignored_url_variables(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], superuser: Connection
+) -> None:
+    # Review finding sec-1: an old, unprefixed migrator URL is ignored, never connected
+    # to, and named on stderr without its value; the run takes the default URL.
+    marker = "notEchoedMarker"
+    url = f"postgresql://{names.MIGRATOR_ROLE}@192.0.2.1:55432/{marker}"
+    monkeypatch.setenv("migration_database_url".upper(), url)
+    assert migrate.main([]) == 0
+    captured = capsys.readouterr()
+    assert "migrate: nothing to apply" in captured.out, captured.out
+    notices = [line for line in captured.err.splitlines() if line.startswith("migrate: ignored:")]
+    assert len(notices) == 1, captured.err
+    assert marker not in captured.err and "192.0.2.1" not in captured.err, captured.err
+
+
 def test_second_run_applies_nothing(settings: Settings, superuser: Connection) -> None:
     before = applied(superuser)
     assert migrate.run(settings.migration_database_url) == []

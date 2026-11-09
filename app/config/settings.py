@@ -16,6 +16,8 @@ check reads them as the connection will. A rejected value is not echoed in the e
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from psycopg import ProgrammingError
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field, ValidationInfo, field_validator
@@ -35,6 +37,11 @@ ENV_PREFIX = f"{branding.SLUG.upper()}_"
 def env_name(field: str) -> str:
     """The environment variable a settings field is read from."""
     return ENV_PREFIX + field.upper()
+
+
+def ignored_url_notices(environ: Mapping[str, str]) -> list[str]:
+    """Scaffolding (review finding sec-1): one notice per unprefixed URL variable."""
+    return []
 
 
 # compose.yaml publishes the database here: not 5432, where a native PostgreSQL may listen.
