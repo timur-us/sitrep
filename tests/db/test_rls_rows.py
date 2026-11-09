@@ -369,7 +369,8 @@ def test_isolation_odd_ids_see_nothing(
     assert setting == advisor_id, setting
     assert not any(seen.values()), seen
     # The sheets are global: any advisor transaction reads them, an odd id too; '' is
-    # none (ADR 0010).
+    # none (ADR 0010). Question 1 to Timur on PR 7: if the policy becomes "the advisor
+    # exists", this line and SHEET_POLICIES in test_rls_catalog.py change together.
     assert sheets == (0 if advisor_id == "" else count(superuser, SHEETS)), sheets
 
 

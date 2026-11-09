@@ -215,22 +215,49 @@ def test_sql_hygiene() -> None:
     assert loader_calls >= 11, f"only {loader_calls} statement calls checked in {LOAD}"
 
 
+def loader_statement_problems(statements: dict[str, str]) -> list[str]:
+    """The loader's rules (ADR 0010): no statement names trust, which the database
+    generates; none truncates; every advisor table's delete is bound to the advisor as
+    well as scoped by row-level security."""
+    found = []
+    for name, value in sorted(statements.items()):
+        if re.search(r"\btrust\b", value, re.IGNORECASE):
+            found.append(f"{name}: names trust")
+        if re.search(r"\btruncate\b", value, re.IGNORECASE):
+            found.append(f"{name}: truncates")
+        delete = name.startswith("LOAD_DELETE_") and name != "LOAD_DELETE_PRODUCT_SHEETS"
+        if delete and not value.endswith(" WHERE advisor_id = %s"):
+            found.append(f"{name}: not bound to the advisor")
+    return found
+
+
 def test_the_loaders_statements() -> None:
-    # The loader (ADR 0010): no statement writes trust, which the database generates;
-    # every advisor table's delete is bound to the advisor as well as scoped by row-level
-    # security; nothing truncates.
     loader = {name: value for name, value in vars(queries).items() if name.startswith("LOAD_")}
+    # One upsert, five deletes, five inserts (review finding test-16: exact, both ways).
     assert len(loader) == 11, sorted(loader)
-    writes = [
-        name for name, value in loader.items() if re.search(r"\btrust\b", value, re.IGNORECASE)
+    assert loader_statement_problems(loader) == []
+    loader_calls, _ = scan(app_sources()[LOAD], LOAD, set(loader))
+    assert loader_calls == 11, loader_calls
+
+
+def test_planted_loader_statements_are_caught() -> None:
+    assert loader_statement_problems(
+        {
+            "LOAD_INSERT_X": "INSERT INTO documents (id, trust) VALUES (%s, %s)",
+            "LOAD_UPDATE_X": "UPDATE documents SET Trust = 'internal'",
+            "LOAD_WIPE": "TRUNCATE chunks",
+            "LOAD_DELETE_CHUNKS": "DELETE FROM chunks",
+            "LOAD_DELETE_DOCUMENTS": "DELETE FROM documents WHERE id = %s",
+            "LOAD_DELETE_PRODUCT_SHEETS": "DELETE FROM product_sheets",
+        }
+    ) == [
+        "LOAD_DELETE_CHUNKS: not bound to the advisor",
+        "LOAD_DELETE_DOCUMENTS: not bound to the advisor",
+        "LOAD_INSERT_X: names trust",
+        "LOAD_UPDATE_X: names trust",
+        "LOAD_WIPE: truncates",
     ]
-    assert not writes, writes
-    assert not [
-        name for name, value in loader.items() if re.search(r"truncate", value, re.IGNORECASE)
-    ]
-    for name, value in loader.items():
-        if name.startswith("LOAD_DELETE_") and name != "LOAD_DELETE_PRODUCT_SHEETS":
-            assert value.endswith(" WHERE advisor_id = %s"), (name, value)
+    assert loader_statement_problems({"LOAD_DELETE_X": "DELETE FROM x WHERE advisor_id = %s"}) == []
 
 
 CLEAN_QUERIES = 'X = "SELECT 1"\n'
@@ -253,6 +280,20 @@ PLANTED = [
     ("app/db/x.py", "import psycopg\npsycopg.ClientCursor(conn)\n", ".ClientCursor"),
     ("app/db/x.py", "from psycopg import ClientCursor\n", "ClientCursor"),
     ("app/db/x.py", "cur.mogrify('SELECT %s', (x,))\n", ".mogrify"),
+    # Review finding sec-1 of PR 7: outside the migration runner a statement reads or
+    # writes rows; DDL, privileges and session commands stay in reviewed migration files.
+    (
+        "app/db/x.py",
+        "conn.execute('ALTER TABLE documents NO FORCE ROW LEVEL SECURITY')\n",
+        "ALTER is not SELECT, INSERT, UPDATE, DELETE or WITH",
+    ),
+    ("app/db/x.py", "conn.execute('  drop table chunks')\n", "DROP is not SELECT"),
+    ("app/db/x.py", "conn.execute('TRUNCATE chunks')\n", "TRUNCATE is not SELECT"),
+    ("app/db/x.py", "conn.execute('GRANT ALL ON chunks TO PUBLIC')\n", "GRANT is not SELECT"),
+    ("app/db/x.py", "conn.execute('RESET ROLE')\n", "RESET is not SELECT"),
+    ("app/db/x.py", "conn.execute('-- a note\\nDO $$ BEGIN END $$')\n", "DO is not SELECT"),
+    ("app/db/x.py", "conn.execute('/* x */ CREATE TEMP TABLE c (x int)')\n", "CREATE is not"),
+    ("app/db/x.py", "cur.executemany('COPY x FROM STDIN', rows)\n", "COPY is not SELECT"),
     ("app/db/x.py", "connect(url, cursor_factory=C)\n", "cursor_factory="),
     (
         "app/db/x.py",
@@ -294,6 +335,25 @@ def test_sql_hygiene_planted_violations_are_caught(rel: str, source: str, needle
     sources = {QUERIES: CLEAN_QUERIES} | {rel: source}
     _, problems = check(sources)
     assert any(needle in problem for problem in problems), problems
+
+
+def test_a_queries_constant_that_is_not_dml_is_caught() -> None:
+    # Review finding sec-1 of PR 7: the rule reads the constant's value too.
+    sources = {
+        QUERIES: 'Y = "ALTER TABLE documents DISABLE ROW LEVEL SECURITY"\nZ = "SELECT 1"\n',
+        "app/db/x.py": (
+            "from app.db import queries\nfrom app.db.queries import Y, Z\n"
+            "conn.execute(Y)\nconn.execute(queries.Y)\nconn.execute(Z)\n"
+        ),
+    }
+    _, problems = check(sources)
+    assert [p for p in problems if "ALTER is not" in p] == [
+        "app/db/x.py:3: ALTER is not SELECT, INSERT, UPDATE, DELETE or WITH",
+        "app/db/x.py:4: ALTER is not SELECT, INSERT, UPDATE, DELETE or WITH",
+    ], problems
+    # Control: the migration runner composes DDL, and may.
+    _, problems = check({QUERIES: CLEAN_QUERIES, MIGRATE: "conn.execute('ALTER TABLE x')\n"})
+    assert problems == [], problems
 
 
 def test_sql_hygiene_clean_code_passes() -> None:

@@ -40,6 +40,8 @@ APP = ROOT / "app"
 SESSION = "app/db/session.py"
 LOAD = "app/db/load.py"
 MIGRATE = "app/db/migrate.py"
+SETTINGS = "app/config/settings.py"
+NAMES = "app/db/names.py"
 SCOPE = "owner_advisor_scope"
 LOADER = "app.db.load"
 MIGRATOR_URL = "migration_database_url"
@@ -245,10 +247,49 @@ def test_the_owner_path_is_unreachable_from_request_code() -> None:
     assert seen["SET ROLE in migrate.py"] >= 1, seen
     assert seen["prefix in load.py"] >= 1, seen
     assert seen[f"OnnxEmbedder() in {LOAD}"] == 1, seen
+    # Review finding sec-1: the owner path's other names, each where it belongs.
+    assert seen[f"become_owner in {MIGRATE}"] >= 2, seen  # the definition and run()'s call
+    assert seen[f"become_owner in {LOAD}"] >= 2, seen  # the import and run()'s call
+    assert seen[f"loopback_database_url in {SETTINGS}"] >= 3, seen
+    for rel in (SESSION, MIGRATE, SETTINGS):
+        assert seen[f"MIGRATOR_ROLE in {rel}"] >= 1, (rel, seen)
+    assert seen[f"connect() import in {LOAD}"] == 1 and seen[f"connect() import in {MIGRATE}"] == 1
+    assert seen[f"app.db.migrate import in {LOAD}"] == 1, seen
 
+
+# Review finding sec-1: the migrator's login and the owner, reached without one name the
+# first version of the scan looked for.
+OWNER_ROUTE = (
+    "from app.config.settings import loopback_database_url\n"
+    "from app.db import names\n"
+    "from app.db.connect import connect\n"
+    "from app.db.migrate import become_owner\n"
+    "with connect(loopback_database_url(names.MIGRATOR_ROLE), autocommit=True) as conn:\n"
+    "    become_owner(conn)\n"
+)
 
 # The plan's planted shapes first, then the rest of the rules.
 PLANTED = [
+    # Review finding sec-1, line by line, and as a whole.
+    ("app/harness/x.py", OWNER_ROUTE, "imports become_owner"),
+    ("app/api/x.py", "from app.db.migrate import become_owner\n", "imports become_owner"),
+    ("app/api/x.py", "from app.db.migrate import run\n", "imports app.db.migrate"),
+    ("app/api/x.py", "import app.db.migrate\n", "imports app.db.migrate"),
+    ("app/api/x.py", "from app.db import migrate\n", "imports app.db.migrate"),
+    ("app/db/x.py", "from . import migrate\n", "imports app.db.migrate"),
+    ("app/api/x.py", "migrate.become_owner(conn)\n", ".become_owner"),
+    ("app/api/x.py", "become_owner(conn)\n", "become_owner used"),
+    ("app/api/x.py", "from app.db.connect import connect\n", "imports connect from app.db.connect"),
+    ("app/db/session.py", "from app.db.connect import connect as c\n", "imports connect from"),
+    (
+        "app/api/x.py",
+        "from app.config.settings import loopback_database_url\n",
+        "imports loopback_database_url",
+    ),
+    ("app/api/x.py", "settings.loopback_database_url(role)\n", ".loopback_database_url"),
+    ("app/api/x.py", "names.MIGRATOR_ROLE\n", ".MIGRATOR_ROLE"),
+    ("app/api/x.py", "from app.db.names import OWNER_ROLE\n", "imports OWNER_ROLE"),
+    ("app/db/load.py", "names.OWNER_ROLE\n", ".OWNER_ROLE"),
     ("app/api/x.py", "from app.db.session import owner_advisor_scope\n", "imports owner"),
     (
         "app/api/x.py",
@@ -327,8 +368,13 @@ def test_the_sanctioned_uses_pass() -> None:
     load = (
         '"""The loader. It calls owner_advisor_scope() and says SET ROLE in prose."""\n'
         "from app.db.session import owner_advisor_scope\n"
+        "from app.db.connect import CheckedConnection, connect\n"
+        "from app.db.migrate import MigrationError, become_owner\n"
         "from app.embeddings.onnx import OnnxEmbedder\n"
         "PREFIX = 'rt-'\n"
+        "def run(url):\n"
+        "    with connect(url, autocommit=True) as conn:\n"
+        "        become_owner(conn)\n"
         "def write(conn, advisor):\n"
         "    with owner_advisor_scope(conn, advisor):\n"
         "        pass\n"

@@ -129,6 +129,71 @@ def test_a_repeated_key_is_refused(tmp_path: Path, built: Records) -> None:
         load.read_corpus(directory, manifest_sha256=digest)
 
 
+def rewrite(directory: Path, name: str, data: bytes) -> str:
+    """name's bytes replaced, the manifest updated to match; the manifest's new sha256."""
+    manifest_path = directory / "manifest.json"
+    old = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+    (directory / name).write_bytes(data)
+    if name != "manifest.json":
+        new = hashlib.sha256(data).hexdigest()
+        text = manifest_path.read_text(encoding="utf-8")
+        manifest_path.write_text(text.replace(old, new), encoding="utf-8")
+    return hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+
+
+def _first_line(data: bytes, line: bytes) -> bytes:
+    return line + data[data.index(b"\n") :]
+
+
+# Review finding test-11: what the reader refuses before any record is checked.
+READ_PATH = [
+    ("not UTF-8", "documents.jsonl", lambda d: b"\xff" + d, "documents.jsonl: not UTF-8"),
+    ("no last line break", "documents.jsonl", lambda d: d[:-1], "does not end with a line"),
+    ("not JSON", "documents.jsonl", lambda d: _first_line(d, b"{nope"), ":1: not JSON"),
+    ("a blank line", "mandates.jsonl", lambda d: b"\n" + d, "mandates.jsonl:1: not JSON"),
+    ("not an object", "advisors.jsonl", lambda d: _first_line(d, b"[1, 2]"), "not a JSON object"),
+    (
+        "a lone surrogate",
+        "documents.jsonl",
+        lambda d: d.replace(b'"title":"', b'"title":"\\ud800', 1),
+        "title is not valid UTF-8 text",
+    ),
+    ("a manifest not JSON", "manifest.json", lambda d: b"nope\n", "manifest.json: not JSON"),
+    ("a manifest not UTF-8", "manifest.json", lambda d: b"\xff\n", "manifest.json: not UTF-8"),
+    ("a manifest list", "manifest.json", lambda d: b"[]\n", "its files are not exactly"),
+]
+
+
+@pytest.mark.parametrize(
+    ("name", "change", "needle"),
+    [(name, change, needle) for _, name, change, needle in READ_PATH],
+    ids=[label for label, *_ in READ_PATH],
+)
+def test_the_reader_refuses_odd_bytes(
+    tmp_path: Path, built: Records, name: str, change: Callable[[bytes], bytes], needle: str
+) -> None:
+    directory, _ = plant(tmp_path, copy.deepcopy(built))
+    digest = rewrite(directory, name, change((directory / name).read_bytes()))
+    with pytest.raises(load.LoadError) as refused:
+        load.read_corpus(directory, manifest_sha256=digest)
+    assert needle in str(refused.value), refused.value
+
+
+def test_a_file_over_the_size_cap_is_refused(
+    tmp_path: Path, built: Records, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory, digest = plant(tmp_path, copy.deepcopy(built))
+    cap = (directory / "manifest.json").stat().st_size
+    assert (directory / "advisors.jsonl").stat().st_size < cap
+    # Exactly the cap reads (the manifest, then the advisors); the mandates are larger.
+    monkeypatch.setattr(load, "MAX_FILE_BYTES", cap)
+    with pytest.raises(load.LoadError, match=rf"mandates\.jsonl: larger than {cap} bytes"):
+        load.read_corpus(directory, manifest_sha256=digest)
+    monkeypatch.setattr(load, "MAX_FILE_BYTES", cap - 1)
+    with pytest.raises(load.LoadError, match=rf"manifest\.json: larger than {cap - 1} bytes"):
+        load.read_corpus(directory, manifest_sha256=digest)
+
+
 def _document(records: Records, doc_type: str = "email") -> dict[str, object]:
     return next(r for r in records["documents.jsonl"] if r["type"] == doc_type)
 
@@ -283,6 +348,47 @@ PLANTED: list[tuple[str, Callable[[Records], None], str]] = [
             ("not text", None),
         ]
     ],
+    # Review finding sec-3: a contact belongs to one mandate, and is no one of the cast.
+    (
+        "a contact of another mandate",
+        lambda r: r["mandates.jsonl"][1].update(
+            client_email=r["mandates.jsonl"][0]["client_email"]
+        ),
+        "client_email repeats another mandate's",
+    ),
+    *[
+        (
+            f"contact {person.id}",
+            _set(lambda r: _mandate(r, MINE), "client_email", person.email),
+            "client_email is a cast member's address",
+        )
+        for person in branding.CAST
+        if person.email.endswith("@" + STAFF)
+    ],
+    # Review findings test-10 and sec-6: the planted text as the offending value or key,
+    # and in no message.
+    ("type", _set(FIRST_DOC, "type", CANARY), "the type has no origin"),
+    ("lang", _set(FIRST_DOC, "lang", CANARY), "lang is not one of"),
+    ("origin", _set(FIRST_DOC, "origin", CANARY), "origin disagrees"),
+    ("trust", _set(FIRST_DOC, "trust", CANARY), "trust disagrees"),
+    ("mandate id", _set(FIRST_DOC, "mandate_id", CANARY), "its mandate is not in"),
+    ("id", _set(FIRST_DOC, "id", CANARY), "not a lower-case slug"),
+    ("id with the prefix", _set(FIRST_DOC, "id", f"rt-{CANARY}"), "attack-id prefix"),
+    ("url", _set(SHEET_DE, "url", f"https://{CANARY}.example/x"), "url is not https://"),
+    ("contact", _set(lambda r: _mandate(r, MINE), "client_email", f"{CANARY}@x"), "client_email"),
+    ("a key", _set(FIRST_DOC, CANARY, "x"), "1 unexpected key"),
+    ("a lower-case key", _set(FIRST_DOC, CANARY.lower(), "x"), "1 unexpected key"),
+    ("family", _set(lambda r: r["mandates.jsonl"][0], "family", ""), "family is not a non"),
+    ("family not text", _set(lambda r: r["mandates.jsonl"][0], "family", 7), "family is not"),
+    ("mandate lang", _set(lambda r: r["mandates.jsonl"][0], "lang", None), "lang is not one of"),
+    ("NUL in a title", _set(FIRST_DOC, "title", f"{CANARY}\x00"), "title holds a NUL"),
+    (
+        "title and body over the cap together",
+        lambda r: FIRST_DOC(r).update(
+            title="t" * (load.MAX_TEXT_CHARS // 2 + 1), body="b" * (load.MAX_TEXT_CHARS // 2)
+        ),
+        f"longer than {load.MAX_TEXT_CHARS} characters",
+    ),
 ]
 
 
@@ -301,7 +407,15 @@ def test_planted_records_are_refused(
         load.read_corpus(directory, manifest_sha256=digest)
     message = str(refused.value)
     assert needle in message, message
-    assert CANARY not in message and STAFF not in message, message
+    assert CANARY.lower() not in message.lower() and STAFF not in message, message
+
+
+def test_the_text_cap_is_exact(tmp_path: Path, built: Records) -> None:
+    # Review finding test-11: exactly MAX_TEXT_CHARS, title and body together, reads.
+    records = copy.deepcopy(built)
+    FIRST_DOC(records).update(title="t", body="b" * (load.MAX_TEXT_CHARS - 1))
+    directory, digest = plant(tmp_path, records)
+    assert len(load.read_corpus(directory, manifest_sha256=digest).documents) == 344
 
 
 def test_planted_controls_read(tmp_path: Path, built: Records) -> None:
@@ -345,6 +459,9 @@ def test_attack_documents_go_to_their_mandate_as_mailbox(corpus: load.Corpus) ->
         ([attack(mandate_id=None)], "target mandate is not in the corpus"),
         ([attack(advisor_id=OTHER)], "unexpected keys ['advisor_id']"),
         ([attack(trust="internal")], "unexpected keys ['trust']"),
+        # Review finding sec-6: attack records are not hash-pinned; a key is not echoed.
+        ([attack(**{CANARY: "x"})], "1 unexpected key"),
+        ([attack(title="\ud800")], "title is not valid UTF-8 text"),
         ([{"id": "rt-1"}], "missing"),
         ([attack(body=CANARY * 3000)], "longer than"),
         (["rt-1"], "not an object"),
@@ -355,7 +472,8 @@ def test_attack_documents_are_refused(
 ) -> None:
     with pytest.raises(load.LoadError) as refused:
         load.load_attack_documents(records, corpus)  # type: ignore[arg-type]
-    assert needle in str(refused.value) and CANARY not in str(refused.value), refused.value
+    message = str(refused.value)
+    assert needle in message and CANARY.lower() not in message.lower(), message
 
 
 def test_an_attack_id_may_not_repeat_a_corpus_id(corpus: load.Corpus) -> None:
@@ -485,6 +603,30 @@ def test_no_text_in_a_repr(corpus: load.Corpus) -> None:
         assert item.body not in repr(item) and item.title not in repr(item), repr(item)
     piece = prepared.advisors[0].chunks[0]
     assert piece.body not in repr(piece) and str(piece.embedding[0]) not in repr(piece)
+    # Review finding sec-6: a mandate's family and contact are client data too.
+    for mandate in corpus.mandates[:3]:
+        assert mandate.family not in repr(mandate) and mandate.contact not in repr(mandate)
+
+
+def test_each_vector_is_its_passages(corpus: load.Corpus) -> None:
+    # Review findings test-2 and test-3: the fake embedder is a function of the text, so
+    # each stored vector must be the one of its own passage, the sheets' included, and the
+    # first passage of a document starts with its title.
+    long = " ".join(f"Wort{n}." for n in range(2 * CHUNK_TOKENS))
+    planted = small(corpus, body=long)
+    prepared = load.prepare(planted, FakeEmbedder(), Words())
+    fake = FakeEmbedder()
+    chunks = [c for batch in prepared.advisors for c in batch.chunks]
+    assert len(chunks) >= 5, len(chunks)
+    for piece in chunks:
+        assert piece.embedding == tuple(fake.embed_passages([piece.body])[0]), piece.id
+    for row in prepared.sheets:
+        passage = f"{row.sheet.title}\n\n{row.sheet.body}".strip()
+        assert row.embedding == tuple(fake.embed_passages([passage])[0]), row.sheet.id
+    titles = {d.id: d.title for d in planted.documents}
+    for piece in chunks:
+        if piece.ordinal == 0:
+            assert piece.body.startswith(titles[piece.document_id] + "\n\n"), piece.id
 
 
 # The loader's vocabulary is ADR 0010's (the schema's CHECKs: tests/db/test_loader.py).
