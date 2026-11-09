@@ -20,12 +20,14 @@ and the rule, never the text:
 - ids are lower-case slugs, unique, and none starts with the attack-id prefix, in any
   case;
 - the advisors are exactly the cast's, and each document's advisor is its mandate's;
-- each mandate's contact is its record's client_email, on the staff domain: never an
-  address from an e-mail (the input of M2's recipient allowlist);
+- each mandate's contact is its record's client_email, on the staff domain, used by no
+  other mandate and by no one of the cast: never an address from an e-mail (the input of
+  M2's recipient allowlist);
 - each sheet's url is exactly https://<staff domain>/<its language's path>/<its slug>,
   so no port, query, fragment or user part (the input of M2's link allowlist);
-- a title and body longer than MAX_TEXT_CHARS together, or holding a NUL, are refused
-  before anything is cut (PR 4 review sec-4).
+- a title and body longer than MAX_TEXT_CHARS together, holding a NUL, or not valid
+  UTF-8 text, are refused before anything is cut (PR 4 review sec-4); an unexpected key
+  is named only when it is a plain field name.
 
 **Replacing.** Each advisor's corpus rows (chunks, documents, contacts, mandates) are
 deleted in that advisor's transaction and written again, never truncated; the advisor
@@ -88,6 +90,7 @@ ATTACK_ID_PREFIX = "rt-"
 ATTACK_ORIGIN = "mailbox"
 
 ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+KEY_NAME = re.compile(r"[a-z_]{1,32}")
 MAX_ID = 128
 LANGS = frozenset(generate.LANGS)
 CONTACT = re.compile(r"[a-z0-9]+(?:[.-][a-z0-9]+)*@" + re.escape(branding.DOMAINS.staff))
@@ -134,8 +137,9 @@ class Advisor:
 class Mandate:
     advisor_id: str
     id: str
-    family: str
-    contact: str
+    # Client data: kept out of a repr (review finding sec-6).
+    family: str = field(repr=False)
+    contact: str = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -291,7 +295,11 @@ def _keys(record: Mapping[str, Any], required: frozenset[str], where: str) -> No
         raise LoadError(f"{where}: missing {missing}")
     extra = sorted(record.keys() - required)
     if extra:
-        raise LoadError(f"{where}: unexpected keys {extra}")
+        # A key is named only when it is a plain field name: an attack record's keys are
+        # not hash-pinned, and a key can carry any text (review finding sec-6).
+        if all(type(key) is str and KEY_NAME.fullmatch(key) for key in extra):
+            raise LoadError(f"{where}: unexpected keys {extra}")
+        raise LoadError(f"{where}: {len(extra)} unexpected key{'s' if len(extra) > 1 else ''}")
 
 
 def _id(value: object, where: str, what: str = "id") -> str:
@@ -311,13 +319,23 @@ def _lang(value: object, where: str) -> str:
     return value
 
 
+def _text_field(value: object, where: str, name: str) -> str:
+    """value as text: a non-empty str without NUL that UTF-8 can encode (a lone surrogate
+    from a JSON escape cannot; review finding sec-6)."""
+    if type(value) is not str or not value.strip():
+        raise LoadError(f"{where}: {name} is not a non-empty string")
+    if "\x00" in value:
+        raise LoadError(f"{where}: {name} holds a NUL character")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise LoadError(f"{where}: {name} is not valid UTF-8 text") from None
+    return value
+
+
 def _texts(record: Mapping[str, Any], where: str) -> tuple[str, str]:
-    title, body = record["title"], record["body"]
-    for name, value in (("title", title), ("body", body)):
-        if type(value) is not str or not value.strip():
-            raise LoadError(f"{where}: {name} is not a non-empty string")
-        if "\x00" in value:
-            raise LoadError(f"{where}: {name} holds a NUL character")
+    title = _text_field(record["title"], where, "title")
+    body = _text_field(record["body"], where, "body")
     if len(title) + len(body) > MAX_TEXT_CHARS:
         raise LoadError(f"{where}: title and body are longer than {MAX_TEXT_CHARS} characters")
     return title, body
@@ -362,6 +380,7 @@ def parse_corpus(records: Mapping[str, Sequence[Mapping[str, Any]]], digest: str
         raise LoadError("advisors.jsonl: not exactly the cast's advisors, in order")
 
     advisor_ids = {advisor_id for advisor_id, _, _ in cast}
+    cast_emails = {person.email for person in branding.CAST}
     mandates: dict[str, Mandate] = {}
     for number, record in enumerate(records["mandates.jsonl"], start=1):
         where = f"mandates.jsonl:{number}"
@@ -372,12 +391,17 @@ def parse_corpus(records: Mapping[str, Sequence[Mapping[str, Any]]], digest: str
             raise LoadError(f"{where}: its advisor is not one of the cast's")
         if mandate_id in mandates:
             raise LoadError(f"{where}: a duplicate id")
-        family, contact = record["family"], record["client_email"]
-        if type(family) is not str or not family.strip():
-            raise LoadError(f"{where}: family is not a non-empty string")
+        family, contact = _text_field(record["family"], where, "family"), record["client_email"]
         _lang(record["lang"], where)
         if type(contact) is not str or not CONTACT.fullmatch(contact):
             raise LoadError(f"{where}: client_email is not a lower-case staff-domain address")
+        # One mandate's recipient, and no one of the cast: the input of M2's recipient
+        # allowlist must not let a draft of one mandate go to another's client, or to
+        # staff (review finding sec-3).
+        if contact in cast_emails:
+            raise LoadError(f"{where}: client_email is a cast member's address")
+        if contact in {m.contact for m in mandates.values()}:
+            raise LoadError(f"{where}: client_email repeats another mandate's")
         mandates[mandate_id] = Mandate(record["advisor_id"], mandate_id, family, contact)
 
     taken: set[str] = set()
@@ -452,6 +476,8 @@ def load_attack_documents(
             raise LoadError(f"{where}: not an object")
         _keys({key: None for key in record if key not in ATTACK_OPTIONAL}, ATTACK_KEYS, where)
         doc_id = record["id"]
+        # Case-sensitive here, since an attack id must be a lower-case slug anyway; the
+        # corpus side (_id) and the schema compare the prefix in any case.
         if type(doc_id) is not str or not doc_id.startswith(ATTACK_ID_PREFIX):
             raise LoadError(f"{where}: an attack id must start with the attack-id prefix")
         if len(doc_id) > MAX_ID or not ID.fullmatch(doc_id):

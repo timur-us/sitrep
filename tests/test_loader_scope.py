@@ -10,8 +10,13 @@ unreachable from app/ request code, "with the same scan as for issue()"
 - any import of app.db.load anywhere in app/ (absolute, from app.db, relative, or as an
   attribute of app.db), and the module's dotted name in a string;
 - any use of migration_database_url (a name, an attribute, a keyword, or a string, any
-  case) outside app/config/settings.py, app/db/migrate.py and app/db/load.py, so request
-  code never holds the migrator's login (PR 1 review sec-3);
+  case) outside app/config/settings.py, app/db/migrate.py and app/db/load.py (PR 1 review
+  sec-3);
+- the owner path's other names (review finding sec-1 of PR 7): become_owner outside the
+  migration runner and the loader, loopback_database_url outside the settings, the
+  migrator's and the owner's role names outside the files that use them today, an import
+  of app.db.migrate outside the loader, and of the connect() helper outside the runner
+  and the loader;
 - any string that says SET ROLE outside app/db/migrate.py, which composes the one
   statement the migrator and the loader run (PR 1 review sec-3);
 - the attack-id prefix in a string outside app/db/load.py (PR 1 review sec-8);
@@ -21,7 +26,13 @@ unreachable from app/ request code, "with the same scan as for issue()"
 Docstrings are prose and are not read as strings. Like the identity scan, it reads names
 and literals: getattr() with a string built at runtime, globals(), or a module imported
 by a name built at runtime (importlib is banned by tests/test_import_allowlist.py) is not
-caught. At runtime owner_advisor_scope() refuses every session but the migrator acting
+caught. Nor is a connection string written out by hand, or Settings().model_dump(),
+which holds the migrator's URL: locally, trust auth lets any process log in as any role,
+the superuser too (ADR 0008), so this scan keeps request code from the obvious routes,
+and is no boundary. The boundary in Azure is the identity (M3: the app's identity can
+obtain neither the loader's login nor the migrator's). tests/test_sql_hygiene.py keeps
+app/ statements outside the migration runner to SELECT, INSERT, UPDATE, DELETE and WITH.
+At runtime owner_advisor_scope() refuses every session but the migrator's login acting
 as the owner (tests/db/test_loader.py), so the app role fails there as well.
 """
 
@@ -51,6 +62,18 @@ SET_ROLE = re.compile(r"\bSET\s+ROLE\b", re.IGNORECASE)
 PREFIX = re.compile(r"(?<![a-z0-9])rt-", re.IGNORECASE)
 EMBEDDER_FACTORIES = frozenset({"OnnxEmbedder", "load_tokenizer"})
 EMBEDDINGS = "app/embeddings/"
+# Review finding sec-1: the names that reach the owner without saying "migration URL",
+# and the only files that use them today. A name, an attribute or an import elsewhere is
+# reported, so is an import of the migration runner or of the connect() helper.
+OWNER_NAMES = {
+    "become_owner": frozenset({MIGRATE, LOAD}),
+    "loopback_database_url": frozenset({SETTINGS}),
+    "MIGRATOR_ROLE": frozenset({NAMES, SETTINGS, SESSION, MIGRATE}),
+    "OWNER_ROLE": frozenset({NAMES, SESSION, MIGRATE}),
+}
+MIGRATE_MODULE = "app.db.migrate"
+MIGRATE_IMPORTERS = frozenset({LOAD})
+CONNECT_HELPER_FILES = frozenset({MIGRATE, LOAD})
 
 
 def docstrings(tree: ast.AST) -> set[int]:
@@ -153,6 +176,56 @@ def scan(source: str, rel: str) -> tuple[list[str], Counter[str]]:
                 db_names |= {
                     alias.asname or alias.name for alias in node.names if alias.name == "db"
                 }
+
+        # The owner path's other names (review finding sec-1): each where it is used today.
+        for name, homes in OWNER_NAMES.items():
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                kind = "defines"
+            elif isinstance(node, ast.alias) and name in (node.name, node.asname):
+                kind = "imports"
+            elif isinstance(node, ast.Name) and node.id == name:
+                kind = "used"
+            elif isinstance(node, ast.Attribute) and node.attr == name:
+                kind = "attribute"
+            else:
+                continue
+            if rel in homes:
+                seen[f"{name} in {rel}"] += 1
+            elif kind == "attribute":
+                found.append(f"{where}: .{name}")
+            elif kind == "used":
+                found.append(f"{where}: {name} used")
+            else:
+                found.append(f"{where}: {kind} {name}")
+        migrate_import = (
+            isinstance(node, ast.Import)
+            and any(
+                alias.name == MIGRATE_MODULE or alias.name.startswith(MIGRATE_MODULE + ".")
+                for alias in node.names
+            )
+        ) or (
+            isinstance(node, ast.ImportFrom)
+            and (
+                absolute(node, rel) == MIGRATE_MODULE
+                or (
+                    absolute(node, rel) == "app.db"
+                    and any(alias.name == "migrate" for alias in node.names)
+                )
+            )
+        )
+        if migrate_import:
+            if rel in MIGRATE_IMPORTERS:
+                seen[f"{MIGRATE_MODULE} import in {rel}"] += 1
+            else:
+                found.append(f"{where}: imports {MIGRATE_MODULE}")
+        if isinstance(node, ast.ImportFrom) and absolute(node, rel) == "app.db.connect":
+            for alias in node.names:
+                if alias.name != "connect":
+                    continue
+                if rel in CONNECT_HELPER_FILES:
+                    seen[f"connect() import in {rel}"] += 1
+                else:
+                    found.append(f"{where}: imports connect from app.db.connect")
 
         # Keywords and attributes that name the migrator's URL.
         keyword = isinstance(node, ast.keyword) and (node.arg or "").lower() == MIGRATOR_URL

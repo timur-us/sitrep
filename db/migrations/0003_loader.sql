@@ -9,7 +9,8 @@
 -- never permission: every retrieval hit is still Untrusted in the harness (rule 9).
 --
 -- Attack documents (M1 PR 17) carry ids starting with 'rt-', in any case: in documents
--- only, and only as mailbox. No other table holds such an id.
+-- only, and only as mailbox. Their chunks' ids start so too, tied to the document by the
+-- foreign key; advisors, mandates, contacts and product sheets refuse such an id.
 
 -- Rows that exist before this file (test leftovers: nothing loaded the corpus before)
 -- take 'mailbox', the untrusted origin. The default goes again at once, so every writer

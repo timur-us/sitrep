@@ -48,7 +48,11 @@ refuses before it writes anything unless all of these hold:
   transaction, and a second call inside the first is refused;
 - session_user is the migrator and current_user the owner (the migrator after SET ROLE),
   neither of them a superuser or BYPASSRLS, with the role's own search_path and no
-  advisor set yet.
+  advisor set yet;
+- the login itself is the migrator: a superuser can take the migrator's session
+  authorization, which changes session_user but not the login pg_stat_activity shows;
+- the session holds no temporary relation: the loader's statements name tables without
+  a schema, and the owner may create temporary tables, which a name finds first.
 Request code cannot reach it: tests/test_loader_scope.py reports any use outside this
 definition and its one call in app/db/load.py, and any import of app/db/load.py in app/.
 That scan reads names and literals, so getattr() with a built string is not caught; the
@@ -185,23 +189,30 @@ def advisor_transaction(pool: Pool, advisor: VerifiedAdvisor) -> Iterator[Checke
 def owner_session_problems(row: tuple[object, ...] | None) -> list[str]:
     """What is wrong with a session for the loader, from the row owner_advisor_scope()
     reads: session_user, current_user, whether either is a superuser or BYPASSRLS, the
-    advisor setting and the search_path."""
+    advisor setting, the search_path, the login (pg_stat_activity), and how many
+    temporary relations the session holds."""
     if row is None:
         return ["the session's roles have no pg_roles row"]
     session_user, current_user, session_privileged, current_privileged = row[:4]
-    advisor, search_path = row[4:]
+    advisor, search_path, login, temporary = row[4:]
     found = []
     if (session_user, current_user) != (names.MIGRATOR_ROLE, names.OWNER_ROLE):
         found.append(
             f"session_user {session_user}, current_user {current_user}, "
             f"expected {names.MIGRATOR_ROLE} acting as {names.OWNER_ROLE}"
         )
+    # SET SESSION AUTHORIZATION changes session_user, never the login (review sec-5).
+    if login != names.MIGRATOR_ROLE:
+        found.append(f"the login is not {names.MIGRATOR_ROLE}")
     if session_privileged or current_privileged:
         found.append("a role of the session is a superuser or has BYPASSRLS")
     if advisor not in (None, ""):
         found.append("an advisor is already set in this transaction")
     if search_path != names.SEARCH_PATH:
         found.append(f"search_path is not {names.SEARCH_PATH}")
+    # Unqualified names find a temporary table first: it would take the writes (sec-4).
+    if temporary != 0:
+        found.append("the session holds temporary relations, which come first by name")
     return found
 
 
@@ -217,7 +228,11 @@ def owner_advisor_scope(conn: CheckedConnection, advisor_id: str) -> Iterator[Ch
             "SELECT session_user, current_user, s.rolsuper OR s.rolbypassrls,"
             " c.rolsuper OR c.rolbypassrls,"
             " pg_catalog.current_setting('app.advisor_id', true),"
-            " pg_catalog.current_setting('search_path')"
+            " pg_catalog.current_setting('search_path'),"
+            " (SELECT a.usename FROM pg_catalog.pg_stat_activity a"
+            "  WHERE a.pid = pg_catalog.pg_backend_pid()),"
+            " (SELECT count(*) FROM pg_catalog.pg_class t"
+            "  WHERE t.relnamespace = pg_catalog.pg_my_temp_schema())"
             " FROM pg_catalog.pg_roles s, pg_catalog.pg_roles c"
             " WHERE s.rolname = session_user AND c.rolname = current_user"
         ).fetchone()

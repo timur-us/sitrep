@@ -182,7 +182,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"migrate: refused: {refused}", file=sys.stderr)
         return 1
     except psycopg.Error as error:
-        print(f"migrate: {type(error).__name__} ({error.sqlstate}): {error}", file=sys.stderr)
+        # The primary message only: a DETAIL line can carry a row's values (review
+        # finding sec-9 of M1 PR 7), as in app/db/load.py.
+        primary = error.diag.message_primary or ""
+        print(f"migrate: {type(error).__name__} ({error.sqlstate}): {primary}", file=sys.stderr)
         return 1
     for file_name in applied:
         print(f"migrate: applied {file_name}")

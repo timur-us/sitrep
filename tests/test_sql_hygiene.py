@@ -14,7 +14,11 @@ built from strings. An AST scan of app/:
 - app/db/queries.py holds string literals only;
 - set_config and app.advisor_id appear in app/db/session.py only, in any text there,
   in any case and with any spacing around the dot;
-- no string anywhere in app/ says SET LOCAL, SET SESSION or SET app.
+- no string anywhere in app/ says SET LOCAL, SET SESSION or SET app.;
+- outside app/db/migrate.py every statement, literal or constant, is SELECT, INSERT,
+  UPDATE, DELETE or WITH (COPY for .copy): DDL, privileges and session commands such
+  as ALTER TABLE ... NO FORCE ROW LEVEL SECURITY stay in reviewed migration files
+  (review finding sec-1 of M1 PR 7).
 
 app/db/migrate.py is excepted from the first two rules: it composes its own DDL with
 psycopg.sql from app/db/names.py, never from input.
@@ -51,6 +55,16 @@ SESSION_ONLY = {
     "app.advisor_id": re.compile(r"app\s*\.\s*advisor_id", re.IGNORECASE),
 }
 SET_COMMAND = re.compile(r"\bSET\s+(?:LOCAL\b|SESSION\b|app\s*\.)", re.IGNORECASE)
+# The statements app/ may run outside the migration runner, by their first keyword.
+DML = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE", "WITH"})
+LEADING = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.DOTALL)
+
+
+def first_keyword(statement: str) -> str:
+    """The statement's first word, after whitespace and comments, in upper case."""
+    rest = statement[LEADING.match(statement).end() :]
+    word = re.match(r"[A-Za-z]+", rest)
+    return word.group(0).upper() if word else rest[:1]
 
 
 def query_constants(source: str) -> tuple[set[str], list[str]]:
@@ -75,7 +89,9 @@ def query_constants(source: str) -> tuple[set[str], list[str]]:
     return names, problems
 
 
-def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
+def scan(
+    source: str, rel: str, constants: set[str], values: dict[str, str] | None = None
+) -> tuple[int, list[str]]:
     """The statement calls checked in one file, and the rule breaks found there."""
     tree = ast.parse(source)
     modules: set[str] = set()  # local names for app.db.queries
@@ -161,6 +177,12 @@ def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
                     f"{where}: .{node.func.attr}() takes {kind}, "
                     f"not a literal or a constant from {QUERIES}"
                 )
+                continue
+            text = statement_text(statement, values or {})
+            keyword = first_keyword(text) if text is not None else None
+            permitted = DML | ({"COPY"} if node.func.attr == "copy" else set())
+            if keyword is not None and keyword not in permitted:
+                problems.append(f"{where}: {keyword} is not SELECT, INSERT, UPDATE, DELETE or WITH")
         if composes and isinstance(node, ast.Assign | ast.AugAssign | ast.AnnAssign):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
@@ -182,11 +204,38 @@ def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
     return checked, problems
 
 
+def statement_text(statement: ast.expr, values: dict[str, str]) -> str | None:
+    """The SQL an allowed statement argument stands for, where the scan can tell."""
+    if isinstance(statement, ast.Constant) and isinstance(statement.value, str):
+        return statement.value
+    if isinstance(statement, ast.Name):
+        return values.get(statement.id)
+    if isinstance(statement, ast.Attribute):
+        return values.get(statement.attr)
+    return None
+
+
+def query_values(source: str) -> dict[str, str]:
+    """queries.py's constants and their statements."""
+    found = {}
+    for node in ast.parse(source).body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            found[node.targets[0].id] = node.value.value
+    return found
+
+
 def check(sources: dict[str, str]) -> tuple[int, list[str]]:
     constants, problems = query_constants(sources.get(QUERIES, ""))
+    values = query_values(sources.get(QUERIES, ""))
     total = 0
     for rel, source in sorted(sources.items()):
-        checked, found = scan(source, rel, constants)
+        checked, found = scan(source, rel, constants, values)
         total += checked
         problems += found
     return total, problems
