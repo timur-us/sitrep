@@ -161,3 +161,12 @@ def advisor_transaction(pool: Pool, advisor: VerifiedAdvisor) -> Iterator[Checke
         with conn.transaction():
             conn.execute("SELECT set_config('app.advisor_id', %s, true)", (advisor.advisor_id,))
             yield conn
+
+
+# The loader's scope (ADR 0010; M1 PR 7): scaffolding for the tests that come first.
+def owner_session_problems(row: tuple[object, ...] | None) -> list[str]:
+    raise NotImplementedError("M1 PR 7: built in the next commit")
+
+
+def owner_advisor_scope(conn: CheckedConnection, advisor_id: str) -> Iterator[CheckedConnection]:
+    raise NotImplementedError("M1 PR 7: built in the next commit")

@@ -33,10 +33,13 @@ import re
 import pytest
 from repo_files import ROOT
 
+from app.db import queries
+
 APP = ROOT / "app"
 SESSION = "app/db/session.py"
 QUERIES = "app/db/queries.py"
 MIGRATE = "app/db/migrate.py"
+LOAD = "app/db/load.py"
 STATEMENT_METHODS = frozenset({"execute", "executemany", "copy", "stream"})
 # Never referenced without a call; .copy is left out, it is also dict's and list's.
 CALLED_ONLY = frozenset({"execute", "executemany", "stream"})
@@ -198,15 +201,36 @@ def app_sources() -> dict[str, str]:
 
 def test_sql_hygiene() -> None:
     sources = app_sources()
-    for required in (SESSION, QUERIES, MIGRATE, "app/db/connect.py"):
+    for required in (SESSION, QUERIES, MIGRATE, LOAD, "app/db/connect.py"):
         assert required in sources, f"{required} was not scanned"
     checked, problems = check(sources)
     assert not problems, "\n".join(problems)
-    # Non-vacuity: the advisor setting and the guard in session.py are among the calls.
+    # Non-vacuity: the advisor setting and the guard in session.py are among the calls,
+    # and so are the loader's statements.
     assert checked >= 2, f"only {checked} statement calls checked"
     assert "set_config" in sources[SESSION]
     constants, _ = query_constants(sources[QUERIES])
     assert {"SEARCH_DOCUMENTS_ENGLISH", "SEARCH_DOCUMENTS_GERMAN"} <= constants, constants
+    loader_calls, _ = scan(sources[LOAD], LOAD, constants)
+    assert loader_calls >= 11, f"only {loader_calls} statement calls checked in {LOAD}"
+
+
+def test_the_loaders_statements() -> None:
+    # The loader (ADR 0010): no statement writes trust, which the database generates;
+    # every advisor table's delete is bound to the advisor as well as scoped by row-level
+    # security; nothing truncates.
+    loader = {name: value for name, value in vars(queries).items() if name.startswith("LOAD_")}
+    assert len(loader) == 11, sorted(loader)
+    writes = [
+        name for name, value in loader.items() if re.search(r"\btrust\b", value, re.IGNORECASE)
+    ]
+    assert not writes, writes
+    assert not [
+        name for name, value in loader.items() if re.search(r"truncate", value, re.IGNORECASE)
+    ]
+    for name, value in loader.items():
+        if name.startswith("LOAD_DELETE_") and name != "LOAD_DELETE_PRODUCT_SHEETS":
+            assert value.endswith(" WHERE advisor_id = %s"), (name, value)
 
 
 CLEAN_QUERIES = 'X = "SELECT 1"\n'

@@ -106,6 +106,11 @@ def check_applied(applied: dict[str, tuple[str, str]], migrations: list[Migratio
             raise MigrationError(f"{file_name} changed after it was applied")
 
 
+def become_owner(conn: psycopg.Connection[Any]) -> None:
+    """Scaffolding for the tests that come first (M1 PR 7)."""
+    raise NotImplementedError("M1 PR 7: built in the next commit")
+
+
 def run(url: str, directory: Path = MIGRATIONS) -> list[str]:
     """Apply the new migrations; return their file names."""
     migrations = load(directory)

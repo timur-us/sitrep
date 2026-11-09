@@ -25,6 +25,10 @@ ALLOWED = frozenset(
         "argparse",
         "collections",
         "contextlib",
+        # app/db/load.py only: the generator's ORIGIN, trust_for, LANGS and paths
+        # (data/synthetic/generate.py, standard library and branding only; ADR 0010).
+        # The image carries no data/, and no request path imports the loader.
+        "data",
         "dataclasses",
         # app/harness/mvp_tools.py: the follow-up's due date. No clock is read in app/.
         "datetime",
@@ -142,12 +146,15 @@ DB_CONNECT_FILE = "app/db/connect.py"
 POOL_FILE = "app/db/session.py"
 # The embedder: the one file that loads a model, from checked bytes (ADR 0005).
 EMBEDDER_FILE = "app/embeddings/onnx.py"
+# The loader: the one file that reads the synthetic corpus's generator (ADR 0010).
+LOADER_FILE = "app/db/load.py"
 # Modules that one file alone may import.
 SINGLE_FILE = {
     "psycopg_pool": POOL_FILE,
     "numpy": EMBEDDER_FILE,
     "onnxruntime": EMBEDDER_FILE,
     "tokenizers": EMBEDDER_FILE,
+    "data": LOADER_FILE,
 }
 # On the os module only: running or replacing a program.
 OS_PROGRAM = re.compile(r"system|popen|startfile|fork\w*|exec\w*|spawn\w*|posix_spawn\w*")
@@ -230,6 +237,7 @@ def test_import_allowlist() -> None:
         "app/observability/tracing.py",
         "app/db/connect.py",
         EMBEDDER_FILE,
+        LOADER_FILE,
     ):
         assert required in sources, f"{required} was not scanned"
     modules, problems = check(sources)
@@ -276,6 +284,9 @@ PLANTED = [
     ("import tokenizers\n", "tokenizers outside app/embeddings/onnx.py"),
     ("from tokenizers import Tokenizer\n", "tokenizers outside"),
     ("import numpy as np\n", "numpy outside app/embeddings/onnx.py"),
+    # The generator, outside the loader (ADR 0010).
+    ("from data.synthetic import generate\n", "data outside app/db/load.py"),
+    ("import data.synthetic.generate\n", "data outside app/db/load.py"),
     # Their network and native-code paths, anywhere.
     ("Tokenizer.from_pretrained('org/model')\n", ".from_pretrained"),
     ("from transformers import from_pretrained\n", "import from_pretrained"),
@@ -320,6 +331,12 @@ def test_the_embedder_libraries_are_allowed_in_their_own_file() -> None:
     assert scan(source, "app/embeddings/chunking.py")[1] != []
     # The ban on from_pretrained holds there too.
     assert scan("tokenizers.Tokenizer.from_pretrained('x')\n", "app/embeddings/onnx.py")[1] != []
+
+
+def test_the_generator_is_allowed_in_the_loader_only() -> None:
+    source = "from data.synthetic import generate\n"
+    assert scan(source, LOADER_FILE)[1] == []
+    assert scan(source, "app/db/migrate.py")[1] != []
 
 
 def test_connect_is_allowed_in_its_own_file() -> None:
