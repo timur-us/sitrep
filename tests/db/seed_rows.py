@@ -2,13 +2,20 @@
 
 The superuser inserts the rows; it bypasses row-level security, so it also sees every
 row, which makes it the reference count. Each table the app role can read needs a
-factory in FACTORIES: the tests discover the readable tables from pg_catalog and fail
-on a table without one, so a new table cannot arrive without its fail-closed test.
+factory: the tests discover the readable tables from pg_catalog and fail on a table
+without one, so a new table cannot arrive without its fail-closed test. Advisor-scoped
+tables have one in FACTORIES; product_sheets, the one global table (ADR 0010), has
+SHEET and its own tests.
 
 Every id starts with SEED and names its advisor, and the seed's advisor rows carry
 SEED_ADVISOR, so the seed never collides with other data and the cleanup removes
 exactly the seed. The rows are committed: the database tests assume one pytest process
 at a time (no xdist). Advisor ids come from branding.
+
+The corpus may be loaded (`make load`, or tests/db/test_loader.py earlier in the run),
+and the seed lives beside it: where an advisor row exists, the seed adds its rows under
+it and leaves the row alone. The loader replaces an advisor's rows, the seed's included,
+so each test module seeds for itself (the `seeded` fixture is module-scoped).
 """
 
 from __future__ import annotations
@@ -68,6 +75,11 @@ def rows_for(advisor_id: str, suffix: str, parent: str = "1") -> dict[str, dict[
     return {
         "advisors": {"advisor_id": advisor_id, "display_name": f"{SEED_ADVISOR} {advisor_id}"},
         "mandates": {"advisor_id": advisor_id, "id": f"{key}-{suffix}-m", "family": "Seedfamily"},
+        "mandate_contacts": {
+            "advisor_id": advisor_id,
+            "mandate_id": f"{key}-{parent}-m",
+            "email": f"{key}-{suffix}@{branding.DOMAINS.staff}",
+        },
         "documents": {
             "advisor_id": advisor_id,
             "id": f"{key}-{suffix}-d",
@@ -75,6 +87,7 @@ def rows_for(advisor_id: str, suffix: str, parent: str = "1") -> dict[str, dict[
             "title": "Seed report",
             "body": "Quarterly portfolio report, seeded for the boundary tests.",
             "lang": "english",
+            "origin": "portfolio_system",
         },
         "chunks": {
             "advisor_id": advisor_id,
@@ -89,9 +102,29 @@ def rows_for(advisor_id: str, suffix: str, parent: str = "1") -> dict[str, dict[
     }
 
 
-# The tables a factory exists for, in insert order.
+# The advisor-scoped tables a factory exists for, in insert order.
 FACTORIES = tuple(rows_for("x", "1"))
-TABLES = frozenset(f"{names.SCHEMA}.{table}" for table in FACTORIES)
+ADVISOR_TABLES = frozenset(f"{names.SCHEMA}.{table}" for table in FACTORIES)
+# The one global table (ADR 0010): no advisor_id, read in any advisor transaction. The
+# catalog tests exempt this name, and only this name, from the advisor_id rules.
+SHEETS = f"{names.SCHEMA}.product_sheets"
+GLOBAL_TABLES = frozenset({SHEETS})
+TABLES = ADVISOR_TABLES | GLOBAL_TABLES
+
+# One seeded product sheet.
+SHEET = {
+    "id": f"{SEED}-sheet",
+    "title": "Seed sheet",
+    "body": "A product sheet, seeded for the boundary tests.",
+    "lang": "english",
+    "url": f"https://{branding.DOMAINS.staff}/products/{SEED}-sheet",
+    "origin": "product_catalogue",
+    "embedding": vector(1),
+    "embedding_model": "fake/seed",
+    "embedding_revision": "seed",
+}
+# The column that marks a seeded row, where it is not id.
+SEED_COLUMN = {"mandate_contacts": "mandate_id"}
 
 
 def table_id(table: str) -> sql.Identifier:
@@ -114,8 +147,9 @@ def insert(conn: Connection, table: str, row: dict[str, Any], *, if_absent: bool
 
 
 def key_of(table: str, row: dict[str, Any]) -> tuple[str, Any]:
-    """The key column besides advisor_id, and its value."""
-    column = "advisor_id" if table.rpartition(".")[2] == "advisors" else "id"
+    """The column besides advisor_id that tells one advisor's rows apart, and its value."""
+    name = table.rpartition(".")[2]
+    column = {"advisors": "advisor_id", "mandate_contacts": "email"}.get(name, "id")
     return column, row[column]
 
 
@@ -146,20 +180,27 @@ def cleanup(conn: Connection) -> None:
             )
         else:
             conn.execute(
-                sql.SQL("DELETE FROM {} WHERE id LIKE %s").format(table_id(table)),
+                sql.SQL("DELETE FROM {} WHERE {} LIKE %s").format(
+                    table_id(table), sql.Identifier(SEED_COLUMN.get(table, "id"))
+                ),
                 (SEED + "-%",),
             )
+    conn.execute(
+        sql.SQL("DELETE FROM {} WHERE id LIKE %s").format(table_id(SHEETS)), (SEED + "-%",)
+    )
 
 
 @contextmanager
 def seeded_database() -> Iterator[None]:
-    """One row per table for each advisor, committed; removed again afterwards."""
+    """One row per advisor-scoped table for each advisor, and one product sheet,
+    committed; removed again afterwards."""
     with connect(SUPERUSER_URL, autocommit=True) as conn:
         cleanup(conn)
         with conn.transaction():
             for person in branding.ADVISORS:
                 for table, row in rows_for(person.id, "1").items():
                     insert(conn, f"{names.SCHEMA}.{table}", row, if_absent=True)
+            insert(conn, SHEETS, SHEET, if_absent=True)
         try:
             yield
         finally:

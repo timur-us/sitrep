@@ -3,7 +3,8 @@
 Run as `python -P -m data.synthetic.generate [--out DIR]` (`make data`). It writes
 `advisors.jsonl`, `mandates.jsonl`, `documents.jsonl`, `product_sheets.jsonl` and
 `manifest.json` (the seed, the generator version and a sha256 per file) into
-`data/synthetic/out/`, which git ignores. The loader is M1.
+`data/synthetic/out/`, which git ignores. `app/db/load.py` (`make load`) loads it.
+Each product sheet carries its exact URL as a field (`url`), which its body names too.
 
 - **Deterministic.** The standard library and `app.config.branding` only, one
   `random.Random(SEED)`, no clock, no
@@ -550,6 +551,7 @@ def _product_sheet(
     labels = {key: _pick((de, en), lang) for key, de, en in ASSET_CLASSES}
     asset_class = labels.get(product.asset_class) or _pick(MULTI_ASSET, lang)
     (day,) = _days_back(rng, 1, 30, 180)
+    url = product_url(product)
     values = {
         "product": product.name,
         "bank": branding.BANK.legal_name if lang == "german" else branding.BANK.display_name,
@@ -557,11 +559,11 @@ def _product_sheet(
         "sri": str(product.sri),
         "ongoing_charges": basis_points(product.ongoing_charges_bp, lang),
         "min_investment": whole_euros(product.min_investment_eur, lang),
-        "product_url": f"https://{branding.DOMAINS.staff}/{PRODUCT_PATH[lang]}/{product.slug}",
+        "product_url": url,
         "date": long_date(day, lang),
     }
     title, body = _render(templates[lang]["product"][0], values)
-    return _document(
+    record = _document(
         advisor_id=None,
         mandate_id=None,
         doc_id=f"product-{product.slug}",
@@ -571,6 +573,13 @@ def _product_sheet(
         body=body,
         day=day,
     )
+    # The structured URL the loader stores (ADR 0010): the same one the body names.
+    return record | {"url": url}
+
+
+def product_url(product: Product) -> str:
+    """The sheet's exact URL: https, the staff domain, its language's path and its slug."""
+    return f"https://{branding.DOMAINS.staff}/{PRODUCT_PATH[product.lang]}/{product.slug}"
 
 
 def serialise(records: list[dict[str, object]]) -> bytes:

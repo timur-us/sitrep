@@ -33,12 +33,14 @@ from repo_files import ROOT
 from secret_patterns import find_secrets
 
 from app.config import branding
+from app.db import load
 from app.runners import corpus as runner_corpus
 from data.synthetic import generate
 
 # The sha256 of manifest.json for the committed templates and names. A change to the
-# generator, a template or the names list changes it; update it on purpose, in the same PR.
-GOLDEN_MANIFEST_SHA256 = "02235aa49e3b989562a6f9f573c4480f73d50ef3c7c340ee92a6a874d7d47177"
+# generator, a template or the names list changes it; update it on purpose, in the same PR,
+# together with app/db/load.py's MANIFEST_SHA256, the only corpus the loader takes.
+GOLDEN_MANIFEST_SHA256 = "7053bbbc4bd2b52f4c1ddacd4647726dc9a556422661d8bb1bbadd269b29bf5d"
 
 DATA_FILES = ("advisors.jsonl", "documents.jsonl", "mandates.jsonl", "product_sheets.jsonl")
 FILES = (*DATA_FILES, "manifest.json")
@@ -104,6 +106,7 @@ def test_deterministic(tmp_path: Path, out: Path) -> None:
     assert manifest["files"] == hashes, "the manifest does not match the files"
     digest = hashlib.sha256(files["manifest.json"]).hexdigest()
     assert digest == GOLDEN_MANIFEST_SHA256, f"manifest sha256 {digest}"
+    assert load.MANIFEST_SHA256 == GOLDEN_MANIFEST_SHA256, "the loader expects another corpus"
 
 
 def test_counts_and_ownership(corpus: dict[str, list[dict]]) -> None:
@@ -157,6 +160,10 @@ def test_counts_and_ownership(corpus: dict[str, list[dict]]) -> None:
     for sheet in sheets:
         assert sheet["type"] == "product_sheet", sheet["id"]
         assert not {"advisor_id", "mandate_id"} & set(sheet), f"{sheet['id']} is not global"
+        # The exact URL as a field (ADR 0010), the one the body names.
+        path, slug = generate.PRODUCT_PATH[sheet["lang"]], sheet["id"].removeprefix("product-")
+        assert sheet["url"] == f"https://{branding.DOMAINS.staff}/{path}/{slug}", sheet["id"]
+        assert sheet["url"] in sheet["body"], sheet["id"]
 
     everything = documents + sheets
     seen = {(document["type"], document["lang"]) for document in everything}
@@ -451,4 +458,6 @@ def test_make_data_runs_the_generator() -> None:
         check=False,
     )
     assert result.returncode == 0, f"make -n data: {result.stderr.strip()}"
-    assert "uv run python -P -m data.synthetic.generate" in result.stdout, result.stdout
+    assert "uv run --no-env-file python -P -m data.synthetic.generate" in result.stdout, (
+        result.stdout
+    )

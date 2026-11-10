@@ -44,9 +44,11 @@ def superuser(database: None) -> Iterator[Connection]:
         yield conn
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def seeded(database: None) -> Iterator[None]:
-    """One row per mandate-scoped table for each advisor, for the whole session."""
+    """One row per mandate-scoped table for each advisor, and one product sheet, per test
+    module: tests/db/test_loader.py replaces every advisor's rows, the seed's included,
+    so a module seeds for itself and leaves the corpus as it found it."""
     with seeded_database():
         yield
 
@@ -72,6 +74,7 @@ def token_documents(seeded: None) -> Iterator[None]:
                     "title": "Token note",
                     "body": body,
                     "lang": lang,
+                    "origin": "call_notes",
                 }
                 insert(conn, f"{names.SCHEMA}.documents", row)
                 planted.append(row["id"])
