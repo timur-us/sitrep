@@ -546,8 +546,10 @@ def crowd_document(person: branding.Person) -> str:
     return f"{SEED}-{person.id}-crowd-d"
 
 
-# The advisor's own chunks under another model, on the query vector itself: the nearest
-# of all if the model filter were dropped (review finding test-5).
+# The advisor's own chunks under another model, next to the query vector: the nearest of
+# all if the model filter were dropped (review finding test-5). Near, never equal to
+# another chunk: exact duplicates over dead index entries left the iterative scan with
+# 0 of 20 rows after a few runs (measured; a VACUUM between runs kept 20 of 20).
 INTRUDER = f"{SEED}-{MINE.id}-intruder-d"
 INTRUDERS = 5
 
@@ -563,8 +565,10 @@ def crowded(corpus: load.Corpus, superuser: Connection) -> Iterator[None]:
     plan = (
         (OTHER, crowd_document(OTHER), {0: 1.0}, CROWD_NEAR, CROWD_MODEL),
         (MINE, crowd_document(MINE), {0: 0.5, 1: 0.866}, CROWD_FAR, CROWD_MODEL),
-        (MINE, INTRUDER, {0: 1.0}, INTRUDERS, "fake/another-model"),
+        (MINE, INTRUDER, {0: 1.0, 1: 0.05}, INTRUDERS, "fake/another-model"),
     )
+    # Start and end without dead index entries, so each run sees the same graph.
+    superuser.execute(sql.SQL("VACUUM {}").format(table("chunks")))
     try:
         for person, document, weights, count, model in plan:
             superuser.execute(
@@ -604,6 +608,7 @@ def crowded(corpus: load.Corpus, superuser: Connection) -> Iterator[None]:
             superuser.execute(
                 sql.SQL("DELETE FROM {} WHERE id = %s").format(table("documents")), (document,)
             )
+        superuser.execute(sql.SQL("VACUUM {}").format(table("chunks")))
 
 
 @pytest.mark.usefixtures("crowded")

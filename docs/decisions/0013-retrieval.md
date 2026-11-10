@@ -10,7 +10,7 @@ Accepted in outline (Timur, 2026-11-08: the M1 plan, PR 8, default 13). Its depa
 
 ## Context
 
-SITREP (situation report) answers from an advisor's documents and the product sheets (ADR 0010), in German and English, under row-level security. Measured as the app role (PostgreSQL 17.11, pgvector 0.8.7):
+SITREP (situation report) answers from an advisor's documents and the product sheets (ADR 0010), under row-level security. Measured as the app role (PostgreSQL 17.11, pgvector 0.8.7):
 - **`@@` and `<=>` are not leakproof**, so the policy runs first and neither becomes an index condition: a planted GIN index on `tsv` serves the superuser, never the app role, which reads through the primary key and filters.
 - **HNSW sits idle here:** the planner sorts the advisor's rows exactly, even beside 6,000 of another's. Pushed onto HNSW while the policy hides the nearest rows, a search returns 0 of 8 rows with `hnsw.iterative_scan` off, 8 on.
 - **500 characters can tokenize to 2,005 tokens;** the model takes 512.
@@ -18,12 +18,12 @@ SITREP (situation report) answers from an advisor's documents and the product sh
 
 ## Options
 
-- **Full-text only:** misses paraphrases and the other language; **vectors only:** miss exact names and figures, and e5 is weaker from German to English (PR 4). Both, fused.
+- **Full-text only:** misses paraphrases and the other language; **vectors only:** miss exact names and figures. Both, fused.
 - **One fused SQL statement:** fewer round trips; fusion untestable without a database.
 - **`strict_order`:** exact order, less recall (pgvector); `relaxed_order` and a re-sort instead.
 - **GIN indexes, as planned:** a write cost, unusable by any app query. LEAKPROOF needs a superuser, which Azure's Flexible Server lacks.
 - **A rule, no handle:** unenforced.
-- **Cutting a long query:** silent; refused, as PR 4 refuses long passages.
+- **Cutting a long query:** silent; refused, as PR 4 does.
 
 ## Decision
 
@@ -50,7 +50,7 @@ query_too_long: query_too_long
 
 - **Easier:** deterministic ranking, tested without a database; per search one embedding, holding no connection, and at most eight statements.
 - **Harder:** full-text search reads all the advisor's rows; HNSW and the iterative scan wait for a larger corpus, tested with the planner pushed; documents' and sheets' ranks are compared raw; fusion ignores score gaps and has no relevance floor.
-- **Watch:** a larger corpus (M4): a btree on `(advisor_id, mandate_id)`, HNSW for real, a `tsv` index if a leakproof route appears; German-to-English recall (PR 16); how the model reads trust before M2 renders it.
+- **Watch:** a larger corpus (M4): a btree on `(advisor_id, mandate_id)`, HNSW for real, a `tsv` index if a leakproof route appears, a VACUUM after each load (duplicate vectors over dead index entries: 0 of 20 rows found, measured). German-to-English recall (PR 16); how the model reads trust before M2 renders it.
 
 ## Sources
 
