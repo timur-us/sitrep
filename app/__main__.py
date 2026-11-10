@@ -2,6 +2,8 @@
 
 uvicorn runs without an access log (it would log paths and query strings), without
 trusting proxy headers, without a server header, and with the redacting log config.
+Before anything else, Python's thread, unraisable, main-thread and warning hooks are
+replaced by ones that log the type and the trace id only (M1 PR 5).
 
 Settings are named here by their fields (host, port, dev_auth, trace_plaintext); each is
 read from a variable with the product prefix (env_name(), ADR 0009). An unprefixed
@@ -9,7 +11,8 @@ database URL variable in the environment is named on stderr as ignored, never wi
 value. The entry point refuses to start, with exit code 2 and before it binds anything:
 - any command-line argument, --uds and --fd included, with or without the dev login:
   the bind is the host and port settings, on TCP only;
-- trace_plaintext at "1" anywhere but 127.0.0.1 (ADR 0007);
+- trace_plaintext at "1" anywhere but 127.0.0.1, and while any
+  OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_* variable is set (ADR 0007, M1 PR 5);
 - dev_auth at "1" (the dev login, ADR 0009) unless the host is exactly 127.0.0.1 and
   the port is not 0, and unless app.auth.dev_shim can be imported (the image leaves it
   out).

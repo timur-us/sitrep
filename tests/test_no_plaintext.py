@@ -418,8 +418,11 @@ def test_log_config_names_only_reviewed_classes() -> None:
         for key, value in entry.items()
         if key in ("()", "class")
     ]
-    assert len(named) == 3, named
-    assert all(value.startswith("app.observability.logs.") for value in named), named
+    # By name: the asyncio logger's filter joined in M1 PR 5 (review finding sec-3).
+    assert sorted(named) == [
+        f"app.observability.logs.{name}"
+        for name in ("AsyncioFilter", "RedactFilter", "SafeFormatter", "StderrHandler")
+    ], named
 
 
 def test_logged_exception_object_shows_type_and_errno_only() -> None:

@@ -86,9 +86,15 @@ def check_allowed_hosts(value: str) -> str:
                 "a comma-separated list of lower-case host[:port], without spaces,"
                 " wildcards, schemes or paths"
             )
-        _, _, port = item.partition(":")
+        name, _, port = item.partition(":")
         if port and int(port) > 65535:
             raise ValueError("a port must be from 1 to 65535")
+        # A name that anyone on the network can answer reopens DNS rebinding (review
+        # finding sec-5 of M1 PR 5): a single label (search domains, LLMNR) or .local (mDNS).
+        if (name != "localhost" and "." not in name) or name.endswith(".local"):
+            raise ValueError(
+                "a single-label or .local name is resolved locally: name a full DNS name"
+            )
     return value
 
 

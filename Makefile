@@ -107,9 +107,10 @@ docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, a fo
 	echo "smoke: image runs as uid $$uid"; \
 	test "$$uid" != 0
 	@set -eu; \
-	port="$$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"; \
-	cid="$$(docker run -d -p 127.0.0.1:$$port:8000 -e SITREP_ALLOWED_HOSTS=127.0.0.1:$$port $(IMAGE))"; \
+	port="$$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"; \
+	cid="$$(docker create -p 127.0.0.1:$$port:8000 -e SITREP_ALLOWED_HOSTS=127.0.0.1:$$port $(IMAGE))"; \
 	trap 'docker rm -f "$$cid" >/dev/null' EXIT; \
+	docker start "$$cid" >/dev/null; \
 	addr="$$(docker port "$$cid" 8000/tcp)"; \
 	echo "smoke: published on $$addr"; \
 	test "$$addr" = "127.0.0.1:$$port" || { echo "smoke: not on 127.0.0.1:$$port only"; exit 1; }; \

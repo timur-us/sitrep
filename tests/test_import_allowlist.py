@@ -76,6 +76,9 @@ ALLOWED = frozenset(
         "types",
         "typing",
         "unicodedata",
+        # app/observability/logs.py replaces warnings.showwarning (M1 PR 5, review finding
+        # sec-1): a warning's text can quote a value.
+        "warnings",
         "uvicorn",
     }
 )
@@ -168,6 +171,7 @@ SINGLE_FILE = {
     # The loop's exception handler, set in the lifespan; the hooks (M1 PR 5).
     "asyncio": "app/main.py",
     "threading": "app/observability/logs.py",
+    "warnings": "app/observability/logs.py",
     "psycopg_pool": POOL_FILE,
     "numpy": EMBEDDER_FILE,
     "onnxruntime": EMBEDDER_FILE,
