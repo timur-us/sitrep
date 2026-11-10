@@ -52,9 +52,12 @@ PLAINTEXT = env_name("trace_plaintext")
 # The instrumentation's default (pre-stable) HTTP conventions. Left out on purpose:
 # http.target and http.url (path and query), http.host and http.server_name (the Host
 # header), http.user_agent, net.peer.* (the client), and captured headers.
-ALLOWED_KEYS = frozenset(
+HTTP_KEYS = frozenset(
     {"http.method", "http.route", "http.status_code", "http.scheme", "http.flavor"}
 )
+# The agent loop's attributes (M1 PR 10). Scaffolding: approved next.
+LOOP_KEYS: frozenset[str] = frozenset()
+ALLOWED_KEYS = HTTP_KEYS | LOOP_KEYS
 # exception.message and exception.stacktrace carry the text; the type does not.
 ALLOWED_EVENTS: Mapping[str, frozenset[str]] = MappingProxyType(
     {"exception": frozenset({"exception.type"})}

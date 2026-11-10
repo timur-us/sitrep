@@ -42,7 +42,28 @@ from app.observability.logs import LOG_CONFIG, SafeFormatter, StderrHandler
 # The reviewed allowlists, written out here so that widening one is a visible change.
 # The keys are the instrumentation's default (pre-stable) HTTP conventions; target,
 # URL, host, server name, user agent and peer address are left out on purpose.
-ALLOWED_KEYS = {"http.method", "http.route", "http.status_code", "http.scheme", "http.flavor"}
+ALLOWED_KEYS = {
+    "http.method",
+    "http.route",
+    "http.status_code",
+    "http.scheme",
+    "http.flavor",
+    # The agent loop's (M1 PR 10): ids, hashes, capped counts, names and error types.
+    f"{branding.SLUG}.prompt.version",
+    f"{branding.SLUG}.prompt.sha256",
+    "gen_ai.request.model",
+    "gen_ai.usage.input_tokens",
+    "gen_ai.usage.output_tokens",
+    f"{branding.SLUG}.loop.stop",
+    f"{branding.SLUG}.loop.turns",
+    f"{branding.SLUG}.loop.tools",
+    f"{branding.SLUG}.loop.tool_errors",
+    f"{branding.SLUG}.loop.error",
+    f"{branding.SLUG}.loop.error_cause",
+    f"{branding.SLUG}.grounding.figures",
+    f"{branding.SLUG}.grounding.unmatched",
+    f"{branding.SLUG}.grounding.unknown_citations",
+}
 ALLOWED_EVENTS = {"exception": {"exception.type"}}
 ALLOWED_RESOURCE_KEYS = {"service.name"}
 # Values the allowed keys may take here: none of them carries request text.
