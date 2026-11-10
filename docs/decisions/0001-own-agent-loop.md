@@ -32,6 +32,10 @@ Timur's decisions after Fable's security review of PR 6:
 - **Error locations stay** in `CallError`, so the model sees which key was refused; traces record error types only (an M1 test).
 - **Approval tokens** are designed in M1's ADR, leaning to opaque random tokens stored as a hash, which need no signing key.
 
+### Amendment (PR 10, 2026-11-10)
+
+- `app/harness/loop.py` builds this: READ tools only, a block allowlist, `max_turns` and a token budget; stops and retries in its docstring.
+
 ## Consequences
 
 - **Easier:** the approval gate, the provenance wrapper, the output policy and the canary scan sit between the model and every tool call, where tests can reach them. Traces carry exactly what we allow.
@@ -51,3 +55,4 @@ Timur's decisions after Fable's security review of PR 6:
 - Anthropic, "Handle tool calls", https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls (accessed 2026-10-29).
 - Anthropic, "Define tools" (forced `tool_choice` by model), https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools (accessed 2026-10-29).
 - `docs/plans/m0-foundation.md`, "ADR 0003" research notes (2026-10-28).
+- M1 PR 10, the loop: stop reasons mapped to the API contract's four stops (`max_tokens` and `model_context_window_exceeded` to "budget", `pause_turn` refused since no server tool is offered); one retry for transient failures; the message-block allowlist that PR 6 made a merge gate; assistant turns passed back unchanged, as preserved thinking requires. `docs/plans/m1-mvp-core.md`, PR 10, and the Anthropic API reference bundled with Claude Code (read 2026-11-10).

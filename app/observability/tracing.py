@@ -55,8 +55,29 @@ PLAINTEXT = env_name("trace_plaintext")
 HTTP_KEYS = frozenset(
     {"http.method", "http.route", "http.status_code", "http.scheme", "http.flavor"}
 )
-# The agent loop's attributes (M1 PR 10). Scaffolding: approved next.
-LOOP_KEYS: frozenset[str] = frozenset()
+# The agent loop's attributes (M1 PR 10, ADR 0007), approved by name. Each value is an
+# id, a hash, a count (capped by the loop), a registered tool name or an error type:
+# never text from a prompt, a document, an answer or a tool argument (CLAUDE.md rule 10).
+# The loop sets them on the request's span (app/harness/loop.py).
+LOOP: Mapping[str, str] = MappingProxyType(
+    {
+        "prompt_version": f"{branding.SLUG}.prompt.version",
+        "prompt_sha256": f"{branding.SLUG}.prompt.sha256",
+        "model": "gen_ai.request.model",
+        "input_tokens": "gen_ai.usage.input_tokens",
+        "output_tokens": "gen_ai.usage.output_tokens",
+        "stop": f"{branding.SLUG}.loop.stop",
+        "turns": f"{branding.SLUG}.loop.turns",
+        "tools": f"{branding.SLUG}.loop.tools",
+        "tool_errors": f"{branding.SLUG}.loop.tool_errors",
+        "error": f"{branding.SLUG}.loop.error",
+        "error_cause": f"{branding.SLUG}.loop.error_cause",
+        "figures": f"{branding.SLUG}.grounding.figures",
+        "unmatched": f"{branding.SLUG}.grounding.unmatched",
+        "unknown_citations": f"{branding.SLUG}.grounding.unknown_citations",
+    }
+)
+LOOP_KEYS = frozenset(LOOP.values())
 ALLOWED_KEYS = HTTP_KEYS | LOOP_KEYS
 # exception.message and exception.stacktrace carry the text; the type does not.
 ALLOWED_EVENTS: Mapping[str, frozenset[str]] = MappingProxyType(

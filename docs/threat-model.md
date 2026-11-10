@@ -1,6 +1,6 @@
 # SITREP — threat model
 
-Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database), 2026-10-31 (M0 PR 5b: row-level security), 2026-11-03 (M0 PR 6: tool registry), 2026-11-04 (M0 PR 7: dev login), 2026-11-08 (M0 PR 9: status at the end of M0, Timur's answers to the PR 7 questions), 2026-11-09 (M1 PR 7: the loader; M1 PR 5: the Host check without the shim, plaintext refused with header capture) and 2026-11-10 (M1 PR 9: the number guard reports, path 7) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
+Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database), 2026-10-31 (M0 PR 5b: row-level security), 2026-11-03 (M0 PR 6: tool registry), 2026-11-04 (M0 PR 7: dev login), 2026-11-08 (M0 PR 9: status at the end of M0, Timur's answers to the PR 7 questions), 2026-11-09 (M1 PR 7: the loader; M1 PR 5: the Host check without the shim, plaintext refused with header capture) and 2026-11-10 (M1 PR 9: the number guard reports, path 7; M1 PR 10: the loop's limits, path 8) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
 Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the system prompt staying secret (Kerckhoffs).
 
 ## Assets
@@ -39,7 +39,7 @@ Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the
 | 5 | Poisoning of the knowledge base (LLM04) | provenance, origin filters, eval case | M4 |
 | 6 | System prompt leak (LLM07) | low impact by design (Kerckhoffs); measured | M2 |
 | 7 | Hallucinated numbers (LLM09) | number guard: every figure is looked up in the sources of the request; in M1 it reports and does not block (plan default 14). It proves provenance, not truth: a figure from an attacker's e-mail counts as grounded, so the UI never shows its result as "verified". Its limits are in `app/harness/grounding.py` | M1 (report), M2 (policy) |
-| 8 | Cost denial of service through tool loops (LLM10) | max_turns, budget per request, rate limit per identity | M1 |
+| 8 | Cost denial of service through tool loops (LLM10) | max_turns, budget per request, rate limit per identity. M1 PR 10: at most 6 model calls and 150,000 tokens per request, every tool result and a failed call's worst case charged; the rate limit per advisor comes with PR 12 | M1 |
 | 9 | CI and identity: a PR workflow with cloud rights, an agent that assigns roles | no Azure login on pull requests; deploy only from the protected GitHub environment `production`; roles, identities and environments changed only by Timur; ruleset without bypass | M0 (ruleset, environment), M3 (OIDC) |
 | 10 | The coding agent itself: Claude Code reads the attack corpus, eval cases and fetched pages while it builds | that text is data, never instructions (CLAUDE.md rule 9); guardrail files denied for edits; ruleset, environment and push protection hold for the agent's token; no Azure login for the agent in M0 to M2; attack domains under `.example` never resolve | M0 |
 
