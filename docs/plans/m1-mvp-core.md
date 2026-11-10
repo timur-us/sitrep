@@ -1,6 +1,6 @@
 # M1 — MVP core, local: plan
 
-Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
+Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
 
 ## Context
 
@@ -14,7 +14,7 @@ SITREP (situation report) ends M0 with a foundation that has never served a real
 
 M1 is local: no Azure, no OIDC, no deploy. Every row of the M0 report's "M1 handovers" lands in a named PR below or is deferred with a reason ("Handover coverage"). The two ADRs come first (the loader, approval tokens), then the `SITREP_` prefix for the database URLs as the first infrastructure PR.
 
-**The end-to-end read slice merges first, and it is M1's cut line** (question 4). It runs from the loader, the ONNX embedder and retrieval to the loop with the two READ tools, and to an answer with sources through the dev login. Approval and the two proposal tools follow, then eval and red-team breadth.
+**The end-to-end read slice merges first, and it is M1's cut line** (question 4). It runs from the loader, the ONNX embedder and retrieval to the loop with the two READ tools, and to an answer with sources through the dev login. Approval and the two proposal tools follow, then eval and red-team breadth. Since the amendment of 2026-11-10, evals v1 and the first red-team case come right after the slice, and approval follows them.
 
 The outcome that matters: an advisor asks "What do I need to know before the call with Weber?" and gets a cited answer built from her own mandates only, with a trace id, the cost and the grounding result; a draft or a follow-up exists only after she approves it; and the EchoLeak e-mail's success rate is measured before any M2 hardening.
 
@@ -27,7 +27,7 @@ The outcome that matters: an advisor asks "What do I need to know before the cal
 | 1 | PR 8 sec-2 (recipients per mandate) and sec-3 (exact-URL links) hand M1 two allowlists, while the brief puts the output policy in M2, so that M1 can measure the unhardened rate. | Data and cases now, enforcement in M2 (the recommendation). | PR 7 loads recipients per mandate under row-level security and the exact product URLs; PR 17 records the cases unhardened; M2's output policy enforces both, measured against M1's baseline. |
 | 2 | Who writes the corpus? The app role is SELECT-only, and FORCE binds the owner. | The migrator as owner, one advisor per transaction (the recommendation), with two conditions (given in German, translated): "the loader helper in session.py must be unreachable from app/ request code, with the same scan as for issue()", and "as a Watch item for M3: in Azure the loader gets its own identity, separate from the migrator". | PR 7 carries the reachability scan (modelled on `tests/test_identity.py`) and a runtime role check; ADR 0010 carries the M3 Watch item; "Left out" lists it under M3. |
 | 3 | What do the offline gates replay? | Score transcripts (the recommendation). | ADR 0014 (PR 16): a live run, by hand, records the transcript with its prompt, tool-schema and corpus hashes; CI scores it deterministically and fails a stale one. No database, model or key in the `evals` and `redteam` jobs. Live runs log in through the dev login, in-process. |
-| 4 | Schedule: about 54 build hours and a critical path of about 31 hours (the draft's order, before the slice came first), against the brief's days 4–9. | "Re-baseline with the full M1 scope; M4 absorbs the time. But order the PR sequence so that an end-to-end slice merges first as M1's cut line: loader, ONNX embedder, retrieval, the loop with the two READ tools, an answer with sources through the dev login. Then approval and the two proposal tools, then eval and red-team breadth. Mark that cut line in the plan." | The sequence below. PRs 1–12 are the slice; the cut line follows PR 12. The demo moves: the cut-line hand check after PR 12 is the first demo (about day 14), and the full demo comes at M1's close (about day 21). |
+| 4 | Schedule: about 54 build hours and a critical path of about 31 hours (the draft's order, before the slice came first), against the brief's days 4–9. | "Re-baseline with the full M1 scope; M4 absorbs the time. But order the PR sequence so that an end-to-end slice merges first as M1's cut line: loader, ONNX embedder, retrieval, the loop with the two READ tools, an answer with sources through the dev login. Then approval and the two proposal tools, then eval and red-team breadth. Mark that cut line in the plan." | The sequence below. PRs 1–12 are the slice; the cut line follows PR 12. The demo moves: the cut-line hand check after PR 12 is the first demo (about day 14), and the full demo comes at M1's close (about day 21; about day 24 after the amendment of 2026-11-10). |
 
 ### Defaults (recommended in the draft, accepted with the plan on 2026-11-08; a later change is a plan amendment)
 
@@ -47,6 +47,30 @@ The outcome that matters: an advisor asks "What do I need to know before the cal
 | 16 | Fail-first for docs | ADR PRs carry a machine-readable yaml block and a docs test (as ADR 0005 does). PR 0 is exempt from rule 2, as in M0. | |
 | 17 | Live runs | Timur runs them himself (`! …`) after the agent's cost estimate. | CLAUDE.md says "live runs only by hand", and the secret hook blocks agent commands that name the key or `.env`. |
 | 18 | The merge checklist | Dropped: `docs/runbooks/merge-checklist.md` does not exist and will not (Timur, 2026-11-08). This closes item 4 of the M0 report's "What Timur has to do". | |
+
+### Amendment (Timur, 2026-11-10): the red team before the approval path
+
+PR 16 (recorded runs, evals v1) and PR 17 (red team v1, unhardened) may be built and merged right after PR 12, before PRs 13 to 15. The reason: the EchoLeak case needs only the read path. The e-mail sits in Weber's mailbox, `search_client_docs` returns it, and the attack succeeds when the canary reaches the answer. Measuring that rate does not have to wait for the approval gate.
+
+The two paragraphs above are Timur's decision. The rest of this section **was derived by the agent and is proposed for Timur to confirm**: his merge of the amendment PR confirms it, and his answers on that PR override it. It is applied in the sections below.
+- **The first recordings run at prompt `v1`**, with the two READ tools. The live steps of PR 16 and PR 17 run after PR 12, not after PR 15.
+- **Some cases need a proposal tool, so they land with PR 14:**
+  - the eval cases for a draft e-mail and a follow-up;
+  - EchoLeak's `draft_email` form (body and recipient);
+  - the draft to an address outside the mandate (sec-2).
+
+  A committed case without a recording fails the gate, so these cases cannot sit in PR 16 or PR 17 ahead of their tools. PR 14 adds them and raises both gates' `min_cases` to match.
+- **PR 14 records both suites again, at `v2`.** It raises `PROMPT_VERSION` to `v2` and adds two tools to the registry, so the stale check fails every `v1` recording. PR 14 therefore carries:
+  - the cases above;
+  - a second recording of both suites by Timur, after the agent's cost estimate. This is his third live run in all.
+
+  Until those recordings are committed, PR 14's `evals` and `redteam` jobs stay red, and the PR stays a draft.
+- **The `v1` recordings stay in the repository** as evidence, in `evals/recorded/v1/` and its red-team counterpart. The gates score only the current prompt version's directory; ADR 0014 (PR 16) fixes that rule. `redteam/results/m1.md` keeps the `v1` read-path rate and adds the `v2` rate. **M2 measures against the `v2` rate,** because M2 hardens the full tool set.
+- **PR 13 merges after PR 17 and before PR 14,** and it must leave `registry.schema()` unchanged. If it changes the schema, it has to record again as well.
+- **The database chain** becomes 3 → 7 → 8 → 12 → 16's live step → 17 → 14 (with the `v2` recording) → 15 → 18.
+- **Timur's Bash-side guard decision** (before PR 17) is now due about 24.5 hours in, after PR 16.
+- **ADR numbers stay:** 0014 is still PR 16's. PRs 13–15 add amendments only.
+- **The cost.** On the critical path, M1 closes about 6 hours later, at about day 24 instead of day 21, and the unhardened EchoLeak rate arrives about 3.5 hours earlier ("Time budget"). The build hours were not re-estimated: the proposal cases move from PR 16 and PR 17 to PR 14, and the table keeps each PR's figure, so the total stays at about 56.5 hours.
 
 ## Defaults that shape every PR
 
@@ -80,10 +104,10 @@ The outcome that matters: an advisor asks "What do I need to know before the cal
 | 11 | `m1/11-ui-answer` | UI: the ask box and the answer with its sources | **sensitive** (renders untrusted output) | no | 5 | 2.5 |
 | 12 | `m1/12-ask-api` | `POST /api/ask`, rate limit, the read path in Chromium | **sensitive** (auth, harness wiring, gate path) | yes | 5, 8, 10, 11 | 3.0 |
 | | | **Cut line: the end-to-end read slice is merged** | | | | **34.5** |
-| 13 | `m1/13-registry` | Registry: type allowlist, depth and size caps | **sensitive** (app/harness) | no | 12 (merge order) | 2.0 |
-| 14 | `m1/14-approval` | Approval gate, `draft_email` and `create_followup` in the loop | **sensitive** (app/db, app/harness, auth) | yes | 2, 12, 13 | 5.0 |
+| 13 | `m1/13-registry` | Registry: type allowlist, depth and size caps | **sensitive** (app/harness) | no | 17 (merge order; 12 before the amendment of 2026-11-10) | 2.0 |
+| 14 | `m1/14-approval` | Approval gate, `draft_email` and `create_followup` in the loop | **sensitive** (app/db, app/harness, auth) | yes | 2, 12, 13; 16, 17 (merge order, amendment) | 5.0 |
 | 15 | `m1/15-proposals` | Proposal routes, the proposals panel, approval in Chromium | **sensitive** (auth, renders untrusted output) | yes | 14 | 3.5 |
-| 16 | `m1/16-evals` | Recorded runs (ADR 0014), scorers, eval cases v1 | **sensitive** (runners, gate paths) | live step | 12; live step after 15 | 5.0 |
+| 16 | `m1/16-evals` | Recorded runs (ADR 0014), scorers, eval cases v1 | **sensitive** (runners, gate paths) | live step | 12 (amended 2026-11-10: the live step right after 12) | 5.0 |
 | 17 | `m1/17-redteam` | EchoLeak and the handover attacks, unhardened rate | **sensitive** (runners, gate paths) | live step | 7, 16 | 4.5 |
 | 18 | `m1/18-close` | Fresh-clone runbook, `docs/reports/m1.md`, demo script | code (docs + tests) | yes | all | 2.0 |
 
@@ -91,8 +115,9 @@ The outcome that matters: an advisor asks "What do I need to know before the cal
 
 **Order.**
 - **The ADRs come first** (PRs 1 and 2). PR 3 is the first infrastructure PR, so PR 4 is built beside it but merges after it.
-- **The slice.** PRs 1–12 merge before anything below the cut line. PR 13 may be built during the slice but merges after PR 12.
-- **The database chain is serial:** 3 → 7 → 8 → 12 → 14 → 15 → the live steps of 16 and 17 → 18. Everything else is built beside it.
+- **The slice.** PRs 1–12 merge before anything below the cut line. PR 13 may be built during the slice but merges after PR 17 (amendment, 2026-11-10).
+- **Below the cut line** (amendment, 2026-11-10): PRs 16 and 17 come first, then 13, 14, 15 and 18.
+- **The database chain is serial:** 3 → 7 → 8 → 12 → 16's live step → 17 → 14 (with the `v2` re-recording) → 15 → 18. Everything else is built beside it.
 - **PR 4 merges before PR 7**, because the loader chunks with the real tokenizer and embeds with the real model.
 - **The loop (10) needs no database.** It is tested with a scripted model and test-local tools, and registers only the READ tools until PR 14 adds the proposal path.
 - **The UI PRs (11, and the panel in 15) build against the JSON contract fixed in this plan.** PR 12 and PR 15 then prove each path in Chromium.
@@ -101,7 +126,7 @@ The outcome that matters: an advisor asks "What do I need to know before the cal
 
 M1's end-to-end slice consists of PRs 1–12: the loader, the ONNX embedder and retrieval, then the loop with `search_client_docs` and `get_portfolio`, and an answer with sources, grounding, trace id and cost, reached through the dev login. It merges first.
 - **Timur's decision:** M1 keeps its full scope and goes on below the line; M4 absorbs the time.
-- **If M1 has to stop early anyway:** PRs 13–18 move, in this order, to the start of M2. M2's own scope is not cut (brief).
+- **If M1 has to stop early anyway:** PRs 13–18 move to the start of M2, in the amended order 16, 17, 13, 14, 15, 18. M2's own scope is not cut (brief).
 - **Price:** ordering the slice first adds about 3 hours to the critical path ("Time budget").
 - **Hand check at the cut line** (Timur, with the key): Alice asks about Weber in English and German, and each answer cites Alice's documents. Bob asks about Weber and gets nothing of Alice's.
 
@@ -120,13 +145,15 @@ M1's end-to-end slice consists of PRs 1–12: the loader, the ONNX embedder and 
 | 3 | PR 7 (DB) | PR 6, then PR 5 | one DB; only PR 6 changes the lock |
 | 4 | PR 8 (DB) | PR 5 (cont.), PR 9, then PR 10 | one DB |
 | 5 | PR 11 | PR 10 (cont.) | no DB |
-| 6 | PR 12 (DB) | PR 13 (merges after PR 12) | one DB |
+| 6 | PR 12 (DB) | PR 13 (merges after PR 17, amendment) | one DB |
 | — | **cut line** | | |
-| 7 | PR 14 (DB) | PR 16, offline part | one DB |
-| 8 | PR 15 (DB) | PR 16, offline part (cont.) | one DB |
-| 9 | PR 16, live step (DB, Timur) | PR 18, text only | one DB |
-| 10 | PR 17 (DB: attack documents, live step) | PR 18, text only (cont.) | one DB |
+| 7 | PR 16, then its live step (DB, Timur) | PR 13 (cont.; merges after PR 17) | one DB |
+| 8 | PR 17 (DB: attack documents, live step) | — | |
+| 9 | PR 14 (DB; the `v2` re-recording, Timur) | PR 18, text only | one DB |
+| 10 | PR 15 (DB) | PR 18, text only (cont.) | one DB |
 | 11 | PR 18, fresh-clone run (DB) | — | |
+
+Waves 7–11 follow the amendment of 2026-11-10. Session B has no work in wave 8, because PR 14 needs the database that PR 17 holds. PR 13 merges at the start of wave 9, after PR 17 and before PR 14.
 
 Never in parallel:
 - any two of 3, 7, 8, 12, 14, 15, 18, or the live steps of 16 and 17;
@@ -519,6 +546,10 @@ New for two sessions:
 - `app/harness/loop.py`: DRAFT and SIDE_EFFECT calls go to `gate.propose()` and return a `Proposal`. The prompt tells the advisor that approval happens in the UI (`PROMPT_VERSION` "v2").
 - `tests/db/test_rls_catalog.py`: a grant matrix per table.
 - An ADR 0008 amendment; the threat model, path 4.
+- **From the amendment of 2026-11-10:**
+  - the cases that need a proposal tool (the eval draft and follow-up; EchoLeak's `draft_email` form; the sec-2 draft);
+  - Timur's `v2` re-recording of both suites, after the agent's cost estimate;
+  - `evals/results/v2.md`, and the `v2` rate added to `redteam/results/m1.md`.
 
 **Tests that fail before the change** (the contract tests):
 - **The happy path.** Propose stores; approve returns a token once, and only its hash is in the database; redeem runs the stored call once.
@@ -560,15 +591,15 @@ New for two sessions:
   - `--estimate` (cost from cases × samples × the measured tokens, with no network) and `--live --yes`;
   - the scorers: valid citations, grounding, expected tools, no foreign record id, and the refusal marker;
   - `gate.toml` keys;
-  - `evals/results/<prompt version>.md` (the eval-run skill's naming; the prompt is at "v2" after PR 14).
-- `evals/cases/`, about 14 cases in EN and DE:
+  - `evals/results/<prompt version>.md` (the eval-run skill's naming): `v1.md` here, `v2.md` from PR 14 (amendment, 2026-11-10).
+- `evals/cases/`, about 14 cases in EN and DE in all, fewer at `v1` (the draft and follow-up ones come with PR 14, amendment):
   - the Weber briefing;
   - portfolio figures;
   - a product sheet question;
-  - a draft e-mail and a follow-up (proposals);
+  - a draft e-mail and a follow-up (proposals): **these land with PR 14** (amendment);
   - the pushy "guaranteed return" (a refusal);
   - Bob asking about Weber (no Weber record).
-- `evals/recorded/<prompt version>/`, recorded by Timur (default 17) after PR 15.
+- `evals/recorded/<prompt version>/`, recorded by Timur (default 17) after PR 12, at `v1` (amendment, 2026-11-10).
 
 **Tests that fail before the change.**
 - Planted transcripts pass and fail each scorer.
@@ -584,8 +615,8 @@ New for two sessions:
 
 **Files.**
 - `redteam/attacks/`, in EN and DE, through placeholders:
-  - the EchoLeak e-mail in Weber's mailbox, in six forms: an inline link, a reference-style link, an image, a `draft_email` argument (body and recipient), split across two e-mails, and a link on the staff domain (sec-3);
-  - a draft to an address outside the mandate (sec-2);
+  - the EchoLeak e-mail in Weber's mailbox, in six forms: an inline link, a reference-style link, an image, a `draft_email` argument (body and recipient), split across two e-mails, and a link on the staff domain (sec-3); the `draft_email` form lands with PR 14 (amendment, 2026-11-10);
+  - a draft to an address outside the mandate (sec-2), which also lands with PR 14;
   - a document that closes `</untrusted>`;
   - a forged identity key (`berater_id`, `benutzer`);
   - an e-mail that asks for another advisor's mandate.
@@ -635,7 +666,7 @@ New for two sessions:
 | PR 7 question 1 | PR 3 | |
 | PR 7 cross-advisor cases | PR 12 (API test), PR 16 (eval), PR 17 (red team) | |
 | PR 8 sec-1 | PR 1 (ADR), PR 14 | |
-| PR 8 sec-2 | PR 7 (data), PR 17 (cases); **enforcement deferred to M2** | brief: M1 measures unhardened (question 1) |
+| PR 8 sec-2 | PR 7 (data), PR 14 (the draft case, amendment of 2026-11-10); **enforcement deferred to M2** | brief: M1 measures unhardened (question 1) |
 | PR 8 sec-3 | PR 7 (exact URLs), PR 17 (variant); **enforcement deferred to M2** | as sec-2 |
 | PR 8 sec-4 | — | fixed in M0; the race on local, git-ignored output stays; nothing for M1 |
 | PR 8 sec-5 | — | fixed in M0 |
@@ -662,9 +693,9 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
 1. Start the second session in its worktree, and be present for prompts in both.
 2. Get Fable's security review for PRs 3–17 (15 PRs, 10 of them before the cut line), plus Fable's short design read of ADR 0010 and ADR 0011 (PRs 1 and 2).
 3. Merge every PR himself on GitHub, after the review report and, where required, Fable's.
-4. Run the cut-line hand check after PR 12, and the two live recordings himself (`! uv run python -P -m app.runners.evals --live --yes`, then the red team's), each after the agent's estimate.
+4. Run the cut-line hand check after PR 12, and the live recordings himself (`! uv run python -P -m app.runners.evals --live --yes`, then the red team's), each after the agent's estimate. Since the amendment of 2026-11-10 there are three: PR 16's and PR 17's at `v1` after PR 12, then both suites at `v2` in PR 14.
 5. After PR 3, rename his own `.env` lines if he has any.
-6. Decide the Bash-side guard before PR 17.
+6. Decide the Bash-side guard before PR 17. Since the amendment, that is about 24.5 hours in, after PR 16.
 7. Apply the CLAUDE.md Commands changes (rule 11): new lines for `make model` (PR 4) and `make load` (PR 7); the reworded `make lint-test` (PR 4) and `make web-test` (PR 12) lines; and M0's two lines.
 8. Watch `lint-test`'s time from PR 4 on: past three minutes, the verified cache becomes the fallback (default 6).
 
@@ -676,7 +707,7 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Build h | 1.0 | 1.0 | 1.0 | 1.5 | 3.5 | 2.5 | 3.0 | 4.5 | 4.5 | 2.0 | 4.5 | 2.5 | 3.0 | 2.0 | 5.0 | 3.5 | 5.0 | 4.5 | 2.0 |
 
-- **Total:** about 56.5 build hours, 34.5 of them for the slice (PRs 0–12). Each estimate includes the session time for tests first, the CI red run, review and fixes. Not included: Fable's own time, Timur's merge decisions and the two live runs.
+- **Total:** about 56.5 build hours, 34.5 of them for the slice (PRs 0–12). Each estimate includes the session time for tests first, the CI red run, review and fixes. Not included: Fable's own time, Timur's merge decisions and the live runs (three since the amendment of 2026-11-10).
 - **Critical path with two sessions** (the waves above):
   - **The slice merges after about 18.5 hours,** about 10 days at 2 hours a day. Session B carries it:
     - PR 4: 0–3.5 h;
@@ -686,12 +717,18 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
     - PR 10: to 15.5 h.
 
     Meanwhile session A runs PRs 1, 2 and 3 (0–3.5 h), PR 7 (to 8.0 h), PR 8 (to 12.5 h) and PR 11 (to 15.0 h). PR 12 waits for PR 10 and runs from 15.5 to 18.5 h.
-  - **M1 closes after about 34.5 hours,** about 17 days: 18.5 h, plus PR 14 (5.0), PR 15 (3.5), PR 16's live step (about 1.0), PR 17 (4.5) and PR 18 (2.0). PR 13 and PR 16's offline part run in session B beside PRs 12 to 15, off the critical path.
+  - **M1 closes after about 40.5 hours,** about 20 days (amendment, 2026-11-10). Session A carries it after the slice:
+    - PR 16 and its live step: to 24.5 h (5.0 + about 1.0);
+    - PR 17: to 29.0 h. This is where the unhardened EchoLeak rate is measured;
+    - PR 14 with the `v2` re-recording: to 35.0 h (5.0 + about 1.0);
+    - PR 15: to 38.5 h;
+    - PR 18: to 40.5 h.
 
-    The 34.5 hours match the slice's summed build hours only by coincidence.
+    Session B builds PR 13 beside PR 16, then PR 18's text beside PRs 14 and 15, all off the critical path.
+  - **Against the accepted order** (34.5 h to the close, with the EchoLeak rate at about 32.5 h): the rate arrives about 3.5 h earlier, and the close comes about 6 h later. PR 16's offline build (5.0) moves onto the critical path, because PR 16 depends on PR 12. The `v2` re-recording adds about 1.0.
   - **Ordering the slice first costs about 3 hours** on the critical path against the draft's unordered sequence (about 31.5 hours; question 4 rounded it to 31).
 - **Against M0 and the brief:** M0 took 12 days against a plan of 3–4, so these are session hours, not calendar days, and Fable stops add waiting time.
-- **Re-baselined (question 4).** The brief's days 4–9 become about days 4–21, with the cut-line demo at about day 14. M4 absorbs the slip.
+- **Re-baselined (question 4).** The brief's days 4–9 become about days 4–24 (days 4–21 before the amendment of 2026-11-10), with the cut-line demo at about day 14. M4 absorbs the slip.
 
 ## Left out of M1 (stated, not hidden)
 
@@ -727,7 +764,7 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
 
 ## What is shaky
 
-- **Time.** About 34.5 critical-path hours against a 12-hour budget, 15 Fable stops, and 2 short design reads. The serial database chain keeps half the PRs from running in parallel.
+- **Time.** About 40.5 critical-path hours (34.5 before the amendment of 2026-11-10) against a 12-hour budget, 15 Fable stops, and 2 short design reads. The serial database chain keeps half the PRs from running in parallel.
 - **Transcripts do not re-run the harness.** The stale check is only as good as the hashes it covers: a handler change that leaves the prompt and schemas alone is not caught by the gates, only by the tests.
 - **The unhardened rate is a small sample**, N per variant on one model version, so its intervals are wide.
 - **The loader writes as the owner**, with the migrator's login: local only. It adds a second `set_config` call site, guarded by a role check and a reachability scan that reads names, not `getattr()` or strings built at runtime.
