@@ -11,18 +11,19 @@ accident:
 - it cannot be subclassed, so no subclass can add a rendering;
 - it cannot be pickled, copied or deep-copied.
 
-wrap() is the one way to the text: it renders the value inside an `<untrusted …>`
+wrap() is the way to the text for the model: it renders the value inside an `<untrusted …>`
 delimiter that names the tool and the records it came from. The text and the provenance
 are escaped, so a document that says `</untrusted>` cannot close the delimiter and write
 outside it. The cost: the model reads `&`, `<` and `>` as entities (`R&amp;D`, `&lt;5 %`)
 and may quote them so; the number guard compares against the source, not this text.
 A str is rendered as it is; anything else as JSON through pydantic. M2 adds
-the canary scan and measures the provenance rendering against the red-team corpus; M0
-fixes that wrap() is the only way out and that the text stays inside.
+the canary scan and measures the provenance rendering against the red-team corpus. M0
+fixed that wrap() is the only way out and that the text stays inside; M1 PR 9 adds the
+second, source_text(), for the number guard alone.
 
 Python cannot hide the value: `_value` is reachable. The rule is that code
-outside this module never reads it; M1's number guard, the one other reader, gets a
-named accessor in its own PR.
+outside this module never reads it. The number guard, the one other reader, goes through
+source_text(), whose one caller is app/harness/grounding.py (a scan pins it).
 
 TokenBudget is a Protocol; its M1 contract is in its docstring.
 """
@@ -32,6 +33,7 @@ from __future__ import annotations
 import html
 import secrets
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, NoReturn, Protocol
 
 from pydantic import TypeAdapter
@@ -125,6 +127,46 @@ def wrap(item: Untrusted[Any]) -> str:
     records = html.escape(",".join(item._provenance.record_ids), quote=True)
     body = html.escape(text, quote=False)
     return f'<untrusted tool="{tool}" records="{records}">\n{body}\n{CLOSE}'
+
+
+def source_text(item: Untrusted[Any]) -> str:
+    """The text of item for the number guard (app/harness/grounding.py), its one caller.
+
+    Unlike wrap(), it is not escaped and not delimited: the guard compares the figures in
+    an answer with what the tool returned, not with the model's rendering of it. A str is
+    returned as it is. Anything else gives the string and number leaves of its JSON form,
+    in order, one per line; mapping keys are field names and are left out. Leaves, not a
+    JSON string, so that an escape such as `\\n` cannot glue a figure to a letter.
+
+    The text is client data: it goes to no model, log, span or answer (CLAUDE.md rule 10).
+    tests/test_source_text_scope.py pins the caller.
+    """
+    if type(item) is not Untrusted:
+        raise TypeError(f"the guard reads an Untrusted, not {type(item).__name__}")
+    value = item._value
+    if type(value) is str:
+        return value
+    return "\n".join(_leaves(_JSON.dump_python(value, mode="json")))
+
+
+def _leaves(value: Any) -> list[str]:
+    """The str and number leaves of a JSON-mode value, depth first, in order."""
+    found: list[str] = []
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            stack.extend(reversed(list(node.values())))
+        elif isinstance(node, list):
+            stack.extend(reversed(node))
+        elif isinstance(node, str):
+            found.append(node)
+        elif isinstance(node, float):
+            # Fixed point: repr() would write 1.25e+06, which no figure pattern reads.
+            found.append(format(Decimal(repr(node)), "f"))
+        elif isinstance(node, int) and not isinstance(node, bool):
+            found.append(str(node))
+    return found
 
 
 class BudgetExceeded(Exception):

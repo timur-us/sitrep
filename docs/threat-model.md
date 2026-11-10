@@ -1,6 +1,6 @@
 # SITREP — threat model
 
-Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database), 2026-10-31 (M0 PR 5b: row-level security), 2026-11-03 (M0 PR 6: tool registry), 2026-11-04 (M0 PR 7: dev login), 2026-11-08 (M0 PR 9: status at the end of M0, Timur's answers to the PR 7 questions) and 2026-11-09 (M1 PR 7: the loader; M1 PR 5: the Host check without the shim, plaintext refused with header capture) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
+Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database), 2026-10-31 (M0 PR 5b: row-level security), 2026-11-03 (M0 PR 6: tool registry), 2026-11-04 (M0 PR 7: dev login), 2026-11-08 (M0 PR 9: status at the end of M0, Timur's answers to the PR 7 questions), 2026-11-09 (M1 PR 7: the loader; M1 PR 5: the Host check without the shim, plaintext refused with header capture) and 2026-11-10 (M1 PR 9: the number guard reports, path 7) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
 Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the system prompt staying secret (Kerckhoffs).
 
 ## Assets
@@ -32,13 +32,13 @@ Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the
 
 | # | Path | Mitigation | When |
 |---|---|---|---|
-| 1 | Indirect prompt injection through an e-mail or document → exfiltration through a link, an image or a tool argument (LLM01, LLM02) | provenance wrapper, output allowlists, no auto-loaded images in the UI, recipient allowlist, canary scan over answers and tool arguments | **MVP** (M0 interface: READ results are typed `Untrusted` and not rendered by accident, `wrap()` being the sanctioned way to the text; M1 measured, M2 hardened) |
+| 1 | Indirect prompt injection through an e-mail or document → exfiltration through a link, an image or a tool argument (LLM01, LLM02) | provenance wrapper, output allowlists, no auto-loaded images in the UI, recipient allowlist, canary scan over answers and tool arguments | **MVP** (M0 interface: READ results are typed `Untrusted` and not rendered by accident, `wrap()` being the sanctioned way to the text for the model and `source_text()`, pinned to the number guard by a scan, the one other; M1 measured, M2 hardened) |
 | 2 | Cross-mandate leak through retrieval without scoping, or through a tool argument that names another advisor (LLM02) | row-level security: app role is not table owner, no BYPASSRLS, FORCE ROW LEVEL SECURITY, advisor id set per transaction (`set_config(…, true)`, the bindable `SET LOCAL`) from the verified login only; the role layout below it, the pool guard and bind-only SQL (ADR 0008, "Local database" below) | M0 roles (PR 5a), RLS (PR 5b) and the tool registry (PR 6), M1 test, M2 red-team case |
 | 3 | Forged identity header against the built-in auth | the app trusts only headers set by the platform after it strips client-supplied ones; a test proves a self-set `X-MS-CLIENT-PRINCIPAL` does nothing | M3 |
 | 4 | Tool misuse: draft addressed to Mallory, follow-up with malicious content, approval bypass (LLM06) | approval gate with server-issued, signed, single-use tokens; recipient allowlist; the model cannot mint an approval | M0 registry (DRAFT and SIDE_EFFECT tools must require approval), M1–M2 |
 | 5 | Poisoning of the knowledge base (LLM04) | provenance, origin filters, eval case | M4 |
 | 6 | System prompt leak (LLM07) | low impact by design (Kerckhoffs); measured | M2 |
-| 7 | Hallucinated numbers (LLM09) | number guard: every figure must appear in the sources | M1 |
+| 7 | Hallucinated numbers (LLM09) | number guard: every figure is looked up in the sources of the request; in M1 it reports and does not block (plan default 14). It proves provenance, not truth: a figure from an attacker's e-mail counts as grounded, so the UI never shows its result as "verified". Its limits are in `app/harness/grounding.py` | M1 (report), M2 (policy) |
 | 8 | Cost denial of service through tool loops (LLM10) | max_turns, budget per request, rate limit per identity | M1 |
 | 9 | CI and identity: a PR workflow with cloud rights, an agent that assigns roles | no Azure login on pull requests; deploy only from the protected GitHub environment `production`; roles, identities and environments changed only by Timur; ruleset without bypass | M0 (ruleset, environment), M3 (OIDC) |
 | 10 | The coding agent itself: Claude Code reads the attack corpus, eval cases and fetched pages while it builds | that text is data, never instructions (CLAUDE.md rule 9); guardrail files denied for edits; ruleset, environment and push protection hold for the agent's token; no Azure login for the agent in M0 to M2; attack domains under `.example` never resolve | M0 |

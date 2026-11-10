@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Timur, 2026-10-29). Amended in M1 PR 5 (Timur's answer 5 to the PR 7 questions; the hooks from Watch).
+Accepted (Timur, 2026-10-29). Amended in M1 PR 5 and M1 PR 9 (Sources).
 
 ## Date
 
@@ -28,12 +28,13 @@ SITREP (situation report) will carry client data and prompts through every reque
 - **Explicit provider, no globals for traces.** The provider goes to the instrumentation directly; its resource ignores `OTEL_RESOURCE_ATTRIBUTES`. The global propagator is an empty one: inbound trace context is never adopted. Spans export synchronously (`SimpleSpanProcessor`).
 - **`X-Trace-Id`** on every response, 500 included, so a support case can quote it. Ids come from `secrets`, not from the SDK's `random`, whose state the ids would reveal.
 - **Logs.** No access log, `proxy_headers` off, no server header. A redacting filter on uvicorn's loggers and on the handler keeps the message template, drops its arguments, and turns an exception into its type (plus the symbolic errno for an `OSError`) and the trace id. The handler never prints its own traceback. `python -m app` replaces Python's thread, unraisable, main-thread and warning hooks, the lifespan the loop's asyncio handler, and a filter guards asyncio's own logger: a fixed message, the type, the trace id.
-- **`TRACE_PLAINTEXT=1`** (exactly `"1"`; read as `SITREP_TRACE_PLAINTEXT` since ADR 0009) sends spans to the console unfiltered. It is refused, before the server starts, unless the exporter is the console and the entry point binds exactly `127.0.0.1`, and while any `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*` variable is set (any case or value): captured headers would print the session cookie. The image binds `0.0.0.0` and refuses it. Logs stay redacted either way.
+- **Grounding** (M1 PR 9): its report holds counts and cited ids a tool returned; never figures, source text or model-written ids.
+- **`TRACE_PLAINTEXT=1`** (`SITREP_TRACE_PLAINTEXT`, exactly `"1"`) sends spans to the console unfiltered. It is refused, before the server starts, unless the exporter is the console and the entry point binds exactly `127.0.0.1`, and while any `OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_*` variable is set (any case or value): captured headers would print the session cookie. The image binds `0.0.0.0` and refuses it. Logs stay redacted either way.
 
 ## Consequences
 
 - **Easier:** a new library, convention or environment variable cannot add plaintext to spans unreviewed; a real-server test proves it with canaries.
-- **Harder:** debugging sees less: no exception messages or query strings in traces or logs. Locally `SITREP_TRACE_PLAINTEXT=1` restores the spans, not the logs, which show templates without values.
+- **Harder:** debugging sees less: no exception messages or query strings in traces or logs. Locally, plaintext restores the spans, never the logs.
 - **Watch:**
   - the allowlist uses the instrumentation's pre-stable HTTP names; opting into the stable conventions drops those attributes until the list is reviewed;
   - message templates are trusted to be constants: an f-string with request content gets through;
@@ -42,7 +43,8 @@ SITREP (situation report) will carry client data and prompts through every reque
 
 ## Sources
 
-- Timur's answer 5 to the PR 7 questions, `docs/plans/m0-foundation.md` (amendment recorded in PR 9), and `docs/plans/m1-mvp-core.md`, PR 5 (2026-11-08).
+- M1 PR 5: the plaintext refusal under header capture and the hooks from Watch; `TRACE_PLAINTEXT` is read as `SITREP_TRACE_PLAINTEXT` since ADR 0009. Timur's answer 5 to the PR 7 questions, `docs/plans/m0-foundation.md` (amendment recorded in PR 9), and `docs/plans/m1-mvp-core.md`, PR 5 (2026-11-08).
+- M1 PR 9: the grounding report, built for traces; an unknown cited id is model output, so it is counted and dropped. Its trace keys are approved in PR 10. `docs/plans/m1-mvp-core.md`, PR 9 and default 14 (2026-11-08).
 - CLAUDE.md, rule 10 (2026-10-27).
 - `docs/threat-model.md`, Eve and the audit trail (2026-10-27).
 - `docs/plans/m0-foundation.md`, "Tracing and logs" and PR 3 (2026-10-28).
