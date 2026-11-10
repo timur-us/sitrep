@@ -17,6 +17,7 @@ tests/db/test_retrieval.py runs them on the corpus; this file pins what needs no
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from types import MappingProxyType
 from typing import Any
@@ -220,8 +221,9 @@ def test_a_query_over_the_models_limit_is_refused_before_any_connection() -> Non
         handlers.search_client_docs(pool, embedder, issue(MINE), SearchClientDocs(query=canary))
     assert refused.value.kind == handlers.QUERY_TOO_LONG == "query_too_long"
     assert str(refused.value) == "query_too_long" and refused.value.args == ("query_too_long",)
-    # No chained exception carries the embedder's message along.
-    assert refused.value.__cause__ is None and refused.value.__suppress_context__
+    # No chained exception carries the embedder's error along: neither as the cause nor
+    # as the context, whose traceback frames hold the query (security review sec-5).
+    assert refused.value.__cause__ is None and refused.value.__context__ is None
     assert pool.asked == 0
 
 
@@ -252,6 +254,58 @@ def test_the_portfolio_refuses_a_row_of_another_advisor() -> None:
     conn = FakeConnection({queries.MANDATE_VISIBLE: [(OTHER, "m")]})
     with pytest.raises(GuardError, match="another advisor"):
         handlers.portfolio(conn, MINE, "m")
+
+
+DOCUMENT_LISTS = [
+    (queries.SEARCH_DOCUMENTS_ENGLISH, None),
+    (queries.SEARCH_DOCUMENTS_GERMAN, None),
+    (queries.SEARCH_MANDATE_DOCUMENTS_ENGLISH, "m"),
+    (queries.SEARCH_MANDATE_DOCUMENTS_GERMAN, "m"),
+]
+
+
+@pytest.mark.parametrize(("statement", "mandate"), DOCUMENT_LISTS, ids=lambda v: str(v)[:40])
+def test_every_full_text_list_refuses_a_row_of_another_advisor(
+    statement: str, mandate: str | None
+) -> None:
+    conn = FakeConnection(
+        {queries.MANDATE_VISIBLE: [(MINE, "m")], statement: [(OTHER, "theirs", 0.9)]}
+    )
+    with pytest.raises(GuardError, match="another advisor"):
+        handlers.search(
+            conn, MINE, SearchClientDocs(query="x", mandate_id=mandate), VECTOR, "m", "r"
+        )
+
+
+def test_the_mandate_vector_branch_refuses_a_row_of_another_advisor() -> None:
+    conn = FakeConnection({queries.NEAREST_MANDATE_CHUNKS: [(OTHER, "theirs", 0.1)]})
+    with pytest.raises(GuardError, match="another advisor"):
+        handlers.nearest_chunks(conn, MINE, VECTOR, "m", "r", mandate_id="m")
+
+
+def test_the_hits_refuse_a_row_of_another_advisor() -> None:
+    # The fused ids' details and passages: one statement (review sec-2), checked too.
+    conn = FakeConnection(
+        {
+            queries.SEARCH_DOCUMENTS_ENGLISH: [(MINE, "mine", 0.9)],
+            queries.DOCUMENT_HITS: [(OTHER, "mine", "m", "t", "english", "internal", "x")],
+        }
+    )
+    with pytest.raises(GuardError, match="another advisor"):
+        handlers.search(conn, MINE, SearchClientDocs(query="x"), VECTOR, "m", "r")
+
+
+def test_a_record_gone_between_statements_is_left_out() -> None:
+    # A concurrent load replaced "gone" after the list was read; "bare" has no passage
+    # of the query's model, so its excerpt is empty (review test-4).
+    conn = FakeConnection(
+        {
+            queries.SEARCH_DOCUMENTS_ENGLISH: [(MINE, "bare", 0.9), (MINE, "gone", 0.8)],
+            queries.DOCUMENT_HITS: [(MINE, "bare", "m", "t", "english", "internal", None)],
+        }
+    )
+    hits = handlers.search(conn, MINE, SearchClientDocs(query="x"), VECTOR, "m", "r")
+    assert [(hit.document_id, hit.excerpt) for hit in hits] == [("bare", "")]
 
 
 def test_an_unseen_mandate_runs_no_search() -> None:
@@ -292,16 +346,20 @@ LISTS = (
 
 @pytest.mark.parametrize("name", LISTS)
 def test_each_list_keeps_to_its_candidates(name: str) -> None:
-    assert f" LIMIT {handlers.CANDIDATES}" in getattr(queries, name)
+    # A word boundary: LIMIT 200 is not LIMIT 20 (review test-3).
+    found = re.findall(r"\bLIMIT (\d+)\b", getattr(queries, name))
+    assert found == [str(handlers.CANDIDATES)], found
 
 
-@pytest.mark.parametrize("name", [name for name in LISTS if name.startswith("NEAREST_")])
+@pytest.mark.parametrize(
+    "name", [name for name in LISTS if name.startswith("NEAREST_")] + ["DOCUMENT_HITS"]
+)
 def test_the_vector_lists_compare_one_model(name: str) -> None:
     statement = getattr(queries, name)
     assert "embedding_model = %s" in statement and "embedding_revision = %s" in statement
-    # relaxed_order may return rows a little out of order: they are sorted again, in
+    # relaxed_order may return rows a little out of order: the lists are sorted again, in
     # full (`+ 0`: PostgreSQL 17 would otherwise take the CTE's order as given).
-    if "chunks" in statement:
+    if name.startswith("NEAREST_") and "chunks" in statement:
         assert "MATERIALIZED" in statement and "ORDER BY n.distance + 0" in statement
 
 

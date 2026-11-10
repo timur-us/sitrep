@@ -88,13 +88,14 @@ def table(name: str) -> sql.Identifier:
 
 
 def is_loaded(corpus: load.Corpus, embedder: OnnxEmbedder) -> bool:
-    """Every corpus document and sheet is in the database with a vector of this model."""
+    """Every corpus document and sheet is in the database, as the corpus has it (title and
+    body too, so a load from an older generator is reloaded), with a vector of this model."""
     model = (embedder.model_id, embedder.revision)
     with connect(SUPERUSER_URL) as su:
         documents = set(
             su.execute(
                 sql.SQL(
-                    "SELECT d.advisor_id, d.id FROM {} d JOIN {} c"
+                    "SELECT d.advisor_id, d.id, d.title, d.body FROM {} d JOIN {} c"
                     " ON c.advisor_id = d.advisor_id AND c.document_id = d.id"
                     " WHERE c.embedding_model = %s AND c.embedding_revision = %s"
                 ).format(table("documents"), table("chunks")),
@@ -102,16 +103,18 @@ def is_loaded(corpus: load.Corpus, embedder: OnnxEmbedder) -> bool:
             ).fetchall()
         )
         sheets = {
-            row[0]
+            tuple(row)
             for row in su.execute(
                 sql.SQL(
-                    "SELECT id FROM {} WHERE embedding_model = %s AND embedding_revision = %s"
+                    "SELECT id, title, body FROM {}"
+                    " WHERE embedding_model = %s AND embedding_revision = %s"
                 ).format(table("product_sheets")),
                 model,
             ).fetchall()
         }
-    wanted = {(document.advisor_id, document.id) for document in corpus.documents}
-    return wanted <= documents and {sheet.id for sheet in corpus.sheets} <= sheets
+    wanted = {(d.advisor_id, d.id, d.title, d.body) for d in corpus.documents}
+    wanted_sheets = {(sheet.id, sheet.title, sheet.body) for sheet in corpus.sheets}
+    return wanted <= documents and wanted_sheets <= sheets
 
 
 @pytest.fixture(scope="module")
@@ -277,12 +280,184 @@ def test_an_email_dressed_as_the_report_is_not_the_portfolio(
     )
     try:
         report = read[PORTFOLIO](issue(DEMO.advisor_id), GetPortfolio(mandate_id=DEMO.id))
+        searched = unwrap(
+            read[SEARCH](
+                issue(DEMO.advisor_id),
+                SearchClientDocs(query=expected.title, mandate_id=DEMO.id, limit=20),
+            )
+        )
     finally:
         superuser.execute(
             sql.SQL("DELETE FROM {} WHERE id = %s").format(table("documents")), (planted,)
         )
     assert report.provenance.record_ids == (expected.id,)
     assert canary not in wrap(report)
+    # Search finds both: the e-mail's trust is its table's, whatever its id or title says.
+    trust = {hit["document_id"]: hit["trust"] for hit in searched}
+    assert trust[planted] == "untrusted" and trust[expected.id] == "internal", trust
+
+
+# Ranking and the limit (review findings test-2 and test-3).
+
+
+@pytest.mark.parametrize("limit", [1, 3])
+def test_the_limit_cuts_the_fused_list(read: Any, limit: int) -> None:
+    query = QUERIES["de-report"]
+    full = read[SEARCH](issue(MINE.id), SearchClientDocs(query=query, limit=20))
+    cut = read[SEARCH](issue(MINE.id), SearchClientDocs(query=query, limit=limit))
+    assert len(full.provenance.record_ids) == 20
+    assert cut.provenance.record_ids == full.provenance.record_ids[:limit]
+
+
+GRADED_WORD = "zyphrandol"
+GRADED = 25  # documents, the word once in the first and 25 times in the last
+
+
+def graded_id(lang: str, count: int) -> str:
+    return f"{SEED}-{MINE.id}-graded-{lang}-{count:02d}"
+
+
+@pytest.fixture
+def graded(corpus: load.Corpus, superuser: Connection) -> Iterator[None]:
+    """GRADED documents of the demo mandate per language, the word repeated 1..GRADED
+    times among the same filler, so ts_rank_cd orders them by the count."""
+    rows = [
+        (
+            MINE.id,
+            graded_id(lang, count),
+            DEMO.id,
+            " ".join([GRADED_WORD] * count + ["x"] * 30),
+            lang,
+        )
+        for lang in ("english", "german")
+        for count in range(1, GRADED + 1)
+    ]
+    with superuser.cursor() as cursor:
+        cursor.executemany(
+            sql.SQL(
+                "INSERT INTO {} (advisor_id, id, mandate_id, title, body, lang, origin)"
+                " VALUES (%s, %s, %s, 'Graded', %s, %s, 'call_notes')"
+            ).format(table("documents")),
+            rows,
+        )
+    try:
+        yield
+    finally:
+        superuser.execute(
+            sql.SQL("DELETE FROM {} WHERE id = ANY(%s)").format(table("documents")),
+            ([row[1] for row in rows],),
+        )
+
+
+@pytest.mark.usefixtures("graded")
+@pytest.mark.parametrize("lang", ["english", "german"])
+@pytest.mark.parametrize("mandate", [False, True], ids=["all", "mandate"])
+def test_full_text_keeps_the_best_twenty_best_first(
+    app_pool: ConnectionPool, lang: str, mandate: bool
+) -> None:
+    statement = {
+        (False, "english"): queries.SEARCH_DOCUMENTS_ENGLISH,
+        (False, "german"): queries.SEARCH_DOCUMENTS_GERMAN,
+        (True, "english"): queries.SEARCH_MANDATE_DOCUMENTS_ENGLISH,
+        (True, "german"): queries.SEARCH_MANDATE_DOCUMENTS_GERMAN,
+    }[(mandate, lang)]
+    params = (GRADED_WORD, DEMO.id) if mandate else (GRADED_WORD,)
+    with advisor_transaction(app_pool, issue(MINE.id)) as conn:
+        rows = conn.execute(statement, params).fetchall()
+    assert [row[1] for row in rows] == [
+        graded_id(lang, count) for count in range(GRADED, GRADED - handlers.CANDIDATES, -1)
+    ]
+    ranks = [row[2] for row in rows]
+    assert ranks == sorted(ranks, reverse=True) and ranks[0] > ranks[-1], ranks
+
+
+@pytest.mark.parametrize("lang", ["english", "german"])
+def test_a_title_finds_its_own_document_first(read: Any, corpus: load.Corpus, lang: str) -> None:
+    (report,) = [
+        d
+        for d in corpus.documents
+        if d.advisor_id == MINE.id
+        and d.origin == "portfolio_system"
+        and d.lang == lang
+        and d.mandate_id
+        == min(m.mandate_id for m in corpus.documents if m.advisor_id == MINE.id and m.lang == lang)
+    ]
+    found = read[SEARCH](issue(MINE.id), SearchClientDocs(query=report.title))
+    assert found.provenance.record_ids[0] == report.id, found.provenance.record_ids
+
+
+# The excerpt: the nearest passage of the query's model (review findings test-4, test-5).
+
+PASSAGES = (
+    "Die Anleihen im Depot werden in kurze Laufzeiten umgeschichtet.",
+    "Die Dividenden der Aktien steigen im Herbst deutlich.",
+)
+TWO_PASSAGES = f"{SEED}-{MINE.id}-two-passages"
+
+
+@pytest.fixture
+def two_passages(
+    corpus: load.Corpus, superuser: Connection, embedder: OnnxEmbedder
+) -> Iterator[str]:
+    """A document of the demo mandate with two passages of the real model, and a third of
+    another model whose vector is the query's own: the nearest of all, if it counted."""
+    query = "Wie entwickeln sich die Dividenden der Aktien?"
+    superuser.execute(
+        sql.SQL(
+            "INSERT INTO {} (advisor_id, id, mandate_id, title, body, lang, origin)"
+            " VALUES (%s, %s, %s, 'Zwei Passagen', %s, 'german', 'call_notes')"
+        ).format(table("documents")),
+        (MINE.id, TWO_PASSAGES, DEMO.id, "\n\n".join(PASSAGES)),
+    )
+    vectors = embedder.embed_passages(list(PASSAGES))
+    chunks = [
+        (n, PASSAGES[n], vectors[n], embedder.model_id, embedder.revision) for n in range(2)
+    ] + [(2, "another model", embedder.embed_query(query), "fake/another-model", "fake")]
+    with superuser.cursor() as cursor:
+        cursor.executemany(
+            sql.SQL(
+                "INSERT INTO {} (advisor_id, id, document_id, ordinal, body, embedding,"
+                " embedding_model, embedding_revision) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+            ).format(table("chunks")),
+            [
+                (
+                    MINE.id,
+                    f"{TWO_PASSAGES}-{n}",
+                    TWO_PASSAGES,
+                    n,
+                    body,
+                    handlers.vector_text(v),
+                    m,
+                    r,
+                )
+                for n, body, v, m, r in chunks
+            ],
+        )
+    try:
+        yield query
+    finally:
+        superuser.execute(
+            sql.SQL("DELETE FROM {} WHERE document_id = %s").format(table("chunks")),
+            (TWO_PASSAGES,),
+        )
+        superuser.execute(
+            sql.SQL("DELETE FROM {} WHERE id = %s").format(table("documents")), (TWO_PASSAGES,)
+        )
+
+
+@pytest.mark.parametrize(
+    ("query", "nearest"),
+    [("Wie entwickeln sich die Dividenden der Aktien?", 1), ("Anleihen umschichten", 0)],
+    ids=["second", "first"],
+)
+def test_the_excerpt_is_the_nearest_passage_of_the_querys_model(
+    read: Any, two_passages: str, query: str, nearest: int
+) -> None:
+    hits = unwrap(
+        read[SEARCH](issue(MINE.id), SearchClientDocs(query=query, mandate_id=DEMO.id, limit=20))
+    )
+    (hit,) = [hit for hit in hits if hit["document_id"] == TWO_PASSAGES]
+    assert hit["excerpt"] == PASSAGES[nearest], hit["excerpt"]
 
 
 # Product sheets and trust.
@@ -371,20 +546,33 @@ def crowd_document(person: branding.Person) -> str:
     return f"{SEED}-{person.id}-crowd-d"
 
 
+# The advisor's own chunks under another model, on the query vector itself: the nearest
+# of all if the model filter were dropped (review finding test-5).
+INTRUDER = f"{SEED}-{MINE.id}-intruder-d"
+INTRUDERS = 5
+
+
+def crowd_mandate(corpus: load.Corpus, person: branding.Person) -> str:
+    return next(m.id for m in corpus.mandates if m.advisor_id == person.id)
+
+
 @pytest.fixture
 def crowded(corpus: load.Corpus, superuser: Connection) -> Iterator[None]:
     """The other advisor's chunks crowd the query vector; the advisor's own sit further
     off. They carry a model id of their own, so nothing else is a candidate."""
-    plan = ((OTHER, {0: 1.0}, CROWD_NEAR), (MINE, {0: 0.5, 1: 0.866}, CROWD_FAR))
+    plan = (
+        (OTHER, crowd_document(OTHER), {0: 1.0}, CROWD_NEAR, CROWD_MODEL),
+        (MINE, crowd_document(MINE), {0: 0.5, 1: 0.866}, CROWD_FAR, CROWD_MODEL),
+        (MINE, INTRUDER, {0: 1.0}, INTRUDERS, "fake/another-model"),
+    )
     try:
-        for person, weights, count in plan:
-            mandate = next(m.id for m in corpus.mandates if m.advisor_id == person.id)
+        for person, document, weights, count, model in plan:
             superuser.execute(
                 sql.SQL(
                     "INSERT INTO {} (advisor_id, id, mandate_id, title, body, lang, origin)"
                     " VALUES (%s, %s, %s, 'Crowd', 'crowd', 'english', 'call_notes')"
                 ).format(table("documents")),
-                (person.id, crowd_document(person), mandate),
+                (person.id, document, crowd_mandate(corpus, person)),
             )
             with superuser.cursor() as cursor:
                 cursor.executemany(
@@ -396,11 +584,11 @@ def crowded(corpus: load.Corpus, superuser: Connection) -> Iterator[None]:
                     [
                         (
                             person.id,
-                            f"{crowd_document(person)}-{n}",
-                            crowd_document(person),
+                            f"{document}-{n}",
+                            document,
                             n,
                             handlers.vector_text(unit(weights, n)),
-                            CROWD_MODEL,
+                            model,
                             CROWD_REVISION,
                         )
                         for n in range(count)
@@ -408,14 +596,13 @@ def crowded(corpus: load.Corpus, superuser: Connection) -> Iterator[None]:
                 )
         yield
     finally:
-        for person, _, _ in plan:
+        for _, document, *_ in plan:
             superuser.execute(
                 sql.SQL("DELETE FROM {} WHERE document_id = %s").format(table("chunks")),
-                (crowd_document(person),),
+                (document,),
             )
             superuser.execute(
-                sql.SQL("DELETE FROM {} WHERE id = %s").format(table("documents")),
-                (crowd_document(person),),
+                sql.SQL("DELETE FROM {} WHERE id = %s").format(table("documents")), (document,)
             )
 
 
@@ -444,6 +631,37 @@ def test_the_iterative_scan_fills_the_vector_branch(app_pool: ConnectionPool) ->
     assert len(found) == handlers.CANDIDATES, found
     assert {document for document, _ in found} == {crowd_document(MINE)}
     assert [distance for _, distance in found] == sorted(distance for _, distance in found)
+    assert len(control) < handlers.CANDIDATES, control
+
+
+@pytest.mark.usefixtures("crowded")
+def test_the_iterative_scan_fills_the_mandate_branch(
+    app_pool: ConnectionPool, corpus: load.Corpus
+) -> None:
+    # The analyzer's note: the mandate's statement joins documents, and needs the same.
+    query = handlers.vector_text(unit({0: 1.0}, 0))
+    mandate = crowd_mandate(corpus, MINE)
+    args = (query, mandate, CROWD_MODEL, CROWD_REVISION)
+    with advisor_transaction(app_pool, issue(MINE.id)) as conn:
+        for statement in PENALTIES:
+            conn.execute(statement)
+        plan = "\n".join(
+            row[0]
+            for row in conn.execute(
+                "EXPLAIN (COSTS OFF) " + queries.NEAREST_MANDATE_CHUNKS, args
+            ).fetchall()
+        )
+        found = handlers.nearest_chunks(
+            conn, MINE.id, query, CROWD_MODEL, CROWD_REVISION, mandate_id=mandate
+        )
+        conn.execute("SET LOCAL hnsw.iterative_scan = off")
+        control = handlers.nearest_chunks(
+            conn, MINE.id, query, CROWD_MODEL, CROWD_REVISION, mandate_id=mandate
+        )
+    assert "Index Scan using chunks_embedding" in plan, plan
+    assert plan.startswith("Sort") and "Presorted Key" not in plan, plan
+    assert len(found) == handlers.CANDIDATES, found
+    assert {document for document, _ in found} == {crowd_document(MINE)}
     assert len(control) < handlers.CANDIDATES, control
 
 

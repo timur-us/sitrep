@@ -491,6 +491,51 @@ def test_the_handles_delegation_is_the_one_exception() -> None:
             HANDLE.replace("        return", "        query = f'SELECT {query}'\n        return"),
         ),
         (SESSION, HANDLE.replace("execute(query, params)", "execute(params, query)")),
+        # Security review sec-3: rebindings that are not a plain assignment.
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        run = lambda query: self._live().execute(query, params)\n"
+                "        return run(f'SELECT {params}')\n",
+            ),
+        ),
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        def run(query):\n"
+                "            return self._live().execute(query, params)\n"
+                "        return run(f'SELECT {params}')\n",
+            ),
+        ),
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        try:\n"
+                "            raise ValueError(f'SELECT {params}')\n"
+                "        except ValueError as query:\n"
+                "            return self._live().execute(query, params)\n",
+            ),
+        ),
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        match f'SELECT {params}':\n"
+                "            case str() as query:\n"
+                "                return self._live().execute(query, params)\n",
+            ),
+        ),
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        from os import sep as query\n"
+                "        return self._live().execute(query, params)\n",
+            ),
+        ),
         # A caller of the handle: a name, not a literal or a queries.py constant.
         (
             "app/harness/x.py",
@@ -503,6 +548,11 @@ def test_the_handles_delegation_is_the_one_exception() -> None:
         "another-method",
         "rebound",
         "another-argument",
+        "lambda",
+        "nested-def",
+        "except-as",
+        "case-as",
+        "import-as",
         "caller",
     ],
 )

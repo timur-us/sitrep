@@ -23,7 +23,9 @@ app role's for the guard to inspect.
 
 from __future__ import annotations
 
+import copy
 import logging
+import pickle
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -435,6 +437,20 @@ def test_a_kept_handle_cannot_act_in_the_next_advisors_transaction(
         with pytest.raises(session.TransactionEnded):
             kept.execute(SETTING)
         assert conn.execute(SETTING).fetchone() == (OTHER.id,)
+
+
+@pytest.mark.parametrize(
+    "how",
+    [copy.copy, copy.deepcopy, pickle.dumps],
+    ids=["copy", "deepcopy", "pickle"],
+)
+def test_the_handle_cannot_be_copied(app_pool: ConnectionPool, how: object) -> None:
+    # Security review sec-1 (measured before the fix): copy.copy() kept the connection,
+    # and the copy, unended, ran inside the next advisor's transaction.
+    with session.advisor_transaction(app_pool, issue(MINE.id)) as conn:
+        with pytest.raises(TypeError, match="cannot be copied"):
+            how(conn)  # type: ignore[operator]
+        assert conn.execute(SETTING).fetchone() == (MINE.id,)
 
 
 def test_rows_carry_no_cursor_and_no_connection(app_pool: ConnectionPool) -> None:

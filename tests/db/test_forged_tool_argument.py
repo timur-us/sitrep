@@ -192,3 +192,22 @@ def test_forged_payloads_pass_validation_and_stay_inert(
     assert not isinstance(follow_up, RejectedCall)
     assert foreign(follow_up.provenance.record_ids, owners, MINE) == []
     assert token_document_id(MINE.id, lang) in follow_up.provenance.record_ids
+
+
+@pytest.mark.parametrize("tool", ["search_client_docs", "get_portfolio"])
+@pytest.mark.parametrize(("lang", "payload"), PAYLOADS, ids=PAYLOAD_IDS)
+def test_forged_payloads_as_a_mandate_id_name_no_mandate(
+    lang: str,
+    payload: str,
+    tool: str,
+    registry: ToolRegistry,
+    app_pool: ConnectionPool,
+    embedder: OnnxEmbedder,
+) -> None:
+    # Security review sec-6: the payloads through the other text argument, which reaches
+    # the mandate lookup and the mandate's statements, and through get_portfolio.
+    arguments = {"mandate_id": payload} | ({"query": WORD} if tool == TOOL else {})
+    outcome = registry.validate_call(tool, arguments)
+    assert isinstance(outcome, ValidCall), f"{tool} rejected the payload: {outcome}"
+    result = read_handlers(app_pool, embedder)[tool](issue(MINE.id), outcome.arguments)
+    assert result.provenance.record_ids == (), result.provenance
