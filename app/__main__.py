@@ -27,12 +27,14 @@ the host it was validated for through create_app(bind_host=...).
 
 from __future__ import annotations
 
+import logging.config
 import os
 import sys
 from collections.abc import Sequence
 
 import uvicorn
 from opentelemetry.sdk.trace import TracerProvider
+from pydantic import ValidationError
 
 from app.config.settings import LOOPBACK, Settings, env_name, ignored_url_notices
 from app.main import create_app
@@ -46,6 +48,15 @@ DEV_AUTH, HOST, PORT = env_name("dev_auth"), env_name("host"), env_name("port")
 
 class StartRefused(ValueError):
     """A configuration the entry point refuses to serve. The message names no value."""
+
+
+def invalid_settings(error: ValidationError) -> str:
+    """The settings a ValidationError refuses and why, without their values: errors()
+    carries the input itself even with hide_input_in_errors."""
+    details = error.errors(include_input=False, include_context=False, include_url=False)
+    return "; ".join(
+        f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}" for detail in details
+    )
 
 
 def server_config(
@@ -123,17 +134,24 @@ class VerifiedServer(uvicorn.Server):
 
 
 def main(argv: Sequence[str] = ()) -> int:
-    # An exception in a thread or one that cannot be raised logs its type and the trace id
-    # only, not Python's full traceback on stderr (ADR 0007, M1 PR 5).
+    # The redacting log config first, so what is logged before uvicorn applies it again
+    # goes through it too; then the hooks: an exception in a thread, one escaping the main
+    # thread, one that cannot be raised and a warning log their type and the trace id
+    # only, not Python's full text on stderr (ADR 0007, M1 PR 5).
+    logging.config.dictConfig(LOG_CONFIG)
     install_exception_hooks()
     # An old, unprefixed URL in the environment is not read: say so, by name (review
     # finding sec-1). One in .env is dropped without a word (the runbook says so).
     for notice in ignored_url_notices(os.environ):
         print(notice, file=sys.stderr)
-    settings = Settings(_env_file=".env")
     try:
+        settings = Settings(_env_file=".env")
         check_start(settings, argv)
         config = server_config(settings)
+    except ValidationError as invalid:
+        # The field and the rule, never the value (review finding sec-r1 of M1 PR 5).
+        print(f"refused to start: invalid settings: {invalid_settings(invalid)}", file=sys.stderr)
+        return REFUSED
     except (StartRefused, PlaintextRefused) as refused:
         print(f"refused to start: {refused}", file=sys.stderr)
         return REFUSED

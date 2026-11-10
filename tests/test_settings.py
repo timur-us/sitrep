@@ -393,10 +393,14 @@ def test_entry_point_with_an_old_dotenv(
     # (review finding test-r3).
     err = capsys.readouterr().err
     assert "ignored" not in err and NOT_ECHOED not in err, err
-    # Control: the same file with the prefixed names is read, and refused.
+    # Control: the same file with the prefixed names is read, and refused: since M1 PR 5
+    # with exit 2, naming the variables and not their values (review finding sec-r1).
     (tmp_path / ".env").write_text("".join(f"{branding.SLUG.upper()}_{line}" for line in lines))
-    with pytest.raises(ValidationError):
-        entry.main()
+    assert entry.main() == 2
+    err = capsys.readouterr().err
+    assert "refused to start: invalid settings" in err, err
+    assert all(env_name(field) in err for field in URL_FIELDS), err
+    assert NOT_ECHOED not in err and "192.0.2.1" not in err, err
 
 
 def test_ignored_url_notices() -> None:

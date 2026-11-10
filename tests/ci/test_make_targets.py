@@ -60,7 +60,7 @@ TARGET_COMMANDS = {
         "-p 127.0.0.1:$port:8000",
         f"-e {env_name('allowed_hosts')}=127.0.0.1:$port",
         "-H 'Host: 192.0.2.1:8000'",
-        f"-e {env_name('trace_plaintext')}=1",
+        f"docker create -e {env_name('trace_plaintext')}=1",
         # The dev login shim is not in the image, and asking for it refuses to start.
         "import app.auth.dev_shim",
         f"-e {env_name('dev_auth')}=1",
@@ -117,7 +117,7 @@ def test_docker_smoke_refuses_the_dev_login_on_both_hosts() -> None:
     end = out.find('echo "smoke: the dev login refused', loop)
     assert end > loop, out
     body = out[loop:end]
-    run = f"docker run -d -e {env_name('dev_auth')}=1 -e {env_name('host')}=$host"
+    run = f"docker create -e {env_name('dev_auth')}=1 -e {env_name('host')}=$host"
     for needle in (
         run,
         'test "$state" = "exited 2"',

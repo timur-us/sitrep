@@ -169,18 +169,19 @@ def test_a_websocket_is_closed() -> None:
 def test_the_shim_allows_loopback_alone_whatever_the_setting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Review findings test-4 and sec-8: with another host allowed for the app, the shim
-    # still refuses it, and loopback on the port still passes both checks.
+    # Review findings test-4 and sec-8: with another host allowed for the app (on a
+    # loopback bind, localhost is the one other name it may allow), the shim still
+    # refuses it, and 127.0.0.1 on the port still passes both checks.
     monkeypatch.setenv(env_name("dev_auth"), "1")
     port = Settings(_env_file=None).port
-    staff = f"{branding.SLUG}.{branding.DOMAINS.staff}"
-    monkeypatch.setenv(ALLOWED_HOSTS, f"{staff},127.0.0.1:{port}")
+    monkeypatch.setenv(ALLOWED_HOSTS, f"localhost:{port},127.0.0.1:{port}")
     shimmed = Settings(_env_file=None)
+    assert host_check.allowed_hosts(shimmed) >= {f"localhost:{port}".encode()}
     app = create_app(shimmed, bind_host="127.0.0.1")
     base = f"http://127.0.0.1:{port}"
     with TestClient(app, base_url=base, client=("127.0.0.1", 50000)) as c:
         assert c.get("/health").status_code == 200
-        assert c.get("/health", headers={"host": staff}).status_code == 400
+        assert c.get("/health", headers={"host": f"localhost:{port}"}).status_code == 400
 
 
 @pytest.mark.parametrize("variant", [str.upper, lambda h: h + ".", lambda h: h + " ", str.title])

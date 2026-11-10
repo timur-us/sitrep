@@ -23,7 +23,7 @@ SITREP (situation report) needs a verified login before M3's Entra ID, to test l
 
 The last option, `app/auth/dev_shim.py`:
 - **Where it runs.** `python -P -m app` takes no arguments in any mode (`--uds`, `--fd`: exit 2). With `SITREP_DEV_AUTH=1` (exactly `1`) it also exits 2 before binding for any host but exactly `127.0.0.1`, port 0, and a missing `app.auth.dev_shim`. It always binds through `uvicorn.Config.bind_socket()` and hands that socket to the server; with the dev login it checks every listening socket again after startup. `create_app()` mounts the shim only for `bind_host == "127.0.0.1"` and exactly `1`. The image lacks the file (`.dockerignore`); `make docker-build` proves it.
-- **Browser defences.** The TCP peer must be `127.0.0.1` (403), whoever serves the app. Host must be exactly `127.0.0.1:<port>`, else 400; since M1 PR 5 on every route (`app/http/host_check.py`), websockets closed. `SITREP_ALLOWED_HOSTS` replaces that default with exact lower-case `host[:port]` values, never single-label or `.local` names; the shim, loopback only. Every method but GET needs `Origin: http://127.0.0.1:<port>` exactly, and `Sec-Fetch-Site: same-origin` when sent, otherwise 403. The login page sets its referrer policy to `same-origin`: under the app's `no-referrer`, a browser sends `Origin: null` even on a same-origin POST.
+- **Browser defences.** The TCP peer must be `127.0.0.1` (403), whoever serves the app. Host must be exactly `127.0.0.1:<port>`, else 400; since M1 PR 5 on every route (`app/http/host_check.py`), websockets closed. `SITREP_ALLOWED_HOSTS` replaces it with exact lower-case `host[:port]` values: on a loopback bind 127.0.0.1 and localhost only, never single-label or `.local` names. Every method but GET needs `Origin: http://127.0.0.1:<port>` exactly, and `Sec-Fetch-Site: same-origin` when sent, otherwise 403. The login page sets its referrer policy to `same-origin`: under the app's `no-referrer`, a browser sends `Origin: null` even on a same-origin POST.
 - **Sessions.** `POST /dev/login` with the form Content-Type and exactly `advisor=<id>`, advisors only. The cookie is `<id>.<HMAC-SHA256>` under a key drawn per app instance: HttpOnly, SameSite=Strict, Path=/. Logout and a new login end the session. Two session cookies count as none.
 - **Identity.** The middleware attaches an issued `VerifiedAdvisor` to the ASGI scope; `current_advisor()` reads that and nothing else. Without the shim, routes that need it answer 401.
 - **Settings.** `SITREP_HOST`, `SITREP_PORT`, `SITREP_DEV_AUTH`, `SITREP_TRACE_PLAINTEXT`, since M1 PR 3 `SITREP_DATABASE_URL` and `SITREP_MIGRATION_DATABASE_URL`, since PR 5 `SITREP_ALLOWED_HOSTS`. Unprefixed names are ignored, never refused.
@@ -31,7 +31,7 @@ The last option, `app/auth/dev_shim.py`:
 ## Consequences
 
 - **Easier:** one path from login to RLS is tested end to end, including in Chromium. M3 replaces the shim's middleware and keeps `current_advisor()`.
-- **Harder:** a restart signs everyone out; the shim is native only; names changed.
+- **Harder:** a restart signs everyone out; native only; names changed.
 - **Watch:**
   - Any local process is trusted, as with the database: it can log in as any advisor and forge any Origin. Cookies ignore ports, so a server on another port of 127.0.0.1 receives the session cookie and can toss a second one.
   - Sessions never expire, and the store is unbounded (kept in M0). Two session cookies end neither session.

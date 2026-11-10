@@ -75,6 +75,10 @@ _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 HOST_ITEM = re.compile(rf"{_LABEL}(?:\.{_LABEL})*(?::[1-9][0-9]{{0,4}})?")
 
 
+# The names a loopback bind may allow.
+LOOPBACK_NAMES = frozenset({LOOPBACK, "localhost"})
+
+
 def check_allowed_hosts(value: str) -> str:
     """The allowlist unchanged, or ValueError naming the rule it breaks (never a value).
     Empty means the default, 127.0.0.1 on the app's port."""
@@ -175,8 +179,16 @@ class Settings(BaseSettings):
 
     @field_validator("allowed_hosts")
     @classmethod
-    def _allowed_hosts(cls, value: str) -> str:
-        return check_allowed_hosts(value)
+    def _allowed_hosts(cls, value: str, info: ValidationInfo) -> str:
+        check_allowed_hosts(value)
+        # On a loopback bind, whoever answers the client's DNS can rebind any name, so
+        # the list holds loopback values only (review finding sec-r5 of M1 PR 5). A name
+        # or another address is for a bind off loopback, as the image's.
+        if value and info.data.get("host") == LOOPBACK:
+            names = {item.partition(":")[0] for item in value.split(",")}
+            if not names <= LOOPBACK_NAMES:
+                raise ValueError("on a 127.0.0.1 bind only 127.0.0.1 and localhost may be named")
+        return value
 
     @property
     def allowed_host_values(self) -> tuple[str, ...]:

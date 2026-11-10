@@ -132,8 +132,9 @@ docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, a fo
 	case "$$logs" in *"$$canary"*) echo "smoke: the canary is in the logs"; exit 1;; esac; \
 	echo "smoke: logs carry the span, not the canary"
 	@set -eu; \
-	cid="$$(docker run -d -e SITREP_TRACE_PLAINTEXT=1 $(IMAGE))"; \
+	cid="$$(docker create -e SITREP_TRACE_PLAINTEXT=1 $(IMAGE))"; \
 	trap 'docker rm -f "$$cid" >/dev/null' EXIT; \
+	docker start "$$cid" >/dev/null; \
 	for i in $$(seq 1 40); do \
 	  test "$$(docker inspect -f '{{.State.Status}}' "$$cid")" = exited && break; sleep 0.25; \
 	done; \
@@ -149,7 +150,9 @@ docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, a fo
 	echo "smoke: the dev login shim is not in the image"
 	@set -eu; \
 	for host in 0.0.0.0 127.0.0.1; do \
-	  cid="$$(docker run -d -e SITREP_DEV_AUTH=1 -e SITREP_HOST=$$host $(IMAGE))"; \
+	  cid="$$(docker create -e SITREP_DEV_AUTH=1 -e SITREP_HOST=$$host $(IMAGE))"; \
+	  trap 'docker rm -f "$$cid" >/dev/null 2>&1' EXIT; \
+	  docker start "$$cid" >/dev/null; \
 	  for i in $$(seq 1 40); do \
 	    test "$$(docker inspect -f '{{.State.Status}}' "$$cid")" = exited && break; sleep 0.25; \
 	  done; \

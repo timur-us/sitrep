@@ -80,7 +80,9 @@ class AsyncioFilter(logging.Filter):
     fixed message and the exception's type (RedactFilter then drops the rest)."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = ASYNCIO_MESSAGE
+        # A report without an exception (a slow callback, an unclosed transport) keeps a
+        # message of its own and its level (review finding sec-r4).
+        record.msg = ASYNCIO_MESSAGE if record.exc_info else ASYNCIO_REPORT
         record.args = ()
         return True
 
@@ -152,19 +154,37 @@ MAIN_MESSAGE = "an unhandled exception in the main thread"
 THREAD_MESSAGE = "an unhandled exception in a thread"
 UNRAISABLE_MESSAGE = "an exception that could not be raised"
 ASYNCIO_MESSAGE = "an unhandled exception in an asyncio task"
+ASYNCIO_REPORT = "an asyncio report"
 WARNING_MESSAGE = "a warning"
+# Written straight to stderr when a hook cannot log: never the exception itself.
+HOOK_FAILED = "logging error: an unhandled exception could not be logged\n"
 
 
-def _log_unhandled(message: str, exc: BaseException | None, kind: type | None = None) -> None:
-    trace_id = getattr(exc, TRACE_ID_ATTRIBUTE, None) if exc is not None else None
-    cls = kind if kind is not None else (type(exc) if exc is not None else None)
-    logging.getLogger(HOOK_LOGGER).error(
-        message,
-        extra={
+def _log(message: str, extra: dict, level: int) -> None:
+    logging.getLogger(HOOK_LOGGER).log(level, message, extra=extra)
+
+
+def _log_unhandled(
+    message: str,
+    exc: BaseException | None,
+    kind: type | None = None,
+    level: int = logging.ERROR,
+) -> None:
+    # A hook that raises makes Python print the original exception after its own, so
+    # nothing escapes here (review finding sec-r2 of M1 PR 5).
+    try:
+        trace_id = getattr(exc, TRACE_ID_ATTRIBUTE, None) if exc is not None else None
+        cls = kind if kind is not None else (type(exc) if exc is not None else None)
+        extra = {
             "exc_type": exception_type(cls) if cls is not None else None,
-            "trace_id": trace_id or current_trace_id() or NO_TRACE,
-        },
-    )
+            "trace_id": trace_id if isinstance(trace_id, str) else current_trace_id() or NO_TRACE,
+        }
+        _log(message, extra, level)
+    except BaseException:  # noqa: BLE001 - the exception being reported must not escape
+        try:
+            sys.stderr.write(HOOK_FAILED)
+        except BaseException:  # noqa: BLE001, S110 - nowhere left to report to
+            pass
 
 
 def main_excepthook(cls: type[BaseException], exc: BaseException, tb: object) -> None:
@@ -184,7 +204,7 @@ def showwarning(
 ) -> None:
     """For warnings.showwarning: the category only. The text can quote a value, as
     pydantic's serializer warnings do (review finding sec-1 of M1 PR 5)."""
-    _log_unhandled(WARNING_MESSAGE, None, kind=category)
+    _log_unhandled(WARNING_MESSAGE, None, kind=category, level=logging.WARNING)
 
 
 def thread_excepthook(args: threading.ExceptHookArgs) -> None:
