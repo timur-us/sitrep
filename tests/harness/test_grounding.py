@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import decimal
 import random
 import time
+import typing
 from typing import Any
 
 import pytest
@@ -250,12 +252,12 @@ def test_the_report_carries_no_figure_and_no_model_written_id() -> None:
 
 
 def test_the_report_fields_are_counts_and_ids() -> None:
-    fields = {field.name: field.type for field in dataclasses.fields(GroundingReport)}
-    assert fields == {
-        "figures": "int",
-        "unmatched": "int",
-        "citations": "tuple[str, ...]",
-        "unknown_citations": "int",
+    # The resolved types, not the annotation strings (review finding test-10).
+    assert typing.get_type_hints(GroundingReport) == {
+        "figures": int,
+        "unmatched": int,
+        "citations": tuple[str, ...],
+        "unknown_citations": int,
     }
     result = report("", source(""))
     with pytest.raises(dataclasses.FrozenInstanceError):
@@ -321,17 +323,263 @@ def test_another_generated_amount_does_not_ground() -> None:
         assert report(answer, source(generate.money(125_000_100, lang))).unmatched == 1
 
 
-def test_a_long_hostile_answer_is_checked_quickly() -> None:
-    hostile = (
-        "1"
-        + ".1" * 20_000
-        + " EUR "
-        + "5 " * 20_000
-        + "[source:"
-        + "x" * 1_999
-        + " 1,0" * 10_000
-        + " März " * 5_000
-    )
-    started = time.monotonic()
-    check(hostile, [source(hostile)])
-    assert time.monotonic() - started < 5.0
+def best_of_three(text: str) -> float:
+    times = []
+    for _ in range(3):
+        started = time.perf_counter()
+        result = check(text, [source(text)])
+        times.append(time.perf_counter() - started)
+        assert isinstance(result, GroundingReport)
+    return min(times)
+
+
+HOSTILE = {
+    # Review finding sec-2: no-break spaces between digits restarted the scan at every
+    # digit, which made the cost quadratic.
+    "no-break spaces": lambda n: "1\u00a0" * n + "x",
+    "thin spaces": lambda n: "1\u2009" * n + "x",
+    "apostrophes": lambda n: "1'" * n + "x",
+    "points": lambda n: "1." * n + "x",
+    "unclosed markers": lambda n: "[source:" * n + " 1,0" * n,
+    "months": lambda n: " 5 März" * n,
+    "currencies": lambda n: "EUR " * n + "5",
+}
+
+
+@pytest.mark.parametrize("build", list(HOSTILE.values()), ids=list(HOSTILE))
+def test_hostile_text_is_checked_in_linear_time(build: Any) -> None:
+    small, large = best_of_three(build(4_000)), best_of_three(build(16_000))
+    # Four times the text: about four times the time when linear, sixteen when quadratic.
+    assert large < max(small * 9, 0.05), (small, large)
+
+
+# --- Review round 1 (findings test-4 to test-14, sec-1, sec-5, sec-6) ----------------
+
+MORE_MATCHES = {
+    # test-4: the other currencies and scales.
+    "dollar sign": ("$1,250,000.00", "USD 1,250,000.00"),
+    "pound sign": ("£1,250,000", "GBP 1,250,000.00"),
+    "euro word": ("1.250.000 Euro", "EUR 1,250,000.00"),
+    "euros word": ("1,250,000 euros", "1.250.000,00 EUR"),
+    "mrd": ("1,2 Mrd. EUR", "EUR 1,200,000,000.00"),
+    "milliarden": ("1,2 Milliarden EUR", "EUR 1,200,000,000.00"),
+    "billion": ("EUR 1.2 billion", "1.200.000.000,00 EUR"),
+    "bn": ("€1.2bn", "1.200.000.000,00 EUR"),
+    "tausend": ("50 Tausend EUR", "EUR 50,000.00"),
+    "tsd": ("50 Tsd. EUR", "EUR 50,000.00"),
+    "thousand": ("EUR 50 thousand", "EUR 50,000.00"),
+    "k": ("€50k", "EUR 50,000.00"),
+    "scale on an ambiguous point": ("1.250 Mio. EUR", "EUR 1,250,000,000.00"),
+    # test-7: separators.
+    "comma grouping": ("EUR 12,345", "12.345,00 EUR"),
+    "point grouping": ("100.000 EUR", "EUR 100,000.00"),
+    # test-8: slashed dates, both readings, and a timestamp in a source.
+    "slashed, day first": ("on 5/3/2026", "5 March 2026"),
+    "slashed, month first": ("on 03/05/2026", "5 March 2026"),
+    "iso timestamp in a source": ("on 5 March 2026", "2026-03-05T10:00:00Z"),
+}
+
+
+@pytest.mark.parametrize(("answer", "text"), list(MORE_MATCHES.values()), ids=list(MORE_MATCHES))
+def test_more_forms_that_match(answer: str, text: str) -> None:
+    result = report(answer, source(text))
+    assert (result.figures, result.unmatched) == (1, 0), result
+
+
+MORE_MISSES = {
+    # test-5: one kind does not stand for another.
+    "money for a percent": ("EUR 42.5", "42,5 %"),
+    "a percent for money": ("42.5%", "EUR 42.50"),
+    "dollars for euros": ("$1,250,000.00", "EUR 1,250,000.00"),
+    "euros for francs": ("EUR 1,250,000.00", "CHF 1,250,000.00"),
+    # test-4: the exponent matters.
+    "mrd is not mio": ("1,2 Mrd. EUR", "EUR 1,200,000.00"),
+    # test-7: readings that do not exist.
+    "a decimal comma is not grouping": ("EUR 1,5", "EUR 15.00"),
+    "a leading zero is not grouping": ("EUR 0.250", "EUR 250.00"),
+    "a mixed malformed amount": ("EUR 1,250.000,5", "EUR 1,250,000.50"),
+    # test-8 and sec-1: no reading, still a figure.
+    "an impossible slashed date": ("on 13/13/2026", "5 March 2026"),
+    "a folded month": ("am 5 \u017fep 2026", "5 September 2026"),
+    "a folded scale": ("1,2 M\u0131o. EUR", "EUR 1,200,000.00"),
+    "a folded scale with a dot": ("1,2 M\u0130o. EUR", "EUR 1,200,000.00"),
+}
+
+
+@pytest.mark.parametrize(("answer", "text"), list(MORE_MISSES.values()), ids=list(MORE_MISSES))
+def test_more_forms_that_do_not_match(answer: str, text: str) -> None:
+    result = report(answer, source(text))
+    assert (result.figures, result.unmatched) == (1, 1), result
+
+
+MORE_NOT_FIGURES = {
+    # test-6: a unit letter without a currency is not a scale.
+    "metres": "a 10m hedge",
+    "a count in thousands": "3k followers",
+    "a two-digit year": "am 5.3.26",
+    "month and year": "in March 2026",
+    "an iban": "CH93 0076 2011 6238 5295 7",
+}
+
+
+@pytest.mark.parametrize("answer", list(MORE_NOT_FIGURES.values()), ids=list(MORE_NOT_FIGURES))
+def test_more_of_what_is_not_a_figure(answer: str) -> None:
+    assert report(answer, source(ENGLISH_SOURCE)).figures == 0
+
+
+FOLDED = ("am 5 \u017fep 2026", "1,2 M\u0131o. EUR", "5 tau\u017fend EUR", "1,2 M\u0130o. EUR")
+
+
+@pytest.mark.parametrize("text", FOLDED)
+def test_a_folded_word_in_a_source_does_not_raise(text: str) -> None:
+    # sec-1: a planted mail with such a word broke every check() that retrieved it.
+    result = report("EUR 1,250,000.00", source(text), source(ENGLISH_SOURCE))
+    assert (result.figures, result.unmatched) == (1, 0)
+
+
+def test_check_never_raises_on_odd_text() -> None:
+    # sec-1: any str answer and any str source give a report.
+    pieces = [
+        "5",
+        "1.250",
+        ",",
+        ".",
+        "'",
+        "\u00a0",
+        " ",
+        "EUR",
+        "€",
+        "%",
+        "Mio.",
+        "m",
+        "k",
+        "\u017f",
+        "\u0131",
+        "\u0130",
+        "\u212a",
+        "ep",
+        "ept",
+        "März",
+        "\u0307",
+        "2026",
+        "5 ",
+        " 2026",
+        "\u017fep",
+        "M\u0131o",
+        "tau\u017fend",
+        "M\u0130o",
+        "-",
+        "/",
+        "[source:",
+        "]",
+        "\n",
+        "Prozent",
+        "Mrd",
+        "bn",
+        "0",
+        "9" * 50,
+        "\u200b",
+    ]
+    rng = random.Random(7)  # noqa: S311 - a fixed sample of texts, not a secret
+    for _ in range(2_000):
+        text = "".join(rng.choice(pieces) for _ in range(rng.randrange(1, 30)))
+        result = check(text, [source(text)])
+        assert result.unmatched <= result.figures
+
+
+def test_a_long_figure_is_compared_exactly() -> None:
+    # sec-7: no rounding to the decimal context's 28 digits.
+    long_a = "EUR 1" + ",000" * 9 + ".000000001"
+    long_b = "EUR 1" + ",000" * 9 + ".000000002"
+    assert report(long_a, source(long_b)).unmatched == 1
+    assert report(long_a, source(long_a)).unmatched == 0
+
+
+def test_sources_may_be_any_iterable() -> None:
+    # sec-5: a generator was read empty after the first pass.
+    one = source(ENGLISH_SOURCE, "doc-1")
+    result = check("EUR 1,250,000.00 [source: doc-1]", (item for item in [one]))
+    assert (result.unmatched, result.citations, result.unknown_citations) == (0, ("doc-1",), 0)
+
+
+def test_check_takes_a_str_answer_only() -> None:
+    # test-11.
+    for answer in (b"EUR 5", None, 5):
+        with pytest.raises(TypeError):
+            check(answer, [])  # type: ignore[arg-type]
+
+
+class LooksUntrusted:
+    provenance = Provenance(tool="search_client_docs", record_ids=("doc-1",))
+    _value = ENGLISH_SOURCE
+
+
+def test_a_look_alike_source_is_refused() -> None:
+    with pytest.raises(TypeError):
+        check("EUR 1,250,000.00", [LooksUntrusted()])  # type: ignore[list-item]
+
+
+def test_a_model_written_figure_or_canary_id_never_reaches_the_report() -> None:
+    # test-10: an invented id that is itself a figure, or a canary.
+    answer = "[source: EUR 9,999,999.00] [source: cnry-7f3a-exfil] [source: doc-1]"
+    result = report(answer, source(ENGLISH_SOURCE, "doc-1"))
+    # The parts of a marker are split at commas: "EUR 9", "999", "999.00" and the canary.
+    assert (result.figures, result.unknown_citations, result.citations) == (0, 4, ("doc-1",))
+    shown = repr(result) + str(dataclasses.asdict(result))
+    for text in ("9,999,999", "9999999", "cnry", "exfil"):
+        assert text not in shown, text
+
+
+MARKERS = {
+    # test-9: (answer, unknown citations, cited ids, figures)
+    "empty": ("[source: ] [source:,;]", 0, (), 0),
+    "unterminated": ("[source: doc-1 and EUR 75,000.00", 0, (), 1),
+    "too long": ("[source: " + "x" * 2_001 + "]", 0, (), 0),
+    "space before the colon": ("[Source : doc-1]", 0, ("doc-1",), 0),
+    "spaces inside": ("[ source:   doc-1 ,  doc-1 ]", 0, ("doc-1",), 0),
+    "a newline inside": ("[source: doc-1\n]", 0, (), 0),
+    "nested is no marker": ("[source: [doc-1]]", 0, (), 0),
+    "a zero-width character": ("[source: doc\u200b-1]", 1, (), 0),
+}
+
+
+@pytest.mark.parametrize(
+    ("answer", "unknown", "cited", "figures"), list(MARKERS.values()), ids=list(MARKERS)
+)
+def test_marker_shapes(answer: str, unknown: int, cited: tuple[str, ...], figures: int) -> None:
+    result = report(answer, source("EUR 75,000.00", "doc-1"))
+    assert (result.unknown_citations, result.citations, result.figures) == (unknown, cited, figures)
+
+
+def test_a_source_without_record_ids_grounds_figures_but_no_citation() -> None:
+    bare = Untrusted("EUR 1,250,000.00", Provenance(tool="get_portfolio", record_ids=()))
+    result = check("EUR 1,250,000.00 [source: doc-1]", [bare])
+    assert (result.unmatched, result.unknown_citations) == (0, 1)
+
+
+def test_a_generated_amount_has_its_literal_value() -> None:
+    # test-13: the round trip, pinned to literals as well.
+    assert generate.money(125_000_000, "german") == "1.250.000,00 EUR"
+    assert report("EUR 1,250,000.00", source(generate.money(125_000_000, "german"))).unmatched == 0
+    assert report("EUR 1,250,000.01", source(generate.money(125_000_000, "german"))).unmatched == 1
+
+
+LEAVES = {
+    # test-12: (value, lines)
+    "floats in fixed point": (
+        [1250000.0, 1.25e16, 1e-07, 1.5],
+        ["1250000.0", "12500000000000000", "0.0000001", "1.5"],
+    ),
+    "no bool, no None": ({"a": True, "b": None, "c": "x"}, ["x"]),
+    "decimal": ([decimal.Decimal("1.50")], ["1.50"]),
+    "a tuple, in order": (("a", "b", "c", "d"), ["a", "b", "c", "d"]),
+    "nan and infinity": ([float("nan"), float("inf")], []),
+    "keys are left out": ({"EUR 5,000.00": "x"}, ["x"]),
+    "deep": ([[[[["x"]]]]], ["x"]),
+}
+
+
+@pytest.mark.parametrize(("value", "lines"), list(LEAVES.values()), ids=list(LEAVES))
+def test_source_text_leaves(value: object, lines: list[str]) -> None:
+    text = source_text(source(value))
+    assert (text.splitlines() if text else []) == lines

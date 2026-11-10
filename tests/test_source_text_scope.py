@@ -8,7 +8,13 @@ string) outside its definition in context.py and its uses in grounding.py.
 
 Like the scans in tests/test_identity.py and tests/test_loader_scope.py, it reads names
 and literals: getattr() with a string built at runtime is not caught. Docstrings are
-prose and are not read as strings.
+prose and are not read as strings. A star import from the context module is reported
+too, since the name it binds is invisible to the scan.
+
+It scans app/ only: the request path, where text could reach a model, a log or an
+answer. The runners of evals/ and redteam/ (M1 PRs 16 and 17) score recorded runs and
+call check(), not source_text(); a runner that needs the accessor widens this scan in
+its own PR (review finding test-17).
 """
 
 from __future__ import annotations
@@ -67,6 +73,12 @@ def scan(source: str, rel: str) -> tuple[list[str], Counter[str]]:
                 found.append(f"{where}: {NAME} used")
         elif isinstance(node, ast.Attribute) and node.attr == NAME:
             found.append(f"{where}: .{NAME} used")
+        elif (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "app.harness.context"
+            and any(alias.name == "*" for alias in node.names)
+        ):
+            found.append(f"{where}: imports * from app.harness.context")
         elif isinstance(node, ast.alias) and NAME in (node.name, node.asname):
             if rel == GROUNDING and node.name == NAME and node.asname is None:
                 seen["imports"] += 1
@@ -127,6 +139,8 @@ PLANTED = [
     (CONTEXT, "source_text(x)\n", "source_text used"),
     (CONTEXT, "alias = source_text\n", "source_text used"),
     (CONTEXT, "__all__ = ['source_text']\n", "a string names"),
+    ("app/harness/loop.py", "from app.harness.context import *\n", "imports *"),
+    (GROUNDING, "from app.harness.context import *\n", "imports *"),
 ]
 
 
@@ -145,6 +159,8 @@ def test_the_sanctioned_uses_pass() -> None:
     )
     found, seen = scan(grounding, GROUNDING)
     assert found == [] and seen["imports"] == 1 and seen["calls"] == 1, (found, seen)
+    elsewhere = '"""The loop; the guard reads source_text(), not this file."""\nx = 1\n'
+    assert scan(elsewhere, "app/harness/loop.py") == ([], Counter())
     context = '"""Holds source_text()."""\ndef source_text(item):\n    """Its doc."""\n'
     found, seen = scan(context, CONTEXT)
     assert found == [] and seen["definitions"] == 1, (found, seen)
