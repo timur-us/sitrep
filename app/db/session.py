@@ -41,7 +41,9 @@ block's length only (PR 5b sec-5; ADR 0013). A reference kept past the block, by
 background task or a streaming response, would otherwise run inside whichever
 transaction next holds the connection; the handle raises TransactionEnded instead. Its
 execute() returns Rows, fetched in full before it returns, which hold rows and a count
-and nothing that can run a statement; no cursor and no connection leave the block.
+and nothing that can run a statement; no cursor and no connection leave the block. The
+handle cannot be copied or pickled. Reading its private attribute inside the block is
+not stopped: the rule is that nothing outside this module does.
 
 Not caught here: a statement inside an advisor transaction that calls set_config itself
 acts as another advisor for the rest of that transaction, and the setting is gone before
@@ -74,7 +76,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn
 
 import psycopg
 from psycopg.abc import Params, Query
@@ -98,6 +100,9 @@ ITERATIVE_SCAN = "relaxed_order"
 
 class GuardError(Exception):
     """A connection the pool must not hand out. The message names rules, not values."""
+
+
+HANDLE_COPY_REFUSED = "an AdvisorConnection cannot be copied: it ends with its block"
 
 
 class TransactionEnded(RuntimeError):
@@ -181,6 +186,20 @@ class AdvisorConnection:
 
     def _end(self) -> None:
         self._conn = None
+
+    # No copy and no pickle: a copy would hold the connection unended, and run inside
+    # whichever transaction next holds it (measured; security review sec-1).
+    def __copy__(self) -> NoReturn:
+        raise TypeError(HANDLE_COPY_REFUSED)
+
+    def __deepcopy__(self, memo: object) -> NoReturn:
+        raise TypeError(HANDLE_COPY_REFUSED)
+
+    def __reduce__(self) -> NoReturn:
+        raise TypeError(HANDLE_COPY_REFUSED)
+
+    def __reduce_ex__(self, protocol: object) -> NoReturn:
+        raise TypeError(HANDLE_COPY_REFUSED)
 
 
 def problems(conn: CheckedConnection) -> list[str]:

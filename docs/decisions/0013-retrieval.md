@@ -10,29 +10,31 @@ Accepted in outline (Timur, 2026-11-08: the M1 plan, PR 8, default 13). Its depa
 
 ## Context
 
-SITREP (situation report) answers from an advisor's own documents and the bank's product sheets (ADR 0010), in German and English (ADR 0005), under row-level security (ADR 0008). Measured as the app role (PostgreSQL 17.11, pgvector 0.8.7):
-- **`@@` and `<=>` are not leakproof**, so the policy runs first and neither becomes an index condition. A planted GIN index on `tsv` serves the superuser, never the app role, which reads through the primary key (`advisor_id` first) and filters.
-- **HNSW sits idle here:** the planner sorts the advisor's rows exactly, even beside 6,000 of another's. Pushed onto HNSW while the policy hides the nearest rows, a search returns 0 of 8 rows with `hnsw.iterative_scan` off, 8 with it on.
+SITREP (situation report) answers from an advisor's documents and the product sheets (ADR 0010), in German and English, under row-level security. Measured as the app role (PostgreSQL 17.11, pgvector 0.8.7):
+- **`@@` and `<=>` are not leakproof**, so the policy runs first and neither becomes an index condition: a planted GIN index on `tsv` serves the superuser, never the app role, which reads through the primary key and filters.
+- **HNSW sits idle here:** the planner sorts the advisor's rows exactly, even beside 6,000 of another's. Pushed onto HNSW while the policy hides the nearest rows, a search returns 0 of 8 rows with `hnsw.iterative_scan` off, 8 on.
 - **500 characters can tokenize to 2,005 tokens;** the model takes 512.
 - **PR 5b sec-5:** the advisor transaction yielded the pool's connection.
 
 ## Options
 
+- **Full-text only:** misses paraphrases and the other language; **vectors only:** miss exact names and figures, and e5 is weaker from German to English (PR 4). Both, fused.
 - **One fused SQL statement:** fewer round trips; fusion untestable without a database.
-- **Vectors only:** miss exact names and figures; e5 is weaker from German to English (PR 4).
-- **GIN indexes, as planned:** a write cost for an index no app query can use. LEAKPROOF needs a superuser, which Azure's Flexible Server lacks.
-- **Cutting a long query:** silent; refused instead, as PR 4 refuses long passages.
+- **`strict_order`:** exact order, less recall (pgvector); `relaxed_order` and a re-sort instead.
+- **GIN indexes, as planned:** a write cost, unusable by any app query. LEAKPROOF needs a superuser, which Azure's Flexible Server lacks.
+- **A rule, no handle:** unenforced.
+- **Cutting a long query:** silent; refused, as PR 4 refuses long passages.
 
 ## Decision
 
-- **Ranking** (`app/harness/handlers.py`): three lists of at most 20 records, full-text in English and in German (each keeping to its language) and the nearest vectors of the query's model, a document by its nearest passage; reciprocal rank fusion, k = 60, ties by kind and id. Sheets join each list unless a `mandate_id` limits the search to that mandate's documents.
+- **Ranking** (`app/harness/handlers.py`): three lists of at most 20 records, full-text in English and in German (each keeping to its language) and the nearest vectors of the query's model, a document by its nearest passage; reciprocal rank fusion, k = 60, ties by kind and id. Sheets join unless a `mandate_id` limits the search to its documents.
 - **A mandate id** is looked up inside the transaction: another advisor's is "no such mandate", like an unknown one (no hits, no portfolio).
-- **A hit** carries kind, mandate (none for a sheet), title, language, trust from its table (never from an id; PR 7 sec-7) and the stored passage nearest the query, whole. Another advisor's row is refused: a second line behind the policies.
+- **A hit** carries kind, mandate, title, language, trust from its table (never from an id; PR 7 sec-7) and, in the same statement, the stored passage nearest the query, whole. Another advisor's row is refused: a second line.
 - **`get_portfolio`** reads the `portfolio_system` document, so no e-mail poses as the report. `Portfolio` drops `as_of`: no document stores a date.
-- **The iterative scan:** `relaxed_order`, transaction-local beside the advisor (default 13), pgvector's defaults otherwise; rows sorted again outside a `MATERIALIZED` CTE by `distance + 0`, since PostgreSQL 17 otherwise trusts the CTE's order (measured).
-- **No index on `tsv`**, nor on the six sheets' vectors.
+- **The iterative scan:** `relaxed_order`, transaction-local beside the advisor (default 13); rows sorted again outside a `MATERIALIZED` CTE by `distance + 0`, since PostgreSQL 17 otherwise trusts the CTE's order (measured).
+- **No index on `tsv`** or the six sheets' vectors.
 - **Limits:** queries of 1–500 characters, refused as `query_too_long` over the model's limit, before any connection; 1–20 hits.
-- **The handle:** the block yields an `AdvisorConnection` returning fully fetched rows and raising `TransactionEnded` after the block, inside the next advisor's transaction too.
+- **The handle:** an uncopyable `AdvisorConnection` returns fully fetched rows and raises `TransactionEnded` after the block, inside the next advisor's transaction too.
 
 ```yaml
 rrf_k: 60
@@ -46,9 +48,9 @@ query_too_long: query_too_long
 
 ## Consequences
 
-- **Easier:** deterministic ranking, tested without a database; per search one embedding, holding no connection, and nine statements; nothing outlives the block.
-- **Harder:** full-text search reads every row of the advisor; HNSW and the iterative scan wait for a larger corpus, tested with the planner pushed; fusion ignores score gaps and has no relevance floor, so nonsense still gets records.
-- **Watch:** a larger corpus (M4): a btree on `(advisor_id, mandate_id)`, HNSW for real, a `tsv` index if a leakproof route appears; German-to-English recall (PR 16's evals); how the model reads trust before M2 renders it.
+- **Easier:** deterministic ranking, tested without a database; per search one embedding, holding no connection, and at most eight statements.
+- **Harder:** full-text search reads all the advisor's rows; HNSW and the iterative scan wait for a larger corpus, tested with the planner pushed; documents' and sheets' ranks are compared raw; fusion ignores score gaps and has no relevance floor.
+- **Watch:** a larger corpus (M4): a btree on `(advisor_id, mandate_id)`, HNSW for real, a `tsv` index if a leakproof route appears; German-to-English recall (PR 16); how the model reads trust before M2 renders it.
 
 ## Sources
 

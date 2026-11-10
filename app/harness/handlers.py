@@ -192,22 +192,19 @@ def _hits(
     documents = [record for kind, record in keys if kind == DOCUMENT]
     sheets = [record for kind, record in keys if kind == PRODUCT_SHEET]
     details: dict[str, tuple[Any, ...]] = {}
-    passages: dict[str, str] = {}
     sheet_rows: dict[str, tuple[Any, ...]] = {}
     if documents:
-        rows = conn.execute(queries.DOCUMENT_DETAILS, (documents,)).fetchall()
+        # Details and the nearest passage in one statement, so one snapshot: a trust
+        # never pairs with another load's passage (security review sec-2).
+        rows = conn.execute(queries.DOCUMENT_HITS, (model, revision, vector, documents)).fetchall()
         details = {row[1]: row for row in _own(advisor_id, rows)}
-        rows = conn.execute(
-            queries.DOCUMENT_PASSAGES, (documents, model, revision, vector)
-        ).fetchall()
-        passages = {row[1]: row[2] for row in _own(advisor_id, rows)}
     if sheets:
         rows = conn.execute(queries.SHEET_DETAILS, (sheets,)).fetchall()
         sheet_rows = {row[0]: row for row in rows}
     hits = []
     for kind, record in keys:
         if kind == DOCUMENT and record in details:
-            _, _, mandate_id, title, lang, trust = details[record]
+            _, _, mandate_id, title, lang, trust, passage = details[record]
             hits.append(
                 DocumentHit(
                     kind=DOCUMENT,
@@ -216,7 +213,7 @@ def _hits(
                     title=title,
                     lang=lang,
                     trust=trust,
-                    excerpt=passages.get(record, ""),
+                    excerpt=passage or "",
                 )
             )
         elif kind == PRODUCT_SHEET and record in sheet_rows:
@@ -258,9 +255,14 @@ def search_client_docs(
 ) -> Untrusted[list[DocumentHit]]:
     _check(advisor, arguments, SearchClientDocs)
     try:
-        vector = vector_text(embedder.embed_query(arguments.query))
+        embedded: list[float] | None = embedder.embed_query(arguments.query)
     except TextTooLong:
+        embedded = None
+    if embedded is None:
+        # Raised outside the except: no cause and no context, whose frames hold the
+        # query (security review sec-5).
         raise ToolFailed(QUERY_TOO_LONG) from None
+    vector = vector_text(embedded)
     with advisor_transaction(pool, advisor) as conn:
         hits = search(
             conn, advisor.advisor_id, arguments, vector, embedder.model_id, embedder.revision

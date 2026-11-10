@@ -99,19 +99,17 @@ NEAREST_SHEETS = (
     " ORDER BY distance, s.id LIMIT 20"
 )
 
-# What a hit shows, for the ids the fusion kept. Trust is the record's own column
-# (ADR 0010), never inferred from an id.
-DOCUMENT_DETAILS = (
-    "SELECT d.advisor_id, d.id, d.mandate_id, d.title, d.lang, d.trust FROM documents d"
+# What a document hit shows, for the ids the fusion kept, in one statement and so one
+# snapshot: its details, trust from its own column (ADR 0010, never inferred from an
+# id), and its stored passage nearest the query, of the query's model (NULL if it has
+# none). The model, the revision, the vector, then the ids.
+DOCUMENT_HITS = (
+    "SELECT d.advisor_id, d.id, d.mandate_id, d.title, d.lang, d.trust, p.body"
+    " FROM documents d LEFT JOIN LATERAL ("
+    "SELECT c.body FROM chunks c WHERE c.advisor_id = d.advisor_id AND c.document_id = d.id"
+    " AND c.embedding_model = %s AND c.embedding_revision = %s"
+    " ORDER BY c.embedding <=> %s::vector, c.ordinal LIMIT 1) p ON true"
     " WHERE d.id = ANY(%s)"
-)
-
-# Each document's stored passage nearest the query, of the query's model: the ids, the
-# model, the revision, the vector.
-DOCUMENT_PASSAGES = (
-    "SELECT DISTINCT ON (c.document_id) c.advisor_id, c.document_id, c.body FROM chunks c"
-    " WHERE c.document_id = ANY(%s) AND c.embedding_model = %s AND c.embedding_revision = %s"
-    " ORDER BY c.document_id, c.embedding <=> %s::vector, c.ordinal"
 )
 
 SHEET_DETAILS = (

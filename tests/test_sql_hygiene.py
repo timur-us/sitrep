@@ -78,6 +78,37 @@ HANDLERS = "app/harness/handlers.py"
 DELEGATE = ("AdvisorConnection", "execute")
 
 
+def rebinds(method: ast.FunctionDef, parameter: str) -> bool:
+    """Whether anything in method can give parameter another value: an assignment or
+    deletion, a nested function, lambda or class (whose own parameters may shadow it),
+    `except ... as`, a match capture, or an import alias (security review sec-3)."""
+    for node in ast.walk(method):
+        if node is method:
+            continue
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            return True
+        if (
+            isinstance(node, ast.Name)
+            and node.id == parameter
+            and not isinstance(node.ctx, ast.Load)
+        ):
+            return True
+        if isinstance(node, ast.ExceptHandler) and node.name == parameter:
+            return True
+        if isinstance(node, ast.MatchAs | ast.MatchStar) and node.name == parameter:
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == parameter:
+            return True
+        if (
+            isinstance(node, ast.alias)
+            and (node.asname or node.name.partition(".")[0]) == parameter
+        ):
+            return True
+        if isinstance(node, ast.Global | ast.Nonlocal) and parameter in node.names:
+            return True
+    return False
+
+
 def delegations(tree: ast.Module) -> set[int]:
     """The calls in session.py's AdvisorConnection.execute() that pass the method's own
     statement parameter on as their statement, while the method never rebinds it."""
@@ -93,13 +124,7 @@ def delegations(tree: ast.Module) -> set[int]:
             ):
                 continue
             parameter = method.args.args[1].arg
-            rebound = any(
-                isinstance(inner, ast.Name)
-                and inner.id == parameter
-                and isinstance(inner.ctx, ast.Store | ast.Del)
-                for inner in ast.walk(method)
-            )
-            if rebound:
+            if rebinds(method, parameter):
                 continue
             found |= {
                 id(call)
