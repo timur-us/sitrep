@@ -75,6 +75,8 @@ def test_loopback_on_the_port_is_served(settings: Settings) -> None:
 
 def test_the_allowlist_comes_from_the_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     staff = f"{branding.SLUG}.{branding.DOMAINS.staff}"
+    # A name is allowed for a bind off loopback only (review finding sec-r5).
+    monkeypatch.setenv(env_name("host"), "0.0.0.0")  # noqa: S104 - the image's bind
     monkeypatch.setenv(ALLOWED_HOSTS, f"{staff},127.0.0.1:9999")
     settings = Settings(_env_file=None)
     assert host_check.allowed_hosts(settings) == frozenset({staff.encode(), b"127.0.0.1:9999"})
@@ -185,6 +187,7 @@ def test_the_shim_allows_loopback_alone_whatever_the_setting(
 def test_a_configured_host_is_matched_exactly(monkeypatch: pytest.MonkeyPatch, variant) -> None:
     # Review finding test-8: no case folding, no trimming, no trailing dot.
     staff = f"{branding.SLUG}.{branding.DOMAINS.staff}"
+    monkeypatch.setenv(env_name("host"), "0.0.0.0")  # noqa: S104 - the image's bind
     monkeypatch.setenv(ALLOWED_HOSTS, staff)
     settings = Settings(_env_file=None)
     served = client(settings, staff)
@@ -219,6 +222,24 @@ def test_a_name_that_is_resolved_locally_is_refused(
         Settings(_env_file=None)
     monkeypatch.setenv(ALLOWED_HOSTS, "localhost:8000")
     assert Settings(_env_file=None).allowed_host_values == ("localhost:8000",)
+
+
+@pytest.mark.parametrize(
+    "value", [f"{branding.SLUG}.{branding.DOMAINS.staff}", "advisor.home.arpa", "192.0.2.1:8000"]
+)
+def test_a_loopback_bind_allows_loopback_only(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    # Review finding sec-r5: on 127.0.0.1 whoever answers the client's DNS can rebind any
+    # name, so the list may hold 127.0.0.1 and localhost only; a name or another address
+    # is for a deployment that binds elsewhere (the image binds 0.0.0.0).
+    monkeypatch.setenv(ALLOWED_HOSTS, value)
+    with pytest.raises(ValidationError) as refused:
+        Settings(_env_file=None)
+    assert ALLOWED_HOSTS in str(refused.value)
+    monkeypatch.setenv(env_name("host"), "0.0.0.0")  # noqa: S104 - the image's bind
+    assert Settings(_env_file=None).allowed_host_values == (value,)
+    monkeypatch.setenv(env_name("host"), "127.0.0.1")
+    monkeypatch.setenv(ALLOWED_HOSTS, "127.0.0.1:9000,localhost:9000")
+    assert Settings(_env_file=None).allowed_host_values == ("127.0.0.1:9000", "localhost:9000")
 
 
 def test_the_lifespan_passes_through() -> None:
@@ -259,3 +280,26 @@ def test_the_shim_checks_with_the_same_function(
     own = frozenset({f"127.0.0.1:{shimmed.port}".encode()})
     # Once for the app's check, once for the shim's, each with loopback on the port.
     assert calls == [own, own], calls
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_a_refused_allowlist_names_the_variable_at_start(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Review finding sec-r1: with the hooks installed first, a refused setting must still
+    # say which variable and why, exit 2 and bind nothing; never the value.
+    import uvicorn
+
+    from app import __main__ as entry
+
+    def no_bind(self: uvicorn.Config) -> Any:
+        raise AssertionError("bound before refusing")
+
+    monkeypatch.setattr(uvicorn.Config, "bind_socket", no_bind)
+    monkeypatch.chdir(tmp_path)
+    value = f"{branding.SLUG}probe"
+    monkeypatch.setenv(ALLOWED_HOSTS, value)
+    assert entry.main() == 2
+    err = capsys.readouterr().err
+    assert "refused to start: invalid settings" in err and ALLOWED_HOSTS in err, err
+    assert value not in err, err

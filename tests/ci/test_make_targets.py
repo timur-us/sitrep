@@ -138,13 +138,16 @@ def test_docker_smoke_refuses_a_foreign_host_after_it_is_up() -> None:
         'docker start "$cid"',
         'test "$addr" = "127.0.0.1:$port"',
         '"http://$addr/health" 2>/dev/null && break',
-        "-H 'Host: 192.0.2.1:8000'",
+        "-w '%{http_code}' -H 'Host: 192.0.2.1:8000'",
         'test "$code" = 400',
     ]
     positions = [out.find(needle) for needle in needles]
     assert -1 not in positions, [n for n, p in zip(needles, positions, strict=True) if p < 0]
     assert positions == sorted(positions), list(zip(needles, positions, strict=True))
     assert "docker create" in out[: positions[3]], "the container is not created first"
+    # Review finding sec-r7: the other two containers are created, trapped, then started.
+    assert out.count("docker create") == 3, out.count("docker create")
+    assert out.count("docker run -d") == 0, "a container started before its trap"
 
 
 def test_lint_test_starts_and_migrates_the_database_before_pytest() -> None:

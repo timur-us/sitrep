@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+import os
+import subprocess
 import sys
 import threading
 import types
@@ -338,3 +340,92 @@ def test_a_raising_handler_falls_back_without_text(capfd: pytest.CaptureFixture[
     _orphan_task(raising)
     err = capfd.readouterr().err
     assert CANARY not in err, err
+    # asyncio's fallback did log, with the fixed message and the type (review test-r2).
+    assert logs.ASYNCIO_MESSAGE in err and "exc_type=RuntimeError" in err, err
+
+
+def test_the_apps_handler_cannot_raise(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    # Review finding test-r2: the guard in asyncio_exception_handler.
+    def failing(*args: object, **kwargs: object) -> None:
+        raise RuntimeError(CANARY)
+
+    monkeypatch.setattr(logs, "_log", failing)
+    loop = asyncio.new_event_loop()
+    try:
+        logs.asyncio_exception_handler(loop, {"exception": _leaky()})
+    finally:
+        loop.close()
+    assert CANARY not in "".join(capfd.readouterr())
+
+
+@pytest.mark.parametrize("hook", ["thread", "main", "unraisable"])
+def test_a_failing_hook_writes_a_fixed_line(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str], hook: str
+) -> None:
+    # Review finding sec-r2: a hook that raises would make Python print the original
+    # exception after its own; the hooks swallow their failure with a fixed line.
+    def failing(*args: object, **kwargs: object) -> None:
+        raise RuntimeError(CANARY)
+
+    monkeypatch.setattr(logs, "_log", failing)
+    exc = _leaky()
+    if hook == "thread":
+        args = types.SimpleNamespace(exc_type=Leaky, exc_value=exc, exc_traceback=None, thread=None)
+        logs.thread_excepthook(args)  # type: ignore[arg-type]
+    elif hook == "main":
+        logs.main_excepthook(Leaky, exc, None)
+    else:
+        unraisable = types.SimpleNamespace(
+            exc_type=Leaky, exc_value=exc, exc_traceback=None, err_msg=None, object=None
+        )
+        logs.unraisable_hook(unraisable)  # type: ignore[arg-type]
+    err = capfd.readouterr().err
+    assert CANARY not in err and logs.HOOK_FAILED in err, err
+
+
+def _python(code: str) -> subprocess.CompletedProcess[str]:
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": os.environ.get("HOME", ""), "NO_PROXY": "*"}
+    return subprocess.run(
+        [sys.executable, "-P", "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_a_warning_reaches_stderr_as_its_category_only() -> None:
+    # Review finding test-r3: in a process of its own, outside pytest's warning capture.
+    warn = f"import warnings; warnings.warn('value={CANARY}', UserWarning, stacklevel=1)"
+    default = _python(warn)
+    assert CANARY in default.stderr, default.stderr
+    hooked = _python(f"from app.observability import logs; logs.install_exception_hooks(); {warn}")
+    assert CANARY not in hooked.stderr, hooked.stderr
+    assert logs.WARNING_MESSAGE in hooked.stderr, hooked.stderr
+
+
+def test_asyncio_reports_without_an_exception_keep_their_own_message() -> None:
+    # Review finding sec-r4: a report without an exception (a slow callback, an unclosed
+    # transport) is not an unhandled exception, and keeps its level.
+    record = logging.LogRecord("asyncio", logging.WARNING, __file__, 1, f"slow {CANARY}", (), None)
+    assert logs.AsyncioFilter().filter(record)
+    assert (record.msg, record.levelno) == (logs.ASYNCIO_REPORT, logging.WARNING)
+    with_exc = logging.LogRecord(
+        "asyncio", logging.ERROR, __file__, 1, f"boom {CANARY}", (), (Leaky, _leaky(), None)
+    )
+    assert logs.AsyncioFilter().filter(with_exc)
+    assert with_exc.msg == logs.ASYNCIO_MESSAGE
+
+
+@pytest.mark.usefixtures("hooks")
+def test_a_warning_is_logged_at_warning_level(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        logs.install_exception_hooks()
+        warnings.warn("x", DeprecationWarning, stacklevel=1)
+    [record] = [r for r in caplog.records if r.getMessage() == logs.WARNING_MESSAGE]
+    assert (record.levelno, record.exc_type) == (logging.WARNING, "DeprecationWarning")

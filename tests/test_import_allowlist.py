@@ -141,6 +141,15 @@ BANNED_ATTRIBUTES = frozenset(
         "subprocess_exec",
         "subprocess_shell",
         "to_thread",
+        # Threads and executors anywhere, and the sends that need a socket (review
+        # finding sec-r6 of M1 PR 5): logs.py replaces the thread hook, it starts none.
+        "Thread",
+        "Timer",
+        "connect_accepted_socket",
+        "run_in_executor",
+        "sendfile",
+        "start_new_thread",
+        "start_tls",
         "add_external_initializers",
         "add_external_initializers_from_files_in_memory",
         "enable_profiling",
@@ -207,6 +216,9 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
             if not node.level:
                 dotted.add(module)
                 dotted.update(f"{module}.{alias.name}" for alias in node.names)
+            if any(alias.name == "*" for alias in node.names):
+                # A star import binds names the scan never sees (review finding test-r1).
+                problems.append(f"{rel}:{node.lineno}: from {module or '.'} import *")
             for alias in node.names:
                 if (
                     alias.name == "connect"
@@ -327,6 +339,12 @@ PLANTED = [
     ("loop.sock_sendall(s, b'x')\n", ".sock_sendall"),
     ("asyncio.to_thread(f)\n", ".to_thread"),
     ("import asyncio.subprocess\n", "banned module asyncio.subprocess"),
+    ("from asyncio import *\nopen_connection('h', 1)\n", "from asyncio import *"),
+    ("from app.config import *\n", "from app.config import *"),
+    ("loop.run_in_executor(None, f)\n", ".run_in_executor"),
+    ("threading.Thread(target=f).start()\n", ".Thread"),
+    ("from threading import Timer\n", "import Timer"),
+    ("loop.start_tls(t, p, c)\n", ".start_tls"),
     ("from asyncio import subprocess\n", "banned module asyncio.subprocess"),
     ("import asyncio\n", "asyncio outside app/main.py"),
     ("import threading\n", "threading outside app/observability/logs.py"),
