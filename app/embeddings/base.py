@@ -19,6 +19,10 @@ from typing import Protocol, runtime_checkable
 from app.config.embedding import PASSAGE_PREFIX, QUERY_PREFIX
 
 
+class TextTooLong(ValueError):
+    """Scaffolding (M1 PR 8): moves here from app/embeddings/onnx.py with the build."""
+
+
 @runtime_checkable
 class Embedder(Protocol):
     model_id: str

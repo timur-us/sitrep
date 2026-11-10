@@ -61,3 +61,18 @@ LOAD_INSERT_PRODUCT_SHEET = (
     "INSERT INTO product_sheets (id, title, body, lang, url, origin, embedding,"
     " embedding_model, embedding_revision) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
+
+# Retrieval (ADR 0013). Scaffolding (M1 PR 8, commit 1): inert, the statements come with
+# the build.
+SEARCH_MANDATE_DOCUMENTS_ENGLISH = "SELECT NULL WHERE false"
+SEARCH_MANDATE_DOCUMENTS_GERMAN = "SELECT NULL WHERE false"
+SEARCH_SHEETS_ENGLISH = "SELECT NULL WHERE false"
+SEARCH_SHEETS_GERMAN = "SELECT NULL WHERE false"
+NEAREST_CHUNKS = "SELECT NULL WHERE false"
+NEAREST_MANDATE_CHUNKS = "SELECT NULL WHERE false"
+NEAREST_SHEETS = "SELECT NULL WHERE false"
+DOCUMENT_DETAILS = "SELECT NULL WHERE false"
+DOCUMENT_PASSAGES = "SELECT NULL WHERE false"
+SHEET_DETAILS = "SELECT NULL WHERE false"
+MANDATE_VISIBLE = "SELECT NULL WHERE false"
+PORTFOLIO_REPORT = "SELECT NULL WHERE false"

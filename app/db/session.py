@@ -77,10 +77,16 @@ Pool = ConnectionPool[CheckedConnection]
 ROLE_SETTINGS = [f"search_path={names.SEARCH_PATH}"]
 # The advisors the loader may write for: the cast's, and no one else.
 CAST_ADVISORS = frozenset(person.id for person in branding.ADVISORS)
+# pgvector's iterative index scan (ADR 0013). Scaffolding: not set yet.
+ITERATIVE_SCAN = "relaxed_order"
 
 
 class GuardError(Exception):
     """A connection the pool must not hand out. The message names rules, not values."""
+
+
+class TransactionEnded(RuntimeError):
+    """Scaffolding: a handle used after its advisor transaction (ADR 0013)."""
 
 
 def problems(conn: CheckedConnection) -> list[str]:

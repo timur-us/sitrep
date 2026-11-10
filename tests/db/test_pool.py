@@ -10,7 +10,11 @@
   pg_db_role_setting too. A connection that fails is closed, and the pool opens another.
 - Pools on the superuser and migrator URLs connect nobody.
 - The advisor transaction is a real transaction, takes an idle connection only, and its
-  setting does not outlive it.
+  settings (the advisor, and pgvector's iterative scan, ADR 0013) do not outlive it.
+- What the block yields is a handle on the connection for the block's length only (PR 5b
+  sec-5; M1 PR 8): used after the block, or from inside the next advisor's transaction
+  on the same connection, it raises; a statement's rows come fetched, with no cursor
+  and no connection behind them.
 
 The planted states run inside a superuser transaction that is rolled back: ALTER ROLE
 and GRANT are transactional, and SET LOCAL SESSION AUTHORIZATION makes the session the
@@ -42,6 +46,7 @@ pytestmark = pytest.mark.usefixtures("database")
 
 APP = names.APP_ROLE
 SETTING = "SELECT current_setting('app.advisor_id', true)"
+ITERATIVE = "SELECT current_setting('hnsw.iterative_scan', true)"
 STATE = "SELECT current_setting('app.advisor_id', true), current_setting('search_path')"
 # Short: these pools are expected to connect nobody.
 REFUSED_TIMEOUT = 1.5
@@ -359,13 +364,107 @@ def test_advisor_transaction_is_a_real_transaction(app_pool: ConnectionPool) -> 
     with session.advisor_transaction(app_pool, issue(MINE.id)) as conn:
         status = conn.info.transaction_status
         inside = conn.execute(SETTING).fetchone()[0]
+        iterative = conn.execute(ITERATIVE).fetchone()[0]
         pid = conn.info.backend_pid
     with app_pool.connection() as conn:
         after = conn.execute(SETTING).fetchone()[0]
+        iterative_after = conn.execute(ITERATIVE).fetchone()[0]
         assert conn.info.backend_pid == pid
+        assert session.problems(conn) == []
     assert status == TransactionStatus.INTRANS, status
     assert inside == MINE.id
     assert after == "", f"the advisor setting outlived its transaction: {after!r}"
+    # ADR 0013: set for the transaction, transaction-locally (plan default 13). Before
+    # pgvector is loaded in a session the setting is a placeholder, and reads '' after.
+    assert iterative == session.ITERATIVE_SCAN == "relaxed_order", iterative
+    assert iterative_after in ("", "off"), f"the iterative scan outlived it: {iterative_after!r}"
+
+
+def test_the_iterative_scan_is_transaction_local_once_pgvector_is_loaded(
+    app_pool: ConnectionPool,
+) -> None:
+    # The first transaction leaves a placeholder; the second loads pgvector, which turns
+    # the placeholder into its real setting. Neither leaves a session-level setting.
+    with session.advisor_transaction(app_pool, issue(MINE.id)) as conn:
+        conn.execute(SETTING)
+    with session.advisor_transaction(app_pool, issue(MINE.id)) as conn:
+        loaded = conn.execute("SELECT '[1,2,3]'::vector IS NOT NULL").fetchone()[0]
+        inside = conn.execute(ITERATIVE).fetchone()[0]
+        pid = conn.info.backend_pid
+    with app_pool.connection() as conn:
+        assert conn.info.backend_pid == pid
+        after = conn.execute(ITERATIVE).fetchone()[0]
+        found = session.problems(conn)
+    assert loaded is True
+    assert inside == session.ITERATIVE_SCAN, inside
+    assert after == "off", after
+    assert found == [], found
+
+
+def test_the_handle_refuses_use_after_the_block(app_pool: ConnectionPool) -> None:
+    with session.advisor_transaction(app_pool, issue(MINE.id)) as conn:
+        assert conn.execute("SELECT 1").fetchone() == (1,)
+    with pytest.raises(session.TransactionEnded):
+        conn.execute("SELECT 1")
+    with pytest.raises(session.TransactionEnded), conn.transaction():
+        pytest.fail("a savepoint opened after the block")
+    with pytest.raises(session.TransactionEnded):
+        _ = conn.info
+
+
+def test_the_handle_ends_when_the_block_raises(app_pool: ConnectionPool) -> None:
+    with (
+        pytest.raises(psycopg.errors.DivisionByZero),
+        session.advisor_transaction(app_pool, issue(MINE.id)) as conn,
+    ):
+        conn.execute("SELECT 1 / 0")
+    with pytest.raises(session.TransactionEnded):
+        conn.execute("SELECT 1")
+
+
+def test_a_kept_handle_cannot_act_in_the_next_advisors_transaction(
+    app_pool: ConnectionPool,
+) -> None:
+    # PR 5b sec-5: a reference kept past the block (a background task, a streaming
+    # response) would run inside whichever transaction next holds the connection. With
+    # one connection in the pool, the next transaction is on the same backend.
+    with session.advisor_transaction(app_pool, issue(MINE.id)) as kept:
+        pid = kept.info.backend_pid
+    with session.advisor_transaction(app_pool, issue(OTHER.id)) as conn:
+        assert conn.info.backend_pid == pid
+        with pytest.raises(session.TransactionEnded):
+            kept.execute(SETTING)
+        assert conn.execute(SETTING).fetchone() == (OTHER.id,)
+
+
+def test_rows_carry_no_cursor_and_no_connection(app_pool: ConnectionPool) -> None:
+    with session.advisor_transaction(app_pool, issue(MINE.id)) as conn:
+        rows = conn.execute("SELECT g FROM generate_series(1, 3) g")
+        empty = conn.execute("SELECT 1 WHERE false")
+        assert type(conn) is session.AdvisorConnection
+    # Fetched inside the block, read after it: nothing behind them can run a statement.
+    assert rows.fetchone() == (1,)
+    assert rows.fetchall() == [(2,), (3,)]
+    assert rows.fetchone() is None and rows.rowcount == 3
+    assert empty.fetchall() == [] and empty.fetchone() is None
+    reachable = [getattr(rows, name) for name in type(rows).__slots__]
+    assert not any(
+        isinstance(value, psycopg.Connection | psycopg.Cursor | ConnectionPool)
+        for value in reachable
+    ), reachable
+    for name in ("execute", "connection", "cursor", "_conn"):
+        assert not hasattr(rows, name), name
+
+
+def test_the_handle_keeps_the_savepoint_and_rowcount(app_pool: ConnectionPool) -> None:
+    # What tests/db/test_rls_rows.py's write probes use: a savepoint that rolls back,
+    # and the rows a statement changed (none here: the app role reads only).
+    with session.advisor_transaction(app_pool, issue(MINE.id)) as conn:
+        with conn.transaction(force_rollback=True) as inner:
+            assert inner is conn
+            assert conn.execute("SELECT 1").rowcount == 1
+        assert conn.info.transaction_status == TransactionStatus.INTRANS
+        assert conn.execute(SETTING).fetchone() == (MINE.id,)
 
 
 class OneConnection:

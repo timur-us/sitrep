@@ -2,14 +2,16 @@
 
 search_client_docs and get_portfolio read; draft_email drafts and create_followup has a
 side effect, and both need the advisor's approval. The brief does not fix data classes;
-all four touch client data, so all four are declared CONFIDENTIAL. Declared only: the
-handlers are M1's.
+all four touch client data, so all four are declared CONFIDENTIAL. The READ tools'
+handlers are app/harness/handlers.py's (M1 PR 8), tested in tests/harness/test_handlers.py
+and tests/db/test_retrieval.py; the other two are M1 PR 14's.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import re
-from typing import get_args, get_origin
+from typing import Literal, get_args, get_origin, get_type_hints
 
 import pytest
 from pydantic import ValidationError
@@ -60,6 +62,45 @@ def test_mvp_data_classes() -> None:
 def test_mvp_read_tools_return_untrusted(name: str) -> None:
     result = mvp_tools.build_registry().spec(name).result
     assert get_origin(result) is Untrusted and get_args(result), result
+
+
+def test_the_read_results_carry_kind_and_trust_and_no_date() -> None:
+    # M1 PR 8 (ADR 0013): a hit is a document or a product sheet, a sheet has no mandate,
+    # and trust comes from the record's table (PR 7, sec-7). No document carries a date
+    # the database stores, so the portfolio has none apart from its own text.
+    hit = dataclasses.fields(mvp_tools.DocumentHit)
+    assert [field.name for field in hit] == [
+        "kind",
+        "document_id",
+        "mandate_id",
+        "title",
+        "lang",
+        "trust",
+        "excerpt",
+    ]
+    hints = get_type_hints(mvp_tools.DocumentHit)
+    assert hints["kind"] == Literal["document", "product_sheet"]
+    assert hints["mandate_id"] == str | None
+    portfolio = dataclasses.fields(mvp_tools.Portfolio)
+    assert [field.name for field in portfolio] == [
+        "mandate_id",
+        "document_id",
+        "title",
+        "lang",
+        "report",
+    ]
+    registry = mvp_tools.build_registry()
+    assert registry.spec("get_portfolio").result == Untrusted[mvp_tools.Portfolio | None]
+    assert registry.spec("search_client_docs").result == Untrusted[list[mvp_tools.DocumentHit]]
+
+
+def test_the_read_tools_say_what_their_handlers_do() -> None:
+    registry = mvp_tools.build_registry()
+    assert "product sheets" in registry.spec("search_client_docs").description
+    mandate = registry.schema("search_client_docs")["properties"]["mandate_id"]
+    assert "no product sheets" in mandate["description"], mandate
+    portfolio = registry.spec("get_portfolio").description
+    assert "latest" not in portfolio and "null" in portfolio, portfolio
 
 
 def property_names(node: object) -> list[str]:

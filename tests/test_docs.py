@@ -1200,3 +1200,116 @@ def test_planted_adr_0012_blocks() -> None:
     assert adr_0012_problems(good.replace("2026-11-09", "2026-11-08"), expected) == [
         "prices_as_of: '2026-11-08' in the block, '2026-11-09' in the code"
     ]
+
+
+# ADR 0013 (M1 PR 8): retrieval's facts, as the ADR's one yaml block, pinned to
+# app/harness/handlers.py, app/db/session.py and the search tool's bounds.
+ADR_0013_KEYS = (
+    "rrf_k",
+    "candidates_per_list",
+    "kinds",
+    "max_limit",
+    "max_query_chars",
+    "iterative_scan",
+    "query_too_long",
+)
+
+
+def _bound(field: str, name: str) -> object:
+    """The search tool's bound `name` (le, max_length) on `field`."""
+    from app.harness.mvp_tools import SearchClientDocs
+
+    metadata = SearchClientDocs.model_fields[field].metadata
+    return next(getattr(item, name) for item in metadata if hasattr(item, name))
+
+
+def adr_0013_facts() -> dict[str, object]:
+    """What the code says, in the block's terms."""
+    from app.db import session
+    from app.harness import handlers
+
+    return {
+        "rrf_k": handlers.RRF_K,
+        "candidates_per_list": handlers.CANDIDATES,
+        "kinds": list(handlers.KINDS),
+        "max_limit": _bound("limit", "le"),
+        "max_query_chars": _bound("query", "max_length"),
+        "iterative_scan": session.ITERATIVE_SCAN,
+        "query_too_long": handlers.QUERY_TOO_LONG,
+    }
+
+
+def adr_0013_problems(adr: str, expected: dict[str, object]) -> list[str]:
+    """One line per way ADR 0013's block differs from the code."""
+    blocks = yaml_blocks(adr)
+    if len(blocks) != 1:
+        return [f"expected one yaml block, found {len(blocks)}"]
+    facts, problem = load_block(blocks[0])
+    if problem:
+        return [problem]
+    if not isinstance(facts, dict):
+        return ["the yaml block is not a mapping"]
+    problems = [f"{key}: not in the block" for key in ADR_0013_KEYS if key not in facts]
+    problems += [f"{key}: in the block, not expected" for key in facts if key not in ADR_0013_KEYS]
+    if problems:
+        return problems
+    for key in ADR_0013_KEYS:
+        found, wanted = facts[key], expected[key]
+        if found != wanted or type(found) is not type(wanted):
+            problems.append(f"{key}: {found!r} in the block, {wanted!r} in the code")
+    return problems
+
+
+def _adr_0013() -> str:
+    found = sorted(DECISIONS.glob("0013-*.md")) if DECISIONS.is_dir() else []
+    assert len(found) == 1, f"expected one ADR 0013 in docs/decisions, found {len(found)}"
+    return found[0].read_text(encoding="utf-8")
+
+
+def test_adr_0013_block() -> None:
+    problems = adr_0013_problems(_adr_0013(), adr_0013_facts())
+    assert not problems, "ADR 0013 and the retrieval code:\n" + "\n".join(problems)
+
+
+def test_the_candidates_cover_the_largest_limit() -> None:
+    # Fusion ranks the top `limit` from each list's candidates: never fewer than asked.
+    facts = adr_0013_facts()
+    assert facts["candidates_per_list"] >= facts["max_limit"], facts
+
+
+def test_planted_adr_0013_blocks() -> None:
+    expected = {
+        "rrf_k": 60,
+        "candidates_per_list": 20,
+        "kinds": ["document", "sheet"],
+        "max_limit": 20,
+        "max_query_chars": 500,
+        "iterative_scan": "relaxed_order",
+        "query_too_long": "too_long",
+    }
+    good = (
+        "```yaml\nrrf_k: 60\ncandidates_per_list: 20\nkinds: [document, sheet]\n"
+        "max_limit: 20\nmax_query_chars: 500\niterative_scan: relaxed_order\n"
+        "query_too_long: too_long\n```\n"
+    )
+    assert adr_0013_problems(good, expected) == []
+    assert adr_0013_problems("no block\n", expected) == ["expected one yaml block, found 0"]
+    assert adr_0013_problems(good + good, expected) == ["expected one yaml block, found 2"]
+    assert adr_0013_problems(good.replace("rrf_k: 60", "rrf_k: 61"), expected) == [
+        "rrf_k: 61 in the block, 60 in the code"
+    ]
+    assert adr_0013_problems(good.replace("rrf_k: 60", "rrf_k: '60'"), expected) == [
+        "rrf_k: '60' in the block, 60 in the code"
+    ]
+    assert adr_0013_problems(good.replace("[document, sheet]", "[sheet, document]"), expected) == [
+        "kinds: ['sheet', 'document'] in the block, ['document', 'sheet'] in the code"
+    ]
+    assert adr_0013_problems(good.replace("max_limit: 20\n", ""), expected) == [
+        "max_limit: not in the block"
+    ]
+    assert adr_0013_problems(good.replace("rrf_k: 60", "rrf_k: 60\nnote: x"), expected) == [
+        "note: in the block, not expected"
+    ]
+    assert adr_0013_problems(good.replace("rrf_k: 60", "rrf_k: 60\nrrf_k: 60"), expected) == [
+        "the yaml block repeats a key: duplicate key 'rrf_k'"
+    ]

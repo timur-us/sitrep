@@ -3,6 +3,10 @@
 When it is not there they fail with what to run, and never skip: a skipped role test
 would pass CI with the boundary untested. The superuser connection is for inspection
 only; a test that makes a claim about a role connects as that role.
+
+The READ handlers embed every query (M1 PR 8), so the tests that call them need the
+real model as well (`make model`); without it the `embedder` fixture fails, never skips,
+as tests/embeddings does.
 """
 
 from __future__ import annotations
@@ -21,6 +25,18 @@ from app.config.settings import DATABASE_PORT, Settings
 from app.db import names, session
 from app.db.connect import connect
 from app.db.migrate import RECORD
+from app.embeddings.model_files import ModelFileError
+from app.embeddings.onnx import OnnxEmbedder
+
+
+@pytest.fixture(scope="session")
+def embedder() -> OnnxEmbedder:
+    """The real embedding model, loaded once per session (tests/db/test_loader.py keeps
+    its own, per module)."""
+    try:
+        return OnnxEmbedder()
+    except ModelFileError as error:
+        pytest.fail(f"the embedding model is not in place ({error}); run `make model`")
 
 
 @pytest.fixture(scope="session")

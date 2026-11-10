@@ -1,15 +1,17 @@
-"""A forged tool argument goes nowhere (plan PR 6; threat-model path 2; CLAUDE.md rule 8).
+"""A forged tool argument goes nowhere (plan PR 6, M1 PR 8; threat-model path 2; CLAUDE.md
+rule 8).
 
-The model's arguments to search_client_docs go through the real registry; the handler
-is a test-local stand-in that runs the real search statements in the advisor transaction
-(M1 retargets this to the real handler). Two claims:
+The model's arguments to search_client_docs go through the real registry to the real
+handler (app/harness/handlers.py), which embeds the query with the real model and
+searches in its own advisor transaction. Two claims:
 
 - An argument that names an identity (plain, camelCase, nested, in a list, fullwidth,
-  German, or a Cyrillic homoglyph) gets a structured error, and nothing runs: the
-  handler is not called and the pool hands out no connection.
-- PR 5b's forged payloads pass validation, because they are plain query text, and
-  still return only the logged-in advisor's token documents, with the advisor setting
-  unchanged: the boundary is the database's, not the validator's.
+  German, or a Cyrillic homoglyph) gets a structured error, and nothing runs: neither
+  the handler nor the embedder is called, and the pool hands out no connection.
+- PR 5b's forged payloads pass validation, because they are plain query text, and the
+  handler returns only the logged-in advisor's records: their token document in the
+  payload's language among them, nothing of the other advisor's. The boundary is the
+  database's, not the validator's.
 
 The advisor comes from issue(), as the login will provide it; nothing in the arguments
 can change it.
@@ -17,16 +19,23 @@ can change it.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 import pytest
-from forged_payloads import PAYLOAD_IDS, PAYLOADS, SEARCH, SETTING, WORD, own
+from dbtools import SUPERUSER_URL
+from forged_payloads import PAYLOAD_IDS, PAYLOADS, WORD, token_document_id
+from psycopg import sql
 from psycopg_pool import ConnectionPool
 from seed_rows import MINE, OTHER
 
 from app.auth.identity import VerifiedAdvisor, issue
-from app.db.session import advisor_transaction
-from app.harness.mvp_tools import SearchClientDocs, build_registry
+from app.db import names
+from app.db.connect import connect
+from app.embeddings.onnx import OnnxEmbedder
+from app.harness.context import Untrusted
+from app.harness.handlers import read_handlers
+from app.harness.mvp_tools import build_registry
 from app.harness.tools import RejectedCall, ToolRegistry, ValidCall
 
 pytestmark = pytest.mark.usefixtures("database", "seeded", "token_documents")
@@ -34,33 +43,47 @@ pytestmark = pytest.mark.usefixtures("database", "seeded", "token_documents")
 TOOL = "search_client_docs"
 
 
-class SearchSpy:
-    """The test-local handler: records each call, then searches both languages."""
+class CountingEmbedder:
+    """The real embedder, counting the queries it embeds."""
 
-    def __init__(self, pool: ConnectionPool) -> None:
+    def __init__(self, embedder: OnnxEmbedder) -> None:
+        self.embedder = embedder
+        self.model_id = embedder.model_id
+        self.revision = embedder.revision
+        self.dim = embedder.dim
+        self.queries = 0
+
+    def embed_query(self, text: str) -> list[float]:
+        self.queries += 1
+        return self.embedder.embed_query(text)
+
+    def embed_passages(self, texts: Sequence[str]) -> list[list[float]]:
+        raise AssertionError("a search embeds no passages")
+
+
+class HandlerSpy:
+    """The real handler, recording each call it gets."""
+
+    def __init__(self, pool: ConnectionPool, embedder: CountingEmbedder) -> None:
         self.pool = pool
-        self.calls: list[SearchClientDocs] = []
+        self.embedder = embedder
+        self.handler = read_handlers(pool, embedder)[TOOL]  # type: ignore[arg-type]
+        self.calls: list[Any] = []
 
-    def __call__(self, advisor: VerifiedAdvisor, arguments: SearchClientDocs) -> dict[str, Any]:
+    def __call__(self, advisor: VerifiedAdvisor, arguments: Any) -> Untrusted[Any]:
         self.calls.append(arguments)
-        with advisor_transaction(self.pool, advisor) as conn:
-            found = []
-            for statement in SEARCH.values():
-                found += conn.execute(statement, (arguments.query,)).fetchall()
-            setting = conn.execute(SETTING).fetchone()[0]
-            follow_up = conn.execute(SEARCH["english"], (WORD,)).fetchall()
-        return {"found": sorted(found), "setting": setting, "follow_up": follow_up}
+        return self.handler(advisor, arguments)
 
 
 def dispatch(
-    registry: ToolRegistry, spy: SearchSpy, advisor: VerifiedAdvisor, arguments: object
-) -> RejectedCall | dict[str, Any]:
+    registry: ToolRegistry, spy: HandlerSpy, advisor: VerifiedAdvisor, arguments: object
+) -> RejectedCall | Untrusted[Any]:
     """What M1's loop does with a tool_use block: validate, and run only a valid call."""
     outcome = registry.validate_call(TOOL, arguments)
     if isinstance(outcome, RejectedCall):
         return outcome
     assert isinstance(outcome, ValidCall)
-    return spy(advisor, outcome.arguments)  # type: ignore[arg-type]
+    return spy(advisor, outcome.arguments)
 
 
 def requests(pool: ConnectionPool) -> int:
@@ -73,21 +96,41 @@ def registry() -> ToolRegistry:
 
 
 @pytest.fixture
-def spy(app_pool: ConnectionPool) -> SearchSpy:
-    return SearchSpy(app_pool)
+def spy(app_pool: ConnectionPool, embedder: OnnxEmbedder) -> HandlerSpy:
+    return HandlerSpy(app_pool, CountingEmbedder(embedder))
 
 
-def mine_everywhere() -> list[tuple[str, str]]:
-    return sorted(own(MINE, "english") + own(MINE, "german"))
+@pytest.fixture(scope="module")
+def owners(token_documents: None) -> Iterator[dict[str, str]]:
+    """Every record id the superuser sees, and whose it is (sheets: the empty string)."""
+    with connect(SUPERUSER_URL) as conn:
+        documents = conn.execute(
+            sql.SQL("SELECT id, advisor_id FROM {}").format(
+                sql.Identifier(names.SCHEMA, "documents")
+            )
+        ).fetchall()
+        sheets = conn.execute(
+            sql.SQL("SELECT id, '' FROM {}").format(sql.Identifier(names.SCHEMA, "product_sheets"))
+        ).fetchall()
+    yield dict(documents + sheets)
 
 
-def test_positive_control_a_plain_call_runs(registry: ToolRegistry, spy: SearchSpy) -> None:
+def foreign(ids: Sequence[str], owners: dict[str, str], person: object) -> list[str]:
+    """The ids that are neither person's documents nor product sheets."""
+    return [record for record in ids if owners.get(record) not in ("", person.id)]  # type: ignore[attr-defined]
+
+
+def test_positive_control_a_plain_call_runs(
+    registry: ToolRegistry, spy: HandlerSpy, owners: dict[str, str]
+) -> None:
     before = requests(spy.pool)
     result = dispatch(registry, spy, issue(OTHER.id), {"query": WORD})
     assert not isinstance(result, RejectedCall), result
-    assert result["found"] == sorted(own(OTHER, "english") + own(OTHER, "german"))
-    assert result["setting"] == OTHER.id
-    assert len(spy.calls) == 1 and requests(spy.pool) > before
+    ids = result.provenance.record_ids
+    assert {token_document_id(OTHER.id, lang) for lang in ("english", "german")} <= set(ids), ids
+    assert foreign(ids, owners, OTHER) == []
+    assert len(spy.calls) == 1 and spy.embedder.queries == 1
+    assert requests(spy.pool) > before
 
 
 FORGED = {
@@ -100,7 +143,7 @@ FORGED = {
     "mitarbeiter": {"query": WORD, "mitarbeiter_id": "{other}"},
     "on-behalf": {"query": WORD, "onBehalfOf": "{other}"},
     "user": {"query": WORD, "user": "{other}"},
-    "homoglyph": {"query": WORD, "\u0430dvisor_id": "{other}"},  # Cyrillic a
+    "homoglyph": {"query": WORD, "аdvisor_id": "{other}"},  # Cyrillic a
 }
 
 
@@ -117,7 +160,7 @@ def forged(name: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize("name", list(FORGED))
 def test_identity_arguments_are_rejected_before_any_sql(
-    name: str, registry: ToolRegistry, spy: SearchSpy
+    name: str, registry: ToolRegistry, spy: HandlerSpy
 ) -> None:
     before = requests(spy.pool)
     result = dispatch(registry, spy, issue(MINE.id), forged(name))
@@ -128,20 +171,24 @@ def test_identity_arguments_are_rejected_before_any_sql(
     assert expected in kinds, f"{name}: {result.errors}"
     assert OTHER.id not in repr(result.errors), "the error echoes the forged value"
     assert spy.calls == [], f"{name}: the handler ran"
+    assert spy.embedder.queries == 0, f"{name}: the query was embedded"
     assert requests(spy.pool) == before, f"{name}: the pool handed out a connection"
 
 
 @pytest.mark.parametrize(("lang", "payload"), PAYLOADS, ids=PAYLOAD_IDS)
 def test_forged_payloads_pass_validation_and_stay_inert(
-    lang: str, payload: str, registry: ToolRegistry, spy: SearchSpy
+    lang: str, payload: str, registry: ToolRegistry, spy: HandlerSpy, owners: dict[str, str]
 ) -> None:
     outcome = registry.validate_call(TOOL, {"query": payload})
     assert isinstance(outcome, ValidCall), f"plain query text was rejected: {outcome}"
     result = dispatch(registry, spy, issue(MINE.id), {"query": payload})
     assert not isinstance(result, RejectedCall)
-    leaked = [row for row in result["found"] + result["follow_up"] if row[0] != MINE.id]
-    assert not leaked, f"{OTHER.name} rows visible under {MINE.name}: {leaked}"
-    assert own(MINE, lang)[0] in result["found"], result["found"]
-    assert set(result["found"]) <= set(mine_everywhere()), result["found"]
-    assert result["setting"] == MINE.id, f"the setting moved to {result['setting']!r}"
-    assert result["follow_up"] == own(MINE, "english"), result["follow_up"]
+    ids = result.provenance.record_ids
+    leaked = foreign(ids, owners, MINE)
+    assert not leaked, f"{OTHER.name} records reached {MINE.name}: {leaked}"
+    assert token_document_id(MINE.id, lang) in ids, ids
+    # The same handler right after, for the same advisor: the payload moved nothing.
+    follow_up = dispatch(registry, spy, issue(MINE.id), {"query": WORD})
+    assert not isinstance(follow_up, RejectedCall)
+    assert foreign(follow_up.provenance.record_ids, owners, MINE) == []
+    assert token_document_id(MINE.id, lang) in follow_up.provenance.record_ids
