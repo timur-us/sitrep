@@ -20,6 +20,7 @@ import datetime
 import hashlib
 import json
 import logging
+import traceback
 from collections.abc import Callable, Iterator
 from decimal import Decimal
 from typing import Any
@@ -712,8 +713,10 @@ def test_the_wrapped_result_is_charged(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(loop.RequestBudget, "charge", spy)
     handlers = Handlers(hit_text="y" * 9_000)
     run(ScriptedClient(response(SEARCH, stop="tool_use"), response(text("ok"))), handlers)
-    usage_charges = 1_100  # each reply's input plus output
-    assert any(tokens >= 3_000 and tokens != usage_charges for tokens in charged), charged
+    # 9,000 characters are 3,000 tokens raw; the wrapped result, with its delimiter and
+    # the hit's other fields, is more (round 2: a charge of the raw text would not do).
+    raw = loop._tokens(handlers.hit_text)
+    assert any(tokens > raw + 20 and tokens != 1_100 for tokens in charged), (raw, charged)
 
 
 def test_a_budget_stop_between_calls_has_no_answer(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -756,13 +759,17 @@ def test_calls_per_turn_are_capped() -> None:
 
 
 def test_calls_per_request_are_capped() -> None:
+    # Round 2: five calls a turn, so the cap of 24 falls inside the fifth turn.
     handlers = Handlers()
-    turn = [tool_use(f"tu_{n}", "search_client_docs", {"query": "q"}) for n in range(8)]
+    turn = [tool_use(f"tu_{n}", "search_client_docs", {"query": "q"}) for n in range(5)]
     client = ScriptedClient(
-        *[response(*turn, stop="tool_use") for _ in range(4)], response(text("ok"))
+        *[response(*turn, stop="tool_use") for _ in range(5)], response(text("ok"))
     )
     run(client, handlers)
     assert len(handlers.calls) == loop.MAX_CALLS_PER_REQUEST
+    fifth = tool_results(client.calls[5])
+    assert [block.get("is_error", False) for block in fifth] == [False] * 4 + [True]
+    assert "call_limit" in fifth[-1]["content"]
 
 
 def test_the_span_lists_carry_no_order(traced: Traced) -> None:
@@ -802,7 +809,11 @@ def test_an_unexpected_exception_becomes_a_traced_loop_error(traced: Traced) -> 
     def body() -> None:
         with pytest.raises(loop.LoopError) as failed:
             run(ScriptedClient(Odd(CANARY)))
-        assert failed.value.kind == "internal" and failed.value.__cause__ is None
+        error = failed.value
+        assert error.kind == "internal" and error.__cause__ is None
+        # Round 2, N1: not even the implicit context keeps the original's message.
+        assert error.__context__ is None
+        assert CANARY not in "".join(traceback.format_exception(error))
 
     attributes = traced(body)
     assert (attributes[key("loop.error")], attributes[key("loop.error_cause")]) == (
@@ -890,7 +901,7 @@ def test_a_reply_from_another_model_ends_the_request() -> None:
     assert failed.value.kind == "protocol"
 
 
-@pytest.mark.parametrize("mandate_id", ["a b", "a\nb", "a b", "../x", "x]"])
+@pytest.mark.parametrize("mandate_id", ["a b", "a\nb", "a\u2028b", "a\u00a0b", "../x", "x]"])
 def test_a_mandate_id_has_the_id_form(mandate_id: str) -> None:
     # spec-10.
     with pytest.raises(ValueError):
