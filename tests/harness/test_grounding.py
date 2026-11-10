@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import random
+import time
 from typing import Any
 
 import pytest
 
 from app.harness.context import Provenance, Untrusted, source_text, wrap
 from app.harness.grounding import CITATION_FORM, GroundingReport, check
+from data.synthetic import generate
 
 
 def source(value: object, *record_ids: str, tool: str = "search_client_docs") -> Untrusted[Any]:
@@ -282,3 +285,53 @@ def test_source_text_reads_the_leaves_of_a_structure() -> None:
 def test_source_text_takes_an_untrusted_only() -> None:
     with pytest.raises(TypeError):
         source_text("EUR 1,250,000.00")  # type: ignore[arg-type]
+
+
+# --- The generator's forms, both ways, and the cost ----------------------------------
+
+FORMATTERS = {
+    "money": lambda n, lang: generate.money(n, lang),
+    "whole euros": lambda n, lang: generate.whole_euros(n, lang),
+    "percent": lambda n, lang: generate.percent(n, lang),
+    "signed percent": lambda n, lang: generate.percent(n - 500, lang, signed=True),
+    "basis points": lambda n, lang: generate.basis_points(n, lang),
+    "long date": lambda n, lang: generate.long_date(
+        datetime.date(2020, 1, 1) + datetime.timedelta(days=n % 3000), lang
+    ),
+}
+
+
+@pytest.mark.parametrize("form", list(FORMATTERS.values()), ids=list(FORMATTERS))
+def test_every_generated_form_grounds_its_other_language(form: Any) -> None:
+    rng = random.Random(9)  # noqa: S311 - a fixed sample of numbers, not a secret
+    numbers = [0, 1, 999, 1000, 1001, 100_000, 125_000_000] + [
+        rng.randrange(10**10) for _ in range(200)
+    ]
+    other = {"german": "english", "english": "german"}
+    for number in numbers:
+        for lang in generate.LANGS:
+            text = form(number, lang)
+            result = report(text, source(form(number, other[lang])))
+            assert (result.figures, result.unmatched) == (1, 0), (text, result)
+
+
+def test_another_generated_amount_does_not_ground() -> None:
+    for lang in generate.LANGS:
+        answer = generate.money(125_000_000, lang)
+        assert report(answer, source(generate.money(125_000_100, lang))).unmatched == 1
+
+
+def test_a_long_hostile_answer_is_checked_quickly() -> None:
+    hostile = (
+        "1"
+        + ".1" * 20_000
+        + " EUR "
+        + "5 " * 20_000
+        + "[source:"
+        + "x" * 1_999
+        + " 1,0" * 10_000
+        + " März " * 5_000
+    )
+    started = time.monotonic()
+    check(hostile, [source(hostile)])
+    assert time.monotonic() - started < 5.0
