@@ -961,7 +961,7 @@ def test_a_message_has_role_and_content_only() -> None:
 
 
 def test_the_prompt_names_no_cast_member_as_a_word() -> None:
-    # test-14: word boundaries, so "Every" is not Eve.
+    # test-14: word boundaries, so a longer word that starts with a name does not count.
     import re
 
     for person in branding.CAST:
@@ -1003,3 +1003,13 @@ def test_the_real_client_s_reply_passes_through_the_loop(monkeypatch: pytest.Mon
     assert assistant["role"] == "assistant"
     assert [block["type"] for block in assistant["content"]] == ["thinking", "text", "tool_use"]
     assert assistant["content"][0]["signature"] == "sig-a"
+
+
+# Review finding test-14: any edit to the prompt's text changes this hash and fails here,
+# so it comes with a new PROMPT_VERSION (and new recordings, M1 PR 16), never silently.
+PROMPT_V1_SHA256 = "6aef4295bb959585a20e556962e477798ce8987d0be2e0b702cd47e9291faf9a"
+
+
+def test_the_v1_prompt_is_pinned() -> None:
+    assert prompt.PROMPT_VERSION == "v1"
+    assert prompt.PROMPT_SHA256 == PROMPT_V1_SHA256

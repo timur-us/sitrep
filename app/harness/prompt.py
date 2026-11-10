@@ -8,7 +8,8 @@ and, from M2, the output policy; the prompt only asks the model to behave, and t
 red team measures how well it does.
 
 The citation form comes from app/harness/grounding.py, which reads it back. A change
-to the text is a new PROMPT_VERSION: recorded runs carry the prompt's hash (ADR 0014).
+to the text is a new PROMPT_VERSION: recorded runs will carry the prompt's hash (M1 PR 16).
+tests/harness/test_loop.py pins the hash of v1, so an edit cannot slip in unversioned.
 """
 
 from __future__ import annotations

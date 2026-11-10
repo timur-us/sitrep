@@ -24,19 +24,28 @@ control sits here, between the model and the tools, where tests reach it:
   silent truncation; refusal ends it with no answer. pause_turn (a server tool's) and any
   other reason raise LoopError: the loop offers no server tool, so the request is
   outside its contract.
-- **Limits.** MAX_TURNS model calls per request. A RequestBudget of REQUEST_BUDGET
-  tokens is charged with the usage after every call and with the size of every wrap()
-  output; before every call the worst case (the estimated input plus MAX_TOKENS) must
-  fit, and a failed call is charged that worst case (PR 6 handover sec-6). Running out
-  ends the turn with stop "budget".
-- **Failures.** One retry for a connection failure or a transient status (429, 5xx,
-  529). A timeout, which may have billed, and a "response" failure are not retried (PR 6
-  handover sec-r7). A usage the price table cannot price ends the request too
-  (PriceUnknown), since its cost would be unknown. LoopError carries a kind, no text.
+- **Limits.** MAX_TURNS model turns per request, MAX_CALLS_PER_TURN and
+  MAX_CALLS_PER_REQUEST tool calls (a call past them gets a call_limit error and its
+  handler does not run). A RequestBudget of REQUEST_BUDGET tokens is charged with the
+  usage after every call and with the size of every wrap() output; before every call
+  the worst case (the estimated input plus MAX_TOKENS) must fit, and a failed call is
+  charged that worst case (PR 6 handover sec-6). The estimate counts ASCII at
+  CHARS_PER_TOKEN and every other UTF-8 byte as a token. Running out ends the turn with
+  stop "budget" and no answer; a finished reply keeps its own stop. There is no
+  wall-clock deadline: that needs a clock, which app/ does not read.
+- **Failures.** One immediate retry for a connection failure or a transient status
+  (429, 5xx, 529). A timeout, which may have billed, and a "response" failure are not
+  retried (PR 6 handover sec-r7). A usage the price table cannot price ends the request
+  (PriceUnknown), and so does a reply from another model than the configured one. A
+  handler that raises gives the model a fixed "tool_failed" result; its class name goes
+  to the span. Any other exception becomes LoopError("internal"). LoopError carries a
+  kind, no text, and the span is written on every path.
 - **Traces.** The request's span gets the attributes of tracing.LOOP and nothing else:
   the prompt's version and hash, the model, token counts, stop, turns, the registered
-  tool names called, error types, and the grounding counts, capped at SPAN_COUNT_CAP
-  because the model steers them (PR 9 review sec-4). Nothing is logged.
+  tool names called and the error types (sorted sets: order and repetition carry
+  nothing), and the grounding counts, capped at SPAN_COUNT_CAP because the model steers
+  them (PR 9 review sec-4). Nothing is logged, and LoopResult's repr leaves out the
+  answer.
 
 Grounding (app/harness/grounding.py) runs over the answer and the results of this
 request; it reports and does not block (plan default 14).
@@ -86,6 +95,9 @@ REQUEST_BUDGET = 150_000
 CHARS_PER_TOKEN = 3
 MAX_QUESTION = 2_000
 MAX_MANDATE_ID = 128
+# Tool calls the loop runs: per turn and per request (review finding sec-2).
+MAX_CALLS_PER_TURN = 8
+MAX_CALLS_PER_REQUEST = 24
 # Counts on the span are capped, lists shortened: the model steers them.
 SPAN_COUNT_CAP = 50
 SPAN_LIST_CAP = 20
@@ -115,7 +127,7 @@ class Usage:
 
 @dataclass(frozen=True, slots=True)
 class LoopResult:
-    answer: str
+    answer: str = field(repr=False)  # client data: never in a repr (review finding sec-10)
     citations: tuple[str, ...]
     grounding: GroundingReport
     usage: Usage
@@ -204,7 +216,7 @@ def _user_block_ok(block: object) -> bool:
             set(block) <= {"type", "tool_use_id", "content", "is_error"}
             and isinstance(block.get("tool_use_id"), str)
             and isinstance(block.get("content"), str)
-            and block.get("is_error", False) in (True, False)
+            and type(block.get("is_error", False)) is bool  # 1 == True (review sec-11)
         )
     return False
 
@@ -231,8 +243,9 @@ def check_messages(messages: Sequence[Mapping[str, Any]]) -> None:
 class _Record:
     """What the span gets: names, types and counts only."""
 
-    tools: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
+    tools: set[str] = field(default_factory=set)
+    errors: set[str] = field(default_factory=set)
+    calls: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
     turns: int = 0
@@ -246,13 +259,20 @@ def _identifier(name: object) -> str:
     return name if isinstance(name, str) and _IDENTIFIER.fullmatch(name) else "other"
 
 
+_MANDATE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+
+
 def _check_inputs(question: object, mandate_id: object) -> None:
     if type(question) is not str or not question.strip() or len(question) > MAX_QUESTION:
         raise ValueError(f"the question is a str of 1 to {MAX_QUESTION} characters")
     if mandate_id is not None and (
-        type(mandate_id) is not str or not mandate_id or len(mandate_id) > MAX_MANDATE_ID
+        type(mandate_id) is not str
+        or len(mandate_id) > MAX_MANDATE_ID
+        or not _MANDATE_ID.fullmatch(mandate_id)
     ):
-        raise ValueError(f"a mandate id is a str of 1 to {MAX_MANDATE_ID} characters")
+        raise ValueError(
+            f"a mandate id has up to {MAX_MANDATE_ID} letters, digits, - and _ (review spec-10)"
+        )
 
 
 def _first_message(question: str, mandate_id: str | None) -> str:
@@ -260,7 +280,11 @@ def _first_message(question: str, mandate_id: str | None) -> str:
 
 
 def _tokens(text: str) -> int:
-    return -(-len(text) // CHARS_PER_TOKEN)  # rounded up
+    """A high estimate: ASCII at CHARS_PER_TOKEN, and every UTF-8 byte of anything else
+    a token of its own (review finding sec-3)."""
+    ascii_count = sum(1 for char in text if char < "\x80")
+    other = len(text.encode("utf-8")) - ascii_count
+    return -(-ascii_count // CHARS_PER_TOKEN) + other  # rounded up
 
 
 def _estimate(request: Mapping[str, Any]) -> int:
@@ -293,22 +317,35 @@ def _transient(error: ModelCallError) -> bool:
     )
 
 
+def _cause(error: ModelCallError) -> str:
+    kind = _identifier(error.kind)
+    if error.kind == "status" and type(error.status_code) is int:
+        return f"{kind}.{error.status_code}"
+    return f"{kind}.{_identifier(error.cause)}" if error.cause else kind
+
+
 def _call(
     client: ModelClient, budget: RequestBudget, request: dict[str, Any], record: _Record
 ) -> Mapping[str, Any]:
+    """One reply, with one immediate retry for a transient failure. A backoff would need
+    a clock, which app/ does not read (tests/test_import_allowlist.py)."""
     worst = _estimate(request) + MAX_TOKENS
     for attempt in range(ATTEMPTS):
         try:
             return client.create(**request)
         except ModelCallError as error:
-            kind = _identifier(error.kind)
-            record.cause = f"{kind}.{_identifier(error.cause)}" if error.cause else kind
+            cause = _cause(error)
             # It may have billed: input plus max_tokens, whatever is left at most.
             budget.charge(min(worst, budget.remaining()))
             retry = _transient(error) and attempt + 1 < ATTEMPTS
             if not retry or budget.remaining() < worst:
+                record.cause = cause
                 break
     raise LoopError("model_call")
+
+
+def _refused(name: str, errors: list[dict[str, Any]]) -> Untrusted[Any]:
+    return Untrusted({"errors": errors}, Provenance(tool=name, record_ids=()))
 
 
 def _tool(
@@ -323,25 +360,29 @@ def _tool(
     call = registry.validate_call(block["name"], block["input"])
     if isinstance(call, RejectedCall):
         if call.tool is not None:
-            record.tools.append(call.tool)
-        record.errors += [_identifier(error.type) for error in call.errors]
+            record.tools.add(call.tool)
+        record.errors |= {_identifier(error.type) for error in call.errors}
         errors = [
             {"type": error.type, "loc": list(error.loc), "msg": error.msg} for error in call.errors
         ]
-        provenance = Provenance(tool=call.tool or UNKNOWN_TOOL, record_ids=())
-        return Untrusted({"errors": errors}, provenance), True
+        return _refused(call.tool or UNKNOWN_TOOL, errors), True
     name = call.spec.name
-    record.tools.append(name)
+    record.tools.add(name)
+    record.calls += 1
     try:
         result = handlers[name](advisor, call.arguments)
-    except Exception as error:  # noqa: BLE001 - the model learns the type, the turn goes on
-        cause = _identifier(type(error).__name__)
-        record.errors.append(cause)
-        failure = {"errors": [{"type": "tool_failed", "exception": cause}]}
-        return Untrusted(failure, Provenance(tool=name, record_ids=())), True
-    if type(result) is not Untrusted:
+    except Exception as error:  # noqa: BLE001 - the model learns that it failed, the turn goes on
+        # The class name goes to the span only (review finding sec-8).
+        record.errors.add(_identifier(type(error).__name__))
+        return _refused(name, [{"type": "tool_failed", "msg": "the tool failed"}]), True
+    if type(result) is not Untrusted or result.provenance.tool != name:
         raise LoopError("handler")
     return result, False
+
+
+def _over_limit(block: Mapping[str, Any], record: _Record, in_turn: int) -> bool:
+    """Whether this call is past MAX_CALLS_PER_TURN or MAX_CALLS_PER_REQUEST."""
+    return in_turn >= MAX_CALLS_PER_TURN or record.calls >= MAX_CALLS_PER_REQUEST
 
 
 def run(
@@ -383,36 +424,39 @@ def run(
                 "max_tokens": MAX_TOKENS,
             }
             if budget.remaining() < _estimate(request) + MAX_TOKENS:
-                record.stop = "budget"
+                answer, record.stop = "", "budget"
                 break
             check_messages(messages)
             reply = _call(client, budget, request, record)
             record.turns += 1
+            # The usage first: a refused reply was paid for too (review finding sec-4).
+            usage = reply.get("usage")
+            spent_in, spent_out = _usage(usage)
+            record.input_tokens += spent_in
+            record.output_tokens += spent_out
+            if reply.get("model") != model:
+                raise LoopError("protocol")  # cost and trace would name another model
+            try:
+                cost += cost_usd(model, usage)  # type: ignore[arg-type]
+            except PriceUnknown:
+                raise LoopError("price_unknown") from None
             content = reply.get("content")
             if not isinstance(content, list):
                 raise LoopError("protocol")
             if not all(_assistant_block_ok(block) for block in content):
                 raise LoopError("message_refused")
-            usage = reply.get("usage")
-            spent_in, spent_out = _usage(usage)
-            record.input_tokens += spent_in
-            record.output_tokens += spent_out
-            try:
-                cost += cost_usd(model, usage)  # type: ignore[arg-type]
-            except PriceUnknown:
-                raise LoopError("price_unknown") from None
-            answer = _text(content)
-            reason = reply.get("stop_reason")
             try:
                 budget.charge(spent_in + spent_out)
+                over_budget = False
             except BudgetExceeded:
-                record.stop = "budget"
-                break
+                over_budget = True
+            reason = reply.get("stop_reason")
+            # A finished reply keeps its stop; the budget only stops further calls.
             if reason in ("end_turn", "stop_sequence"):
-                record.stop = "end_turn"
+                answer, record.stop = _text(content), "end_turn"
                 break
             if reason in ("max_tokens", "model_context_window_exceeded"):
-                record.stop = "budget"
+                answer, record.stop = _text(content), "budget"
                 break
             if reason == "refusal":
                 answer, record.stop = "", "refusal"
@@ -422,13 +466,22 @@ def run(
             calls = [block for block in content if block["type"] == "tool_use"]
             if not calls:
                 raise LoopError("protocol")
+            # The text before a tool call is no answer (review finding spec-8).
+            if over_budget:
+                answer, record.stop = "", "budget"
+                break
             if record.turns >= MAX_TURNS:
-                record.stop = "max_turns"
+                answer, record.stop = "", "max_turns"
                 break
             messages.append({"role": "assistant", "content": content})
             results = []
-            for block in calls:
-                item, failed = _tool(block, advisor, registry, handlers, record)
+            for in_turn, block in enumerate(calls):
+                if _over_limit(block, record, in_turn):
+                    record.errors.add("call_limit")
+                    limit = [{"type": "call_limit", "msg": "too many tool calls"}]
+                    item, failed = _refused(UNKNOWN_TOOL, limit), True
+                else:
+                    item, failed = _tool(block, advisor, registry, handlers, record)
                 rendered = wrap(item)
                 budget.charge(_tokens(rendered))  # BudgetExceeded ends the turn below
                 if not failed:
@@ -437,11 +490,15 @@ def run(
                 results.append(result | ({"is_error": True} if failed else {}))
             messages.append({"role": "user", "content": results})
     except BudgetExceeded:
-        record.stop = "budget"
+        answer, record.stop = "", "budget"
     except LoopError as error:
         record.error = error.kind
         _trace(record, model)
         raise
+    except Exception as error:  # noqa: BLE001 - traced as its class, raised without its text
+        record.error, record.cause = "internal", _identifier(type(error).__name__)
+        _trace(record, model)
+        raise LoopError("internal") from None
     record.report = grounding.check(answer, sources)
     _trace(record, model)
     return LoopResult(
@@ -461,6 +518,8 @@ def _trace(record: _Record, model: str) -> None:
     if not span.is_recording():
         return
     keys = tracing.LOOP
+    # Sorted sets: the model chooses which calls fail and in which order, so neither the
+    # order nor the repetition goes on the span (review finding sec-1).
     attributes: dict[str, Any] = {
         keys["prompt_version"]: PROMPT_VERSION,
         keys["prompt_sha256"]: PROMPT_SHA256,
@@ -468,8 +527,8 @@ def _trace(record: _Record, model: str) -> None:
         keys["input_tokens"]: record.input_tokens,
         keys["output_tokens"]: record.output_tokens,
         keys["turns"]: record.turns,
-        keys["tools"]: record.tools[:SPAN_LIST_CAP],
-        keys["tool_errors"]: record.errors[:SPAN_LIST_CAP],
+        keys["tools"]: sorted(record.tools)[:SPAN_LIST_CAP],
+        keys["tool_errors"]: sorted(record.errors)[:SPAN_LIST_CAP],
     }
     if record.stop is not None:
         attributes[keys["stop"]] = record.stop

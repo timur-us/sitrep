@@ -30,11 +30,11 @@ Timur's decisions after Fable's security review of PR 6:
 - **Identity words.** An argument name is refused when, after NFKC, case folding and removing separators, it contains one of the plan's terms. That is stricter than the plan's camelCase split, which lets `advisorid` pass; the cost is refusing names such as `username`.
 - **`Proposal`** is the result of every DRAFT and SIDE_EFFECT tool: the id of a pending approval, nothing that approves it.
 - **Error locations stay** in `CallError`, so the model sees which key was refused; traces record error types only (an M1 test).
-- **Approval tokens** are designed in M1's ADR, leaning to opaque random tokens stored as a hash, which need no signing key.
+- **Approval tokens:** ADR 0011.
 
 ### Amendment (PR 10, 2026-11-10)
 
-- `app/harness/loop.py` builds this: READ tools only, a block allowlist, `max_turns` and a token budget; stops and retries in its docstring.
+- `app/harness/loop.py`: READ tools only; a block allowlist; 6 turns, 8 calls per turn, 24 per request, 150,000 tokens. `max_tokens` stops as "budget"; `pause_turn` fails. One retry, not for timeouts. No refusal fallback (ADR 0003).
 
 ## Consequences
 
