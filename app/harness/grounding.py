@@ -16,18 +16,33 @@ blocking is a policy decision.
 The report holds counts and the ids of cited records that the tools returned. It never
 holds a figure, a source text, or an id that only the model wrote: such an id is model
 output and could carry anything, so it is counted and dropped (ADR 0007, amended in M1
-PR 9).
+PR 9). A known id is listed once; an unknown one is counted at every mention, and a
+marker's parts are split at commas and semicolons. The counts are the model's to steer,
+so traces should not carry them raw (a handover to M1 PR 10).
 
 What the guard does not see (stated, not hidden):
 - figures written as words ("one million");
 - plain integers without a separator, currency, percent sign or scale word: counts,
   years, list numbers;
-- dates without a day ("March 2026");
-- digits grouped with a plain space (`1 250 000`): the last group is read alone.
+- dates without a day ("March 2026"), and two-digit years;
+- digits grouped with a plain space (`1 250 000`): the groups are read one by one, so
+  `EUR 9 999 999` reads as `EUR 9`;
+- digits other than ASCII 0-9 (full-width, Arabic-Indic), and a figure split by a
+  zero-width character or a soft hyphen;
+- a figure inside a citation marker, which counts as a cited id instead;
+- a number of more than MAX_NUMBER characters;
+- a bare `m`, `k` or `bn` without a currency, which is a unit, not a scale ("a 10m
+  hedge").
 
 What it does not compare:
 - the sign and the direction: `-3,2 %` and "fell by 3.2%" match;
-- whether a figure belongs to the client, the date or the field the answer names.
+- whether a figure belongs to the client, the date or the field the answer names;
+- the kind, where a source gives a plain number: a source field `3` grounds `3 %` and
+  `EUR 3`, and a bare number in an answer matches a source figure of any kind;
+- the order of day and month in a slashed date, which reads both ways.
+
+A month or scale word that the patterns match but the tables do not know (a look-alike
+letter) reads as no value: the figure counts as unmatched instead of disappearing.
 
 Rounding counts against a figure: `EUR 1.3 million` does not match
 `EUR 1,250,000.00`. A separator that reads both ways (`1.250`) matches either reading.
@@ -36,8 +51,10 @@ Rounding counts against a figure: `EUR 1.3 million` does not match
 from __future__ import annotations
 
 import datetime
+import decimal
 import re
-from collections.abc import Callable, Iterable, Sequence
+import unicodedata
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -64,7 +81,7 @@ class GroundingReport:
 
 # Grouping and decimal separators: the comma and the point read both ways; the
 # apostrophes (Swiss) and the no-break and thin spaces only group.
-_GROUPING_ONLY = "'’   "
+_GROUPING_ONLY = "'\u2019\u00a0\u202f\u2009"
 _SEPARATORS = ".," + _GROUPING_ONLY
 _SPLIT = re.compile(f"[{re.escape(_SEPARATORS)}]")
 
@@ -88,11 +105,17 @@ _SCALE_WORDS = {
 _SCALE_LETTERS = {"k": 3, "m": 6, "bn": 9}
 _SCALE_WORD = "|".join(sorted(_SCALE_WORDS, key=len, reverse=True))
 
+# At most this many characters in one number: a longer run is no figure. The cap keeps
+# every scan short (review finding sec-2) and every value inside _EXACT's precision.
+MAX_NUMBER = 48
+_EXACT = decimal.Context(prec=2 * MAX_NUMBER)  # private: the thread's context rounds
+
 _FIGURE = re.compile(
     rf"""
-    (?<![\w.,'’])
+    (?<![\w.,'\u2019])
+    (?<![0-9][\u00a0\u202f\u2009])
     (?:(?P<pre>{_CURRENCY})\s?)?
-    (?P<num>[0-9][0-9{re.escape(_SEPARATORS)}]*+)
+    (?P<num>[0-9][0-9{re.escape(_SEPARATORS)}]{{0,{MAX_NUMBER - 1}}}+)
     (?:\s?(?P<word>{_SCALE_WORD})\.?(?!\w)|(?P<letter>bn|m|k)(?!\w))?
     (?:\s?(?P<post>{_CURRENCY}|{_PERCENT}))?
     (?!\w)
@@ -180,8 +203,16 @@ def _date(year: str, month: str | int, day: str) -> datetime.date | None:
         return None
 
 
+def _fold(word: str) -> str:
+    """word as the tables spell it. The patterns match case-insensitively by Unicode
+    rules, so a long s or a dotless i matches too; casefold() and NFKC bring most such
+    words back, and a word still unknown reads as no value (review finding sec-1)."""
+    return unicodedata.normalize("NFKC", word).casefold()
+
+
 def _named(match: re.Match[str]) -> Iterable[datetime.date | None]:
-    yield _date(match["year"], _MONTHS[match["month"].lower()], match["day"])
+    month = _MONTHS.get(_fold(match["month"]))
+    yield None if month is None else _date(match["year"], month, match["day"])
 
 
 def _numeric(match: re.Match[str]) -> Iterable[datetime.date | None]:
@@ -277,21 +308,29 @@ def _figures(text: str, *, plain: bool) -> list[_Figure]:
 
 def _number(match: re.Match[str], *, plain: bool) -> _Figure | None:
     raw = match["num"].rstrip(_SEPARATORS)
-    values = _values(raw)
-    if match["word"]:
-        exponent = _SCALE_WORDS[match["word"].lower()]
-    elif match["letter"]:
-        exponent = _SCALE_LETTERS[match["letter"].lower()]
-    else:
-        exponent = 0
-    values = frozenset(value.scaleb(exponent) for value in values)
     post = match["post"] or ""
-    if post and not re.fullmatch(_CURRENCY, post, re.IGNORECASE):
+    percent = bool(post) and not re.fullmatch(_CURRENCY, post, re.IGNORECASE)
+    currency = match["pre"] or ("" if percent else post)
+    exponent: int | None = 0
+    if match["word"]:
+        exponent = _SCALE_WORDS.get(_fold(match["word"]).rstrip("."))
+    elif match["letter"] and currency:
+        # A bare letter is a scale beside a currency only: "10m" alone is ten metres.
+        exponent = _SCALE_LETTERS[match["letter"].lower()]
+    # An unknown scale word (a folded look-alike) reads as no value, so the figure counts
+    # as unmatched instead of disappearing (review finding sec-1).
+    values = (
+        frozenset(value.scaleb(exponent, _EXACT) for value in _values(raw))
+        if exponent is not None
+        else frozenset()
+    )
+    if percent:
         return _Figure("percent", numbers=values)
-    currency = match["pre"] or post
     if currency:
         code = _CURRENCIES.get(currency.lower(), currency.upper())
         return _Figure("money", currency=code, numbers=values)
+    if exponent is None:
+        return _Figure("number")
     # A bare number is a figure when it has a separator or a scale; an unreadable one
     # (1.2.3) is not. The sources' side keeps plain integers, which an answer's
     # "EUR 1,250,000" may come from.
@@ -300,10 +339,11 @@ def _number(match: re.Match[str], *, plain: bool) -> _Figure | None:
     return _Figure("number", numbers=values)
 
 
-def check(answer: str, sources: Sequence[Untrusted[Any]]) -> GroundingReport:
+def check(answer: str, sources: Iterable[Untrusted[Any]]) -> GroundingReport:
     """The grounding of answer against this request's tool results; see the module."""
     if type(answer) is not str:
         raise TypeError(f"check() takes the answer as a str, not {type(answer).__name__}")
+    sources = tuple(sources)  # read three times below (review finding sec-5)
     for item in sources:
         if type(item) is not Untrusted:
             raise TypeError(f"check() takes Untrusted sources, not {type(item).__name__}")

@@ -11,14 +11,15 @@ accident:
 - it cannot be subclassed, so no subclass can add a rendering;
 - it cannot be pickled, copied or deep-copied.
 
-wrap() is the one way to the text: it renders the value inside an `<untrusted …>`
+wrap() is the way to the text for the model: it renders the value inside an `<untrusted …>`
 delimiter that names the tool and the records it came from. The text and the provenance
 are escaped, so a document that says `</untrusted>` cannot close the delimiter and write
 outside it. The cost: the model reads `&`, `<` and `>` as entities (`R&amp;D`, `&lt;5 %`)
 and may quote them so; the number guard compares against the source, not this text.
 A str is rendered as it is; anything else as JSON through pydantic. M2 adds
-the canary scan and measures the provenance rendering against the red-team corpus; M0
-fixes that wrap() is the only way out and that the text stays inside.
+the canary scan and measures the provenance rendering against the red-team corpus. M0
+fixed that wrap() is the only way out and that the text stays inside; M1 PR 9 adds the
+second, source_text(), for the number guard alone.
 
 Python cannot hide the value: `_value` is reachable. The rule is that code
 outside this module never reads it. The number guard, the one other reader, goes through

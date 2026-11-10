@@ -377,6 +377,8 @@ MORE_MATCHES = {
     "slashed, day first": ("on 5/3/2026", "5 March 2026"),
     "slashed, month first": ("on 03/05/2026", "5 March 2026"),
     "iso timestamp in a source": ("on 5 March 2026", "2026-03-05T10:00:00Z"),
+    # sec-1: a long s folds back to s, so the month reads as itself.
+    "a folded month": ("am 5 \u017fep 2026", "5 September 2026"),
 }
 
 
@@ -400,7 +402,6 @@ MORE_MISSES = {
     "a mixed malformed amount": ("EUR 1,250.000,5", "EUR 1,250,000.50"),
     # test-8 and sec-1: no reading, still a figure.
     "an impossible slashed date": ("on 13/13/2026", "5 March 2026"),
-    "a folded month": ("am 5 \u017fep 2026", "5 September 2026"),
     "a folded scale": ("1,2 M\u0131o. EUR", "EUR 1,200,000.00"),
     "a folded scale with a dot": ("1,2 M\u0130o. EUR", "EUR 1,200,000.00"),
 }

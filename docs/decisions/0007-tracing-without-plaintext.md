@@ -43,7 +43,7 @@ SITREP (situation report) will carry client data and prompts through every reque
 
 ## Sources
 
-- M1 PR 5: the plaintext refusal under header capture and the hooks from Watch. Timur's answer 5 to the PR 7 questions, `docs/plans/m0-foundation.md` (amendment recorded in PR 9), and `docs/plans/m1-mvp-core.md`, PR 5 (2026-11-08).
+- M1 PR 5: the plaintext refusal under header capture and the hooks from Watch; `TRACE_PLAINTEXT` is read as `SITREP_TRACE_PLAINTEXT` since ADR 0009. Timur's answer 5 to the PR 7 questions, `docs/plans/m0-foundation.md` (amendment recorded in PR 9), and `docs/plans/m1-mvp-core.md`, PR 5 (2026-11-08).
 - M1 PR 9: the grounding report, built for traces; an unknown cited id is model output, so it is counted and dropped. Its trace keys are approved in PR 10. `docs/plans/m1-mvp-core.md`, PR 9 and default 14 (2026-11-08).
 - CLAUDE.md, rule 10 (2026-10-27).
 - `docs/threat-model.md`, Eve and the audit trail (2026-10-27).

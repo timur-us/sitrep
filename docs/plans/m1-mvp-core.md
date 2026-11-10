@@ -414,6 +414,7 @@ New for two sessions:
 **Files.**
 - `app/harness/grounding.py`: it finds figures in DE and EN formats (amounts, percentages, dates) and checks each against the sources of this request, and each cited record id against the ids seen. The result holds counts and ids, never figures.
 - `app/harness/context.py`: `source_text()`, whose only caller is `grounding.py` (a scan pins it).
+- Amended (Timur, 2026-11-10): an ADR 0007 amendment for the report's shape (counts and the cited ids a tool returned). PR 10 amends ADR 0007 for the trace keys, and `prompt.py` takes the citation form from `grounding.CITATION_FORM`.
 
 **Tests that fail before the change.**
 - A figure that appears in the sources passes; a figure that appears nowhere is counted; `1.250.000,00 EUR` matches `1,250,000.00`.
