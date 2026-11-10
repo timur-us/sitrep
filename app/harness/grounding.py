@@ -30,7 +30,9 @@ What the guard does not see (stated, not hidden):
 - digits other than ASCII 0-9 (full-width, Arabic-Indic), and a figure split by a
   zero-width character or a soft hyphen;
 - a figure inside a citation marker, which counts as a cited id instead;
-- a number of more than MAX_NUMBER characters;
+- a number of more than MAX_NUMBER characters, and a figure glued to such a run;
+- which of two numbers a currency between them belongs to: in "2 EUR 9,999,999" it
+  goes to the 2, and the 9,999,999 is bare;
 - a bare `m`, `k` or `bn` without a currency, which is a unit, not a scale ("a 10m
   hedge").
 
@@ -42,7 +44,8 @@ What it does not compare:
 - the order of day and month in a slashed date, which reads both ways.
 
 A month or scale word that the patterns match but the tables do not know (a look-alike
-letter) reads as no value: the figure counts as unmatched instead of disappearing.
+letter) reads as no value: the figure counts as unmatched instead of disappearing. A run
+over MAX_NUMBER characters does disappear: it is no figure at all.
 
 Rounding counts against a figure: `EUR 1.3 million` does not match
 `EUR 1,250,000.00`. A separator that reads both ways (`1.250`) matches either reading.
@@ -113,8 +116,9 @@ _EXACT = decimal.Context(prec=2 * MAX_NUMBER)  # private: the thread's context r
 _FIGURE = re.compile(
     rf"""
     (?<![\w.,'\u2019])
-    (?<![0-9][\u00a0\u202f\u2009])
-    (?:(?P<pre>{_CURRENCY})\s?)?
+    # A number starts after a digit and a no-break or thin space only behind a
+    # currency: "3\u00a0$5" is a dollar figure (review round 2, N-1).
+    (?:(?P<pre>{_CURRENCY})\s?|(?<![0-9][\u00a0\u202f\u2009]))
     (?P<num>[0-9][0-9{re.escape(_SEPARATORS)}]{{0,{MAX_NUMBER - 1}}}+)
     (?:\s?(?P<word>{_SCALE_WORD})\.?(?!\w)|(?P<letter>bn|m|k)(?!\w))?
     (?:\s?(?P<post>{_CURRENCY}|{_PERCENT}))?
@@ -316,7 +320,7 @@ def _number(match: re.Match[str], *, plain: bool) -> _Figure | None:
         exponent = _SCALE_WORDS.get(_fold(match["word"]).rstrip("."))
     elif match["letter"] and currency:
         # A bare letter is a scale beside a currency only: "10m" alone is ten metres.
-        exponent = _SCALE_LETTERS[match["letter"].lower()]
+        exponent = _SCALE_LETTERS.get(_fold(match["letter"]))
     # An unknown scale word (a folded look-alike) reads as no value, so the figure counts
     # as unmatched instead of disappearing (review finding sec-1).
     values = (
@@ -327,7 +331,7 @@ def _number(match: re.Match[str], *, plain: bool) -> _Figure | None:
     if percent:
         return _Figure("percent", numbers=values)
     if currency:
-        code = _CURRENCIES.get(currency.lower(), currency.upper())
+        code = _CURRENCIES.get(_fold(currency), currency.upper())
         return _Figure("money", currency=code, numbers=values)
     if exponent is None:
         return _Figure("number")
