@@ -333,24 +333,27 @@ def best_of_three(text: str) -> float:
     return min(times)
 
 
+# (text for n, n): n is sized so that the small run takes some 20 ms or more, which
+# keeps the ratio out of timer noise (review round 2).
 HOSTILE = {
     # Review finding sec-2: no-break spaces between digits restarted the scan at every
     # digit, which made the cost quadratic.
-    "no-break spaces": lambda n: "1\u00a0" * n + "x",
-    "thin spaces": lambda n: "1\u2009" * n + "x",
-    "apostrophes": lambda n: "1'" * n + "x",
-    "points": lambda n: "1." * n + "x",
-    "unclosed markers": lambda n: "[source:" * n + " 1,0" * n,
-    "months": lambda n: " 5 März" * n,
-    "currencies": lambda n: "EUR " * n + "5",
+    "no-break spaces": (lambda n: "1\u00a0" * n + "x", 20_000),
+    "thin spaces": (lambda n: "1\u2009" * n + "x", 20_000),
+    "narrow no-break spaces": (lambda n: "1\u202f" * n + "x", 20_000),
+    "apostrophes": (lambda n: "1'" * n + "x", 20_000),
+    "points": (lambda n: "1." * n + "x", 20_000),
+    "unclosed markers": (lambda n: "[source:" * n + " 1,0" * n, 5_000),
+    "months": (lambda n: " 5 März" * n, 5_000),
+    "currencies": (lambda n: "EUR " * n + "5", 20_000),
 }
 
 
-@pytest.mark.parametrize("build", list(HOSTILE.values()), ids=list(HOSTILE))
-def test_hostile_text_is_checked_in_linear_time(build: Any) -> None:
-    small, large = best_of_three(build(4_000)), best_of_three(build(16_000))
+@pytest.mark.parametrize(("build", "n"), list(HOSTILE.values()), ids=list(HOSTILE))
+def test_hostile_text_is_checked_in_linear_time(build: Any, n: int) -> None:
+    small, large = best_of_three(build(n)), best_of_three(build(4 * n))
     # Four times the text: about four times the time when linear, sixteen when quadratic.
-    assert large < max(small * 9, 0.05), (small, large)
+    assert large < small * 9, (small, large)
 
 
 # --- Review round 1 (findings test-4 to test-14, sec-1, sec-5, sec-6) ----------------
@@ -379,6 +382,8 @@ MORE_MATCHES = {
     "iso timestamp in a source": ("on 5 March 2026", "2026-03-05T10:00:00Z"),
     # sec-1: a long s folds back to s, so the month reads as itself.
     "a folded month": ("am 5 \u017fep 2026", "5 September 2026"),
+    # Review round 2: the Kelvin sign folds to k under NFKC.
+    "a kelvin sign in a month": ("am 5 O\u212aT 2026", "5 October 2026"),
 }
 
 
@@ -404,6 +409,11 @@ MORE_MISSES = {
     "an impossible slashed date": ("on 13/13/2026", "5 March 2026"),
     "a folded scale": ("1,2 M\u0131o. EUR", "EUR 1,200,000.00"),
     "a folded scale with a dot": ("1,2 M\u0130o. EUR", "EUR 1,200,000.00"),
+    # Review round 2: mutants that survived round 1.
+    "a dotless i in a month": ("am 5 Apr\u0131l 2026", "5 April 2026"),
+    "a folded scale without a currency": ("1,2 M\u0131o.", "1.200.000"),
+    # Review round 2, N-1: a digit and a no-break space before a currency sign.
+    "a currency after a spaced digit": ("Konto 3\u00a0$5,000,000", "EUR 5,000,000.00"),
 }
 
 
@@ -428,7 +438,14 @@ def test_more_of_what_is_not_a_figure(answer: str) -> None:
     assert report(answer, source(ENGLISH_SOURCE)).figures == 0
 
 
-FOLDED = ("am 5 \u017fep 2026", "1,2 M\u0131o. EUR", "5 tau\u017fend EUR", "1,2 M\u0130o. EUR")
+FOLDED = (
+    "am 5 \u017fep 2026",
+    "1,2 M\u0131o. EUR",
+    "5 tau\u017fend EUR",
+    "1,2 M\u0130o. EUR",
+    "am 5 Apr\u0131l 2026",
+    "1,2 M\u0131o.",
+)
 
 
 @pytest.mark.parametrize("text", FOLDED)
@@ -506,7 +523,7 @@ def test_sources_may_be_any_iterable() -> None:
 def test_check_takes_a_str_answer_only() -> None:
     # test-11.
     for answer in (b"EUR 5", None, 5):
-        with pytest.raises(TypeError):
+        with pytest.raises(TypeError, match="answer as a str"):
             check(answer, [])  # type: ignore[arg-type]
 
 

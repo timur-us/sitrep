@@ -75,7 +75,10 @@ def scan(source: str, rel: str) -> tuple[list[str], Counter[str]]:
             found.append(f"{where}: .{NAME} used")
         elif (
             isinstance(node, ast.ImportFrom)
-            and node.module == "app.harness.context"
+            and (
+                node.module == "app.harness.context"
+                or (node.level and (node.module or "").rsplit(".", 1)[-1] == "context")
+            )
             and any(alias.name == "*" for alias in node.names)
         ):
             found.append(f"{where}: imports * from app.harness.context")
@@ -141,6 +144,7 @@ PLANTED = [
     (CONTEXT, "__all__ = ['source_text']\n", "a string names"),
     ("app/harness/loop.py", "from app.harness.context import *\n", "imports *"),
     (GROUNDING, "from app.harness.context import *\n", "imports *"),
+    ("app/harness/loop.py", "from .context import *\n", "imports *"),
 ]
 
 
