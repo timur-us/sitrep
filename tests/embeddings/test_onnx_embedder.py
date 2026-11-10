@@ -48,9 +48,23 @@ PROBE = (
     " print(json.dumps({'vectors': v, 'modules': sorted({m.partition('.')[0]"
     " for m in sys.modules})}))"
 )
-# Top-level modules that download or connect; none may be loaded by the embedder.
+# Top-level modules that download or connect; none may be loaded by the embedder. Since
+# M1 PR 6 the model client's SDK and its HTTP library are installed (ADR 0012), so they
+# are named too.
 NETWORK_MODULES = frozenset(
-    {"aiohttp", "fsspec", "hf_xet", "httpcore", "httpx", "huggingface_hub", "requests", "urllib3"}
+    {
+        "aiohttp",
+        "anthropic",
+        "fsspec",
+        "hf_xet",
+        "httpcore",
+        "httpcore2",
+        "httpx",
+        "httpx2",
+        "huggingface_hub",
+        "requests",
+        "urllib3",
+    }
 )
 
 # (query, paraphrase, unrelated): e5's cosines sit close together, so the margin is

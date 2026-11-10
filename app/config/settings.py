@@ -12,17 +12,23 @@ and nothing else: no password, no hostaddr, no options, no service (ADR 0008). A
 parameter would come from libpq's environment, so all four are required. Each field
 names its own role and the app's database. URLs are parsed by libpq itself, so the
 check reads them as the connection will. A rejected value is not echoed in the error.
+
+The model API key (M1 PR 6, ADR 0012) is a SecretStr read from ANTHROPIC_API_KEY, the one
+name without the prefix; only the model client's factory reads its value. While
+PYDANTIC_SETTINGS_DEBUG is set, in any case and to any value, Settings refuses to build
+before any source is read: pydantic-settings would log every raw value, the key's too.
 """
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Mapping
 
 from psycopg import ProgrammingError
 from psycopg.conninfo import conninfo_to_dict
-from pydantic import Field, ValidationInfo, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from app.config import branding
 from app.db import names
@@ -35,9 +41,33 @@ LOOPBACK = "127.0.0.1"
 ENV_PREFIX = f"{branding.SLUG.upper()}_"
 
 
+# The model API key keeps its own name (the M1 plan's default 7): the secret hook and the
+# GitHub checklist key on it. It is the one setting without the prefix.
+KEY_FIELD = "anthropic_api_key"
+KEY_VARIABLE = "ANTHROPIC_API_KEY"
+# The runtime model (ADR 0003), read from the prefixed variable (env_name("model"));
+# app/harness/model_client.py refuses one without a price.
+DEFAULT_MODEL = "claude-sonnet-5-5"
+# What a key may look like: printable ASCII, no space. Anything else could not be sent as
+# a header, and the HTTP library's error would quote it.
+KEY_SHAPE = re.compile(r"[\x21-\x7e]+")
+# pydantic-settings logs every source's raw values at DEBUG while this is set to a truthy
+# value, a dotenv key included (review finding sec-3 of M1 PR 3).
+SETTINGS_DEBUG = "PYDANTIC_SETTINGS_DEBUG"
+
+
 def env_name(field: str) -> str:
     """The environment variable a settings field is read from."""
-    return ENV_PREFIX + field.upper()
+    return KEY_VARIABLE if field == KEY_FIELD else ENV_PREFIX + field.upper()
+
+
+class SettingsRefused(ValueError):
+    """An environment Settings refuses to build in. The message names, never values."""
+
+
+def settings_debug_variables(environ: Mapping[str, str]) -> list[str]:
+    """The names, in any case, under which the settings debug switch is set."""
+    return sorted(name for name in environ if name.upper() == SETTINGS_DEBUG)
 
 
 # The fields renamed in M1 PR 3. Their old names may still be exported for this project,
@@ -161,6 +191,42 @@ class Settings(BaseSettings):
     # ADR 0009): empty for exactly 127.0.0.1:<port>; the image's smoke test names its
     # published address, M3 the Azure host. Anything else is 400.
     allowed_hosts: str = Field(default="", validation_alias=env_name("allowed_hosts"))
+    # The model (ADR 0012), from the prefixed variable like every other setting.
+    model: str = Field(default=DEFAULT_MODEL, min_length=1)
+    # The model API key, from ANTHROPIC_API_KEY (no prefix). Empty is no key. A SecretStr:
+    # repr, str and JSON show stars; only the model client's factory reads the value.
+    anthropic_api_key: SecretStr | None = Field(default=None, validation_alias=KEY_VARIABLE)
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Asked before any source is read, and so before pydantic-settings' debug log of
+        # their values: with the switch set at all, whatever its value, nothing is read.
+        found = settings_debug_variables(os.environ)
+        if found:
+            raise SettingsRefused(
+                f"{', '.join(found)} is set: pydantic-settings would log every setting's"
+                f" value, {KEY_VARIABLE} included"
+            )
+        return init_settings, env_settings, dotenv_settings, file_secret_settings
+
+    @field_validator(KEY_FIELD, mode="before")
+    @classmethod
+    def _empty_is_no_key(cls, value: object) -> object:
+        return None if value == "" else value
+
+    @field_validator(KEY_FIELD)
+    @classmethod
+    def _key_shape(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None and not KEY_SHAPE.fullmatch(value.get_secret_value()):
+            raise ValueError("not a key: printable ASCII without spaces only")
+        return value
 
     @field_validator("database_url", "migration_database_url")
     @classmethod

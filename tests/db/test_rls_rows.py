@@ -15,6 +15,11 @@ and a table without a row factory fails, so a new table cannot skip these checks
   the real search statement and call set_config, are proven live through a tests-only
   ClientCursor with the payload spliced into the SQL text. Bound as a parameter, the
   same payloads return the advisor's own rows only and leave the setting alone.
+- Product sheets, the one global table (ADR 0010): every advisor reads every sheet, and
+  nothing is read without an advisor; the app role writes none; the owner writes them
+  with or without an advisor, which is how the loader replaces them. An advisor id no
+  login produces still reads the sheets, and nothing else: the policy asks for an
+  advisor transaction, not for a known advisor.
 """
 
 from __future__ import annotations
@@ -28,9 +33,12 @@ from forged_payloads import BODIES, PAYLOAD_IDS, PAYLOADS, SEARCH, SETTING, WORD
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 from seed_rows import (
+    ADVISOR_TABLES,
     FACTORIES,
     MINE,
     OTHER,
+    SHEET,
+    SHEETS,
     TABLES,
     count,
     discovered_tables,
@@ -42,6 +50,7 @@ from seed_rows import (
 )
 
 from app.auth.identity import VerifiedAdvisor, issue
+from app.config import branding
 from app.config.settings import Settings
 from app.db import names
 from app.db.connect import connect
@@ -50,6 +59,7 @@ from app.db.session import advisor_transaction
 pytestmark = pytest.mark.usefixtures("database", "seeded")
 
 SET_ADVISOR = "SELECT set_config('app.advisor_id', %s, true)"
+# The advisor-scoped tables, parents first; the product sheets have tests of their own.
 QUALIFIED = [f"{names.SCHEMA}.{table}" for table in FACTORIES]
 
 
@@ -63,6 +73,13 @@ def tables_with_factories(conn: Connection) -> list[str]:
     assert found, "discovery found no readable table"
     missing = sorted(set(found) - TABLES)
     assert not missing, f"no row factory in tests/db/seed_rows.py for {missing}"
+    return found
+
+
+def scoped(tables: list[str]) -> list[str]:
+    """The advisor-scoped ones among tables (all but the product sheets)."""
+    found = [table for table in tables if table in ADVISOR_TABLES]
+    assert len(found) == len(tables) - 1 and SHEETS in tables, tables
     return found
 
 
@@ -82,11 +99,12 @@ def test_fail_closed_reference_counts(settings: Settings, superuser: Connection)
         tables = tables_with_factories(app)
     missing = [
         f"{table}: no seeded row for {person.name}"
-        for table in tables
+        for table in scoped(tables)
         for person in (MINE, OTHER)
         if count(superuser, table, person.id) < 1
     ]
     assert not missing, "\n".join(missing)
+    assert count(superuser, SHEETS) >= 1, "no product sheet seeded"
 
 
 def test_fail_closed_context_sees_exactly_its_own_rows(
@@ -94,7 +112,7 @@ def test_fail_closed_context_sees_exactly_its_own_rows(
 ) -> None:
     problems = []
     with advisor_transaction(app_pool, verified(MINE)) as conn:
-        for table in tables_with_factories(conn):
+        for table in scoped(tables_with_factories(conn)):
             seen, expected = count(conn, table), count(superuser, table, MINE.id)
             if seen != expected or seen < 1:
                 problems.append(f"{table}: {seen} rows under {MINE.name}, expected {expected}")
@@ -340,12 +358,72 @@ ODD_IDS = ["nobody", "", "%", "_" + MINE.id[1:], MINE.id.upper(), MINE.id + " ",
 
 
 @pytest.mark.parametrize("advisor_id", ODD_IDS, ids=[f"odd-{n}" for n in range(len(ODD_IDS))])
-def test_isolation_odd_ids_see_nothing(app_pool: ConnectionPool, advisor_id: str) -> None:
+def test_isolation_odd_ids_see_nothing(
+    app_pool: ConnectionPool, superuser: Connection, advisor_id: str
+) -> None:
     with advisor_transaction(app_pool, issue(advisor_id)) as conn:
         setting = conn.execute(SETTING).fetchone()[0]
-        seen = {table: count(conn, table) for table in tables_with_factories(conn)}
+        tables = tables_with_factories(conn)
+        seen = {table: count(conn, table) for table in scoped(tables)}
+        sheets = count(conn, SHEETS)
     assert setting == advisor_id, setting
     assert not any(seen.values()), seen
+    # The sheets are global: any advisor transaction reads them, an odd id too; '' is
+    # none (ADR 0010). Question 1 to Timur on PR 7: if the policy becomes "the advisor
+    # exists", this line and SHEET_POLICIES in test_rls_catalog.py change together.
+    assert sheets == (0 if advisor_id == "" else count(superuser, SHEETS)), sheets
+
+
+# Product sheets (ADR 0010): the one global table.
+
+
+@pytest.mark.parametrize("person", branding.ADVISORS, ids=lambda person: person.id)
+def test_product_sheets_every_advisor_reads_every_sheet(
+    app_pool: ConnectionPool, superuser: Connection, person: object
+) -> None:
+    total = count(superuser, SHEETS)
+    assert total >= 1, "no product sheet seeded"
+    with advisor_transaction(app_pool, verified(person)) as conn:
+        assert count(conn, SHEETS) == total
+        assert conn.execute(
+            sql.SQL("SELECT count(*) FROM {} WHERE id = %s").format(table_id(SHEETS)),
+            (SHEET["id"],),
+        ).fetchone() == (1,)
+
+
+def sheet_write(verb: str) -> tuple[sql.Composable, dict]:
+    if verb == "INSERT":
+        row = SHEET | {"id": f"{SHEET['id']}-probe", "url": f"{SHEET['url']}-probe"}
+        return insert_statement(SHEETS, row), row
+    where = sql.SQL(" WHERE id = %(id)s")
+    if verb == "UPDATE":
+        return sql.SQL("UPDATE {} SET title = title").format(table_id(SHEETS)) + where, SHEET
+    return sql.SQL("DELETE FROM {}").format(table_id(SHEETS)) + where, SHEET
+
+
+@pytest.mark.parametrize("verb", ["INSERT", "UPDATE", "DELETE"])
+def test_product_sheets_the_app_role_writes_none(app_pool: ConnectionPool, verb: str) -> None:
+    statement, params = sheet_write(verb)
+    with (
+        advisor_transaction(app_pool, verified(MINE)) as conn,
+        conn.transaction(force_rollback=True),
+    ):
+        outcome, changed = attempt(conn, statement, params)
+    assert outcome is not None and "permission denied for table" in outcome, (outcome, changed)
+
+
+@pytest.mark.parametrize("advisor", [None, MINE.id], ids=["no-advisor", "an-advisor"])
+@pytest.mark.parametrize("verb", ["INSERT", "UPDATE", "DELETE"])
+def test_product_sheets_the_owner_writes_them(
+    owner: Connection, verb: str, advisor: str | None
+) -> None:
+    # The loader's path: the owner replaces the sheets, outside any advisor transaction.
+    statement, params = sheet_write(verb)
+    with owner.transaction(force_rollback=True):
+        if advisor is not None:
+            owner.execute(SET_ADVISOR, (advisor,))
+        outcome, changed = attempt(owner, statement, params)
+    assert (outcome, changed) == (None, 1)
 
 
 # A forged parameter. The word, the payloads and the token_documents fixture are shared

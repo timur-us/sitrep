@@ -260,6 +260,29 @@ def test_a_failing_file_rolls_back_the_whole_run(
     assert applied(superuser) == before
 
 
+@pytest.mark.usefixtures("probe_cleanup")
+def test_a_failing_file_prints_no_row_values(
+    tmp_path: Path, superuser: Connection, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Review finding sec-9 of M1 PR 7: psycopg's message carries the DETAIL line, which
+    # holds the failing row; the runner prints the primary message only, as the loader does.
+    canary = "Zebrafink-Kanarienvogel"
+    directory = _copy_with(
+        tmp_path,
+        **{
+            f"{NEXT}_probe.sql": (
+                f"CREATE TABLE {PROBE} (v text CHECK (length(v) < 3));\n"
+                f"INSERT INTO {PROBE} VALUES ('{canary}');\n"
+            )
+        },
+    )
+    assert migrate.main(["--migrations", str(directory)]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("migrate: CheckViolation (23514): new row for relation"), err
+    assert canary not in err, "the failing row reached stderr"
+    assert _probe_absent(superuser)
+
+
 # A file that leaves the runner's transaction, its role or its search_path is caught after
 # it ran. What it committed on its own stays (detected, not prevented); it is not recorded.
 ESCAPES = [

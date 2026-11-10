@@ -175,26 +175,31 @@ def test_planted_violations() -> None:
 
 # tokenizers requires huggingface-hub for Tokenizer.from_pretrained() alone, which app/
 # never calls. pyproject.toml excludes it (uv's exclude-dependencies), so the lock holds
-# neither the Hub client nor the HTTP stack under it, and nothing installs them (ADR 0005,
-# M1 PR 4). The packages it would bring, at the time of the decision:
+# no Hub client, and nothing installs it (ADR 0005, M1 PR 4). The packages it would bring,
+# at the time of the decision:
 EXCLUDED = "huggingface-hub"
-HUB_STACK = frozenset(
-    {EXCLUDED, "fsspec", "hf-xet", "httpcore2", "httpx2", "httpx2-jsfetch", "tqdm", "truststore"}
-)
+HUB_CLIENT = frozenset({EXCLUDED, "fsspec", "hf-xet", "tqdm"})
+# The HTTP stack under the Hub client. Since M1 PR 6 the model client's SDK brings it
+# (ADR 0012): it may be in the lock as the SDK's requirement, or one another's, and
+# nothing else may require it, tokenizers least of all.
+HTTP_STACK = frozenset({"httpcore2", "httpx2", "httpx2-jsfetch", "truststore"})
+HTTP_OWNER = "anthropic"
 
 
 def excluded_problems(lock: dict[str, Any]) -> list[str]:
-    """One line per way the lock could install the Hub client."""
+    """One line per way the lock could install the Hub client, or give anything but the
+    model client's SDK the HTTP stack."""
     excludes = lock.get("manifest", {}).get("excludes", [])
     problems = [] if excludes == [EXCLUDED] else [f"manifest excludes {excludes!r}"]
     for package in lock.get("package", []):
         name = package.get("name")
-        if name in HUB_STACK:
+        if name in HUB_CLIENT:
             problems.append(f"{name} is in the lock")
         problems += [
             f"{name} requires {dependency.get('name')}"
             for dependency in package.get("dependencies", [])
-            if dependency.get("name") in HUB_STACK
+            if dependency.get("name") in HUB_CLIENT
+            or (dependency.get("name") in HTTP_STACK and name not in HTTP_STACK | {HTTP_OWNER})
         ]
     return problems
 
@@ -226,6 +231,30 @@ def test_planted_hub_entries() -> None:
     ]
     assert excluded_problems({"manifest": {"excludes": ["other"]}, "package": []}) == [
         "manifest excludes ['other']"
+    ]
+    # M1 PR 6: the HTTP stack as the SDK's requirement, and within itself, passes; as
+    # anyone else's it does not, and the Hub client stays out whoever requires it.
+    sdk = {
+        "manifest": manifest,
+        "package": [
+            {"name": HTTP_OWNER, "dependencies": [{"name": "httpx2"}]},
+            {"name": "httpx2", "dependencies": [{"name": "httpcore2"}, {"name": "truststore"}]},
+            {"name": "httpcore2", "dependencies": [{"name": "truststore"}]},
+            {"name": "truststore"},
+        ],
+    }
+    assert excluded_problems(sdk) == []
+    sdk["package"] += [
+        {"name": "tokenizers", "dependencies": [{"name": "httpx2"}]},
+        {"name": HTTP_OWNER, "dependencies": [{"name": "tqdm"}]},
+        {"name": "httpx2", "dependencies": [{"name": "fsspec"}]},
+        {"name": "tqdm"},
+    ]
+    assert excluded_problems(sdk) == [
+        "tokenizers requires httpx2",
+        f"{HTTP_OWNER} requires tqdm",
+        "httpx2 requires fsspec",
+        "tqdm is in the lock",
     ]
 
 

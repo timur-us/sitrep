@@ -11,6 +11,10 @@ the SDK and the instrumentation read them (disable tracing, exclude URLs, captur
 headers), and a test that needs one sets it itself. And it removes every PG* variable:
 libpq reads them for whatever a connection string leaves out, and app.db.connect refuses
 to connect while one is set (ADR 0008).
+
+Since M1 PR 6 it removes every variable the model SDK reads (the ANTHROPIC_ prefix, in
+any case, the key included: the key is a settings field) and PYDANTIC_SETTINGS_DEBUG,
+under which Settings refuses to build (review finding sec-3 of M1 PR 3).
 """
 
 from __future__ import annotations
@@ -24,7 +28,8 @@ from collections.abc import Iterator
 
 import pytest
 
-from app.config.settings import Settings, env_name
+from app.config.settings import SETTINGS_DEBUG, Settings, env_name
+from app.harness.model_client import SDK_PREFIX
 from app.observability.logs import LOG_CONFIG
 
 PROXY_VARIABLES = frozenset({"http_proxy", "https_proxy", "all_proxy"})
@@ -40,7 +45,8 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
         # pydantic-settings, like most proxy clients, matches names without regard to case.
         if (
             name.lower() in fields | PROXY_VARIABLES
-            or name.upper().startswith("OTEL_")
+            or name.upper().startswith(("OTEL_", SDK_PREFIX))
+            or name.upper() == SETTINGS_DEBUG
             or name.startswith("PG")
         ):
             monkeypatch.delenv(name)

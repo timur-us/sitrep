@@ -1,7 +1,8 @@
 """The model client the agent loop calls (ADR 0001, ADR 0003).
 
-The Protocol below is the M1 contract; M0 declares it. No client is built and no
-network library is imported in M0 (tests/test_import_allowlist.py).
+The Protocol below is the M1 contract; M0 declared it. M1 PR 6 builds it:
+app/harness/model_client.py (ADR 0012) is the one file that imports the SDK and its HTTP
+library (tests/test_import_allowlist.py).
 """
 
 from __future__ import annotations

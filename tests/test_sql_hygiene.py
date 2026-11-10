@@ -14,7 +14,11 @@ built from strings. An AST scan of app/:
 - app/db/queries.py holds string literals only;
 - set_config and app.advisor_id appear in app/db/session.py only, in any text there,
   in any case and with any spacing around the dot;
-- no string anywhere in app/ says SET LOCAL, SET SESSION or SET app.
+- no string anywhere in app/ says SET LOCAL, SET SESSION or SET app.;
+- outside app/db/migrate.py every statement, literal or constant, is SELECT, INSERT,
+  UPDATE, DELETE or WITH (COPY for .copy): DDL, privileges and session commands such
+  as ALTER TABLE ... NO FORCE ROW LEVEL SECURITY stay in reviewed migration files
+  (review finding sec-1 of M1 PR 7).
 
 app/db/migrate.py is excepted from the first two rules: it composes its own DDL with
 psycopg.sql from app/db/names.py, never from input.
@@ -33,10 +37,13 @@ import re
 import pytest
 from repo_files import ROOT
 
+from app.db import queries
+
 APP = ROOT / "app"
 SESSION = "app/db/session.py"
 QUERIES = "app/db/queries.py"
 MIGRATE = "app/db/migrate.py"
+LOAD = "app/db/load.py"
 STATEMENT_METHODS = frozenset({"execute", "executemany", "copy", "stream"})
 # Never referenced without a call; .copy is left out, it is also dict's and list's.
 CALLED_ONLY = frozenset({"execute", "executemany", "stream"})
@@ -48,6 +55,16 @@ SESSION_ONLY = {
     "app.advisor_id": re.compile(r"app\s*\.\s*advisor_id", re.IGNORECASE),
 }
 SET_COMMAND = re.compile(r"\bSET\s+(?:LOCAL\b|SESSION\b|app\s*\.)", re.IGNORECASE)
+# The statements app/ may run outside the migration runner, by their first keyword.
+DML = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE", "WITH"})
+LEADING = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.DOTALL)
+
+
+def first_keyword(statement: str) -> str:
+    """The statement's first word, after whitespace and comments, in upper case."""
+    rest = statement[LEADING.match(statement).end() :]
+    word = re.match(r"[A-Za-z]+", rest)
+    return word.group(0).upper() if word else rest[:1]
 
 
 def query_constants(source: str) -> tuple[set[str], list[str]]:
@@ -72,7 +89,9 @@ def query_constants(source: str) -> tuple[set[str], list[str]]:
     return names, problems
 
 
-def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
+def scan(
+    source: str, rel: str, constants: set[str], values: dict[str, str] | None = None
+) -> tuple[int, list[str]]:
     """The statement calls checked in one file, and the rule breaks found there."""
     tree = ast.parse(source)
     modules: set[str] = set()  # local names for app.db.queries
@@ -158,6 +177,12 @@ def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
                     f"{where}: .{node.func.attr}() takes {kind}, "
                     f"not a literal or a constant from {QUERIES}"
                 )
+                continue
+            text = statement_text(statement, values or {})
+            keyword = first_keyword(text) if text is not None else None
+            permitted = DML | ({"COPY"} if node.func.attr == "copy" else set())
+            if keyword is not None and keyword not in permitted:
+                problems.append(f"{where}: {keyword} is not SELECT, INSERT, UPDATE, DELETE or WITH")
         if composes and isinstance(node, ast.Assign | ast.AugAssign | ast.AnnAssign):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for target in targets:
@@ -179,11 +204,38 @@ def scan(source: str, rel: str, constants: set[str]) -> tuple[int, list[str]]:
     return checked, problems
 
 
+def statement_text(statement: ast.expr, values: dict[str, str]) -> str | None:
+    """The SQL an allowed statement argument stands for, where the scan can tell."""
+    if isinstance(statement, ast.Constant) and isinstance(statement.value, str):
+        return statement.value
+    if isinstance(statement, ast.Name):
+        return values.get(statement.id)
+    if isinstance(statement, ast.Attribute):
+        return values.get(statement.attr)
+    return None
+
+
+def query_values(source: str) -> dict[str, str]:
+    """queries.py's constants and their statements."""
+    found = {}
+    for node in ast.parse(source).body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            found[node.targets[0].id] = node.value.value
+    return found
+
+
 def check(sources: dict[str, str]) -> tuple[int, list[str]]:
     constants, problems = query_constants(sources.get(QUERIES, ""))
+    values = query_values(sources.get(QUERIES, ""))
     total = 0
     for rel, source in sorted(sources.items()):
-        checked, found = scan(source, rel, constants)
+        checked, found = scan(source, rel, constants, values)
         total += checked
         problems += found
     return total, problems
@@ -198,15 +250,63 @@ def app_sources() -> dict[str, str]:
 
 def test_sql_hygiene() -> None:
     sources = app_sources()
-    for required in (SESSION, QUERIES, MIGRATE, "app/db/connect.py"):
+    for required in (SESSION, QUERIES, MIGRATE, LOAD, "app/db/connect.py"):
         assert required in sources, f"{required} was not scanned"
     checked, problems = check(sources)
     assert not problems, "\n".join(problems)
-    # Non-vacuity: the advisor setting and the guard in session.py are among the calls.
+    # Non-vacuity: the advisor setting and the guard in session.py are among the calls,
+    # and so are the loader's statements.
     assert checked >= 2, f"only {checked} statement calls checked"
     assert "set_config" in sources[SESSION]
     constants, _ = query_constants(sources[QUERIES])
     assert {"SEARCH_DOCUMENTS_ENGLISH", "SEARCH_DOCUMENTS_GERMAN"} <= constants, constants
+    loader_calls, _ = scan(sources[LOAD], LOAD, constants)
+    assert loader_calls >= 11, f"only {loader_calls} statement calls checked in {LOAD}"
+
+
+def loader_statement_problems(statements: dict[str, str]) -> list[str]:
+    """The loader's rules (ADR 0010): no statement names trust, which the database
+    generates; none truncates; every advisor table's delete is bound to the advisor as
+    well as scoped by row-level security."""
+    found = []
+    for name, value in sorted(statements.items()):
+        if re.search(r"\btrust\b", value, re.IGNORECASE):
+            found.append(f"{name}: names trust")
+        if re.search(r"\btruncate\b", value, re.IGNORECASE):
+            found.append(f"{name}: truncates")
+        delete = name.startswith("LOAD_DELETE_") and name != "LOAD_DELETE_PRODUCT_SHEETS"
+        if delete and not value.endswith(" WHERE advisor_id = %s"):
+            found.append(f"{name}: not bound to the advisor")
+    return found
+
+
+def test_the_loaders_statements() -> None:
+    loader = {name: value for name, value in vars(queries).items() if name.startswith("LOAD_")}
+    # One upsert, five deletes, five inserts (review finding test-16: exact, both ways).
+    assert len(loader) == 11, sorted(loader)
+    assert loader_statement_problems(loader) == []
+    loader_calls, _ = scan(app_sources()[LOAD], LOAD, set(loader))
+    assert loader_calls == 11, loader_calls
+
+
+def test_planted_loader_statements_are_caught() -> None:
+    assert loader_statement_problems(
+        {
+            "LOAD_INSERT_X": "INSERT INTO documents (id, trust) VALUES (%s, %s)",
+            "LOAD_UPDATE_X": "UPDATE documents SET Trust = 'internal'",
+            "LOAD_WIPE": "TRUNCATE chunks",
+            "LOAD_DELETE_CHUNKS": "DELETE FROM chunks",
+            "LOAD_DELETE_DOCUMENTS": "DELETE FROM documents WHERE id = %s",
+            "LOAD_DELETE_PRODUCT_SHEETS": "DELETE FROM product_sheets",
+        }
+    ) == [
+        "LOAD_DELETE_CHUNKS: not bound to the advisor",
+        "LOAD_DELETE_DOCUMENTS: not bound to the advisor",
+        "LOAD_INSERT_X: names trust",
+        "LOAD_UPDATE_X: names trust",
+        "LOAD_WIPE: truncates",
+    ]
+    assert loader_statement_problems({"LOAD_DELETE_X": "DELETE FROM x WHERE advisor_id = %s"}) == []
 
 
 CLEAN_QUERIES = 'X = "SELECT 1"\n'
@@ -229,6 +329,20 @@ PLANTED = [
     ("app/db/x.py", "import psycopg\npsycopg.ClientCursor(conn)\n", ".ClientCursor"),
     ("app/db/x.py", "from psycopg import ClientCursor\n", "ClientCursor"),
     ("app/db/x.py", "cur.mogrify('SELECT %s', (x,))\n", ".mogrify"),
+    # Review finding sec-1 of PR 7: outside the migration runner a statement reads or
+    # writes rows; DDL, privileges and session commands stay in reviewed migration files.
+    (
+        "app/db/x.py",
+        "conn.execute('ALTER TABLE documents NO FORCE ROW LEVEL SECURITY')\n",
+        "ALTER is not SELECT, INSERT, UPDATE, DELETE or WITH",
+    ),
+    ("app/db/x.py", "conn.execute('  drop table chunks')\n", "DROP is not SELECT"),
+    ("app/db/x.py", "conn.execute('TRUNCATE chunks')\n", "TRUNCATE is not SELECT"),
+    ("app/db/x.py", "conn.execute('GRANT ALL ON chunks TO PUBLIC')\n", "GRANT is not SELECT"),
+    ("app/db/x.py", "conn.execute('RESET ROLE')\n", "RESET is not SELECT"),
+    ("app/db/x.py", "conn.execute('-- a note\\nDO $$ BEGIN END $$')\n", "DO is not SELECT"),
+    ("app/db/x.py", "conn.execute('/* x */ CREATE TEMP TABLE c (x int)')\n", "CREATE is not"),
+    ("app/db/x.py", "cur.executemany('COPY x FROM STDIN', rows)\n", "COPY is not SELECT"),
     ("app/db/x.py", "connect(url, cursor_factory=C)\n", "cursor_factory="),
     (
         "app/db/x.py",
@@ -270,6 +384,25 @@ def test_sql_hygiene_planted_violations_are_caught(rel: str, source: str, needle
     sources = {QUERIES: CLEAN_QUERIES} | {rel: source}
     _, problems = check(sources)
     assert any(needle in problem for problem in problems), problems
+
+
+def test_a_queries_constant_that_is_not_dml_is_caught() -> None:
+    # Review finding sec-1 of PR 7: the rule reads the constant's value too.
+    sources = {
+        QUERIES: 'Y = "ALTER TABLE documents DISABLE ROW LEVEL SECURITY"\nZ = "SELECT 1"\n',
+        "app/db/x.py": (
+            "from app.db import queries\nfrom app.db.queries import Y, Z\n"
+            "conn.execute(Y)\nconn.execute(queries.Y)\nconn.execute(Z)\n"
+        ),
+    }
+    _, problems = check(sources)
+    assert [p for p in problems if "ALTER is not" in p] == [
+        "app/db/x.py:3: ALTER is not SELECT, INSERT, UPDATE, DELETE or WITH",
+        "app/db/x.py:4: ALTER is not SELECT, INSERT, UPDATE, DELETE or WITH",
+    ], problems
+    # Control: the migration runner composes DDL, and may.
+    _, problems = check({QUERIES: CLEAN_QUERIES, MIGRATE: "conn.execute('ALTER TABLE x')\n"})
+    assert problems == [], problems
 
 
 def test_sql_hygiene_clean_code_passes() -> None:
