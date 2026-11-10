@@ -127,6 +127,11 @@ def wrap(item: Untrusted[Any]) -> str:
     return f'<untrusted tool="{tool}" records="{records}">\n{body}\n{CLOSE}'
 
 
+def source_text(item: Untrusted[Any]) -> str:
+    """Scaffolding (M1 PR 9)."""
+    raise NotImplementedError("M1 PR 9")
+
+
 class BudgetExceeded(Exception):
     """A request ran out of tokens; the loop stops and says so (M1)."""
 
