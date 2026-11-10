@@ -91,7 +91,9 @@ MAX_TURNS = 6
 MAX_TOKENS = 8_192
 # The tokens one advisor request may spend, all calls and all tool results together.
 REQUEST_BUDGET = 150_000
-# For estimates only: tool results and the next call's input. Low, so estimates are high.
+# For estimates only: tool results and the next call's input. Every non-ASCII byte counts
+# as a token, an upper bound; ASCII at this ratio is a heuristic (round 2): dense digits
+# or base64 may tokenise tighter, and real usage is charged after each call.
 CHARS_PER_TOKEN = 3
 MAX_QUESTION = 2_000
 MAX_MANDATE_ID = 128
@@ -139,8 +141,8 @@ class LoopResult:
 
 class LoopError(Exception):
     """The request ended outside its contract. kind is one of "model_call",
-    "message_refused", "unexpected_stop", "protocol", "handler" and "price_unknown";
-    the error carries nothing else, so it is safe in a log line or a span."""
+    "message_refused", "unexpected_stop", "protocol", "handler", "price_unknown" and
+    "internal" (any other exception, raised without it); the error carries nothing else, so it is safe in a log line or a span."""
 
     def __init__(self, kind: str) -> None:
         super().__init__(kind)
@@ -280,8 +282,8 @@ def _first_message(question: str, mandate_id: str | None) -> str:
 
 
 def _tokens(text: str) -> int:
-    """A high estimate: ASCII at CHARS_PER_TOKEN, and every UTF-8 byte of anything else
-    a token of its own (review finding sec-3)."""
+    """An estimate: ASCII at CHARS_PER_TOKEN (a heuristic), and every UTF-8 byte of
+    anything else a token of its own, an upper bound (review finding sec-3)."""
     ascii_count = sum(1 for char in text if char < "\x80")
     other = len(text.encode("utf-8")) - ascii_count
     return -(-ascii_count // CHARS_PER_TOKEN) + other  # rounded up
@@ -380,7 +382,7 @@ def _tool(
     return result, False
 
 
-def _over_limit(block: Mapping[str, Any], record: _Record, in_turn: int) -> bool:
+def _over_limit(record: _Record, in_turn: int) -> bool:
     """Whether this call is past MAX_CALLS_PER_TURN or MAX_CALLS_PER_REQUEST."""
     return in_turn >= MAX_CALLS_PER_TURN or record.calls >= MAX_CALLS_PER_REQUEST
 
@@ -476,10 +478,11 @@ def run(
             messages.append({"role": "assistant", "content": content})
             results = []
             for in_turn, block in enumerate(calls):
-                if _over_limit(block, record, in_turn):
+                if _over_limit(record, in_turn):
                     record.errors.add("call_limit")
                     limit = [{"type": "call_limit", "msg": "too many tool calls"}]
-                    item, failed = _refused(UNKNOWN_TOOL, limit), True
+                    named = block["name"] if block["name"] in registry else UNKNOWN_TOOL
+                    item, failed = _refused(named, limit), True
                 else:
                     item, failed = _tool(block, advisor, registry, handlers, record)
                 rendered = wrap(item)
@@ -497,8 +500,11 @@ def run(
         raise
     except Exception as error:  # noqa: BLE001 - traced as its class, raised without its text
         record.error, record.cause = "internal", _identifier(type(error).__name__)
+    if record.error == "internal":
+        # Raised outside the except block, so the original is neither the cause nor the
+        # context: its message may carry text (round 2, N1; as model_client.py does).
         _trace(record, model)
-        raise LoopError("internal") from None
+        raise LoopError("internal")
     record.report = grounding.check(answer, sources)
     _trace(record, model)
     return LoopResult(

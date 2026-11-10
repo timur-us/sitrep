@@ -60,7 +60,7 @@ sdk_loggers_min_level: INFO
   - Seven packages enter the lock (`httpx2`, `httpcore2`, `truststore`, `jiter` among them).
   - We rely on SDK internals (`open_telemetry=`, `DefaultHttpxClient`, the DEBUG records); tests read the source, yet an upgrade can change them.
   - The logger hold is process-wide; a logger lowered later stays lowered.
-  - The loop (M1 PR 10) retries 429, 5xx and 529 once, at once.
+  - The loop (M1 PR 10) retries connection failures, 429, 5xx, 529 once, at once.
   - Prices are by hand; a priority, batch, fast or server-tool response cannot be priced.
   - Answers arrive whole, within 120 seconds.
 - **Watch:** SDK upgrades (the source scans); Haiku 5.5's tiers (M2); TLS roots, the OS store on macOS; how M3 passes the key, since an exported one is refused; EU-only inference; streaming.
