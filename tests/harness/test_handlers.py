@@ -299,8 +299,10 @@ def test_each_list_keeps_to_its_candidates(name: str) -> None:
 def test_the_vector_lists_compare_one_model(name: str) -> None:
     statement = getattr(queries, name)
     assert "embedding_model = %s" in statement and "embedding_revision = %s" in statement
-    # relaxed_order may return rows a little out of order: they are sorted again.
-    assert "MATERIALIZED" in statement or "chunks" not in statement
+    # relaxed_order may return rows a little out of order: they are sorted again, in
+    # full (`+ 0`: PostgreSQL 17 would otherwise take the CTE's order as given).
+    if "chunks" in statement:
+        assert "MATERIALIZED" in statement and "ORDER BY n.distance + 0" in statement
 
 
 def test_the_portfolio_comes_from_the_portfolio_system() -> None:

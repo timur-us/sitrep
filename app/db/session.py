@@ -29,9 +29,19 @@ advisor_transaction() is the only way to act for an advisor. It takes a Verified
 which only app/auth/ issues, and nothing else; it checks out an idle connection, opens
 a real transaction, and sets the advisor with set_config(..., true): the id is a bound
 parameter, and the setting ends with the transaction. The row-level security policies
-of db/migrations/0002_tables_rls.sql read it. The connection it yields is the pool's:
-a reference kept past the `with` block would run inside whichever transaction next
-holds that connection, so none may be kept.
+of db/migrations/0002_tables_rls.sql read it. In the same statement it sets pgvector's
+hnsw.iterative_scan to ITERATIVE_SCAN, transaction-locally too (ADR 0013; the M1 plan's
+default 13): an HNSW scan whose nearest rows the policies hide goes on until the query
+has its rows. Before pgvector is loaded in a session the setting is a placeholder,
+which the library takes over when it loads; either way nothing is left after the
+transaction, so the guard below sees no setting (tests/db/test_pool.py).
+
+What the block yields is an AdvisorConnection, a handle on the pool's connection for the
+block's length only (PR 5b sec-5; ADR 0013). A reference kept past the block, by a
+background task or a streaming response, would otherwise run inside whichever
+transaction next holds the connection; the handle raises TransactionEnded instead. Its
+execute() returns Rows, fetched in full before it returns, which hold rows and a count
+and nothing that can run a statement; no cursor and no connection leave the block.
 
 Not caught here: a statement inside an advisor transaction that calls set_config itself
 acts as another advisor for the rest of that transaction, and the setting is gone before
@@ -63,7 +73,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any
 
+import psycopg
+from psycopg.abc import Params, Query
 from psycopg.pq import TransactionStatus
 from psycopg_pool import ConnectionPool
 
@@ -77,7 +91,8 @@ Pool = ConnectionPool[CheckedConnection]
 ROLE_SETTINGS = [f"search_path={names.SEARCH_PATH}"]
 # The advisors the loader may write for: the cast's, and no one else.
 CAST_ADVISORS = frozenset(person.id for person in branding.ADVISORS)
-# pgvector's iterative index scan (ADR 0013). Scaffolding: not set yet.
+# pgvector's iterative index scan, set in every advisor transaction (ADR 0013). relaxed_order
+# may return rows a little out of distance order; the search statements sort again.
 ITERATIVE_SCAN = "relaxed_order"
 
 
@@ -86,7 +101,86 @@ class GuardError(Exception):
 
 
 class TransactionEnded(RuntimeError):
-    """Scaffolding: a handle used after its advisor transaction (ADR 0013)."""
+    """An AdvisorConnection used after its advisor transaction ended."""
+
+
+class Rows:
+    """A statement's result, fetched in full inside the transaction: its rows, read like a
+    cursor's, and its row count. Nothing here can run a statement."""
+
+    __slots__ = ("_next", "_rowcount", "_rows")
+
+    def __init__(self, rows: list[tuple[Any, ...]] | None, rowcount: int) -> None:
+        self._rows = rows
+        self._next = 0
+        self._rowcount = rowcount
+
+    @property
+    def rowcount(self) -> int:
+        return self._rowcount
+
+    def _result(self) -> list[tuple[Any, ...]]:
+        if self._rows is None:
+            raise psycopg.ProgrammingError("the last operation didn't produce a result")
+        return self._rows
+
+    def fetchone(self) -> tuple[Any, ...] | None:
+        rows = self._result()
+        if self._next >= len(rows):
+            return None
+        self._next += 1
+        return rows[self._next - 1]
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        rows = self._result()
+        rest, self._next = rows[self._next :], len(rows)
+        return rest
+
+
+@dataclass(frozen=True, slots=True)
+class HandleInfo:
+    """What a caller may read of the handle's connection, as plain values."""
+
+    backend_pid: int
+    transaction_status: TransactionStatus
+
+
+class AdvisorConnection:
+    """The advisor transaction's connection, for the length of the block only."""
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: CheckedConnection) -> None:
+        self._conn: CheckedConnection | None = conn
+
+    def _live(self) -> CheckedConnection:
+        if self._conn is None:
+            raise TransactionEnded("the advisor transaction has ended; its handle runs nothing")
+        return self._conn
+
+    def execute(self, query: Query, params: Params | None = None) -> Rows:
+        """Run one statement and fetch its whole result; tests/test_sql_hygiene.py checks
+        every caller's statement, as for any execute()."""
+        cursor = self._live().execute(query, params)
+        try:
+            rows = cursor.fetchall() if cursor.description is not None else None
+            return Rows(rows, cursor.rowcount)
+        finally:
+            cursor.close()
+
+    @contextmanager
+    def transaction(self, *, force_rollback: bool = False) -> Iterator[AdvisorConnection]:
+        """A savepoint inside the advisor transaction; it yields this handle again."""
+        with self._live().transaction(force_rollback=force_rollback):
+            yield self
+
+    @property
+    def info(self) -> HandleInfo:
+        info = self._live().info
+        return HandleInfo(info.backend_pid, info.transaction_status)
+
+    def _end(self) -> None:
+        self._conn = None
 
 
 def problems(conn: CheckedConnection) -> list[str]:
@@ -178,8 +272,9 @@ def make_pool(url: str, *, max_size: int = 4, timeout: float = 5.0) -> Pool:
 
 
 @contextmanager
-def advisor_transaction(pool: Pool, advisor: VerifiedAdvisor) -> Iterator[CheckedConnection]:
-    """A transaction on a pooled connection in which the policies see only advisor's rows."""
+def advisor_transaction(pool: Pool, advisor: VerifiedAdvisor) -> Iterator[AdvisorConnection]:
+    """A transaction on a pooled connection in which the policies see only advisor's rows,
+    through a handle that ends with the block."""
     if type(advisor) is not VerifiedAdvisor:
         raise TypeError(
             f"advisor_transaction takes a VerifiedAdvisor, not {type(advisor).__name__}"
@@ -188,8 +283,16 @@ def advisor_transaction(pool: Pool, advisor: VerifiedAdvisor) -> Iterator[Checke
         if conn.info.transaction_status != TransactionStatus.IDLE:
             raise GuardError("the connection is not idle")
         with conn.transaction():
-            conn.execute("SELECT set_config('app.advisor_id', %s, true)", (advisor.advisor_id,))
-            yield conn
+            conn.execute(
+                "SELECT set_config('app.advisor_id', %s, true),"
+                " set_config('hnsw.iterative_scan', %s, true)",
+                (advisor.advisor_id, ITERATIVE_SCAN),
+            )
+            handle = AdvisorConnection(conn)
+            try:
+                yield handle
+            finally:
+                handle._end()
 
 
 def owner_session_problems(row: tuple[object, ...] | None) -> list[str]:

@@ -8,21 +8,126 @@ holds the rest of app/ to this file and to literals: `.execute()` and its relati
 a string literal or a constant from here, values are always bound parameters, and no
 statement is built from strings at runtime.
 
-Full-text search has one statement per language (ADR 0005). Each uses the two-argument
-websearch_to_tsquery with its own configuration and keeps to documents in its language,
-so an English query never matches a German document through a shared stem.
+Retrieval (ADR 0013) is the READ handlers' (app/harness/handlers.py), each statement run
+in an advisor transaction; none names an advisor, since row-level security scopes it.
+Each ranked list returns at most 20 rows (handlers.CANDIDATES), best first, ties by id.
+Rows of an advisor-scoped table start with advisor_id, which the handlers compare with
+the advisor of the transaction.
+
+Full-text search has one statement per language (ADR 0005). Each takes the query once,
+as the argument of the two-argument websearch_to_tsquery with its own configuration, and
+keeps to the documents (or product sheets) in its language, so an English query never
+matches a German document through a shared stem.
 """
 
 SEARCH_DOCUMENTS_ENGLISH = (
-    "SELECT d.advisor_id, d.id FROM documents d"
-    " WHERE d.lang = 'english' AND d.tsv @@ websearch_to_tsquery('english', %s)"
-    " ORDER BY d.advisor_id, d.id"
+    "SELECT d.advisor_id, d.id, ts_rank_cd(d.tsv, q) AS rank"
+    " FROM documents d, websearch_to_tsquery('english', %s) AS q"
+    " WHERE d.lang = 'english' AND d.tsv @@ q"
+    " ORDER BY rank DESC, d.id LIMIT 20"
 )
 
 SEARCH_DOCUMENTS_GERMAN = (
-    "SELECT d.advisor_id, d.id FROM documents d"
-    " WHERE d.lang = 'german' AND d.tsv @@ websearch_to_tsquery('german', %s)"
-    " ORDER BY d.advisor_id, d.id"
+    "SELECT d.advisor_id, d.id, ts_rank_cd(d.tsv, q) AS rank"
+    " FROM documents d, websearch_to_tsquery('german', %s) AS q"
+    " WHERE d.lang = 'german' AND d.tsv @@ q"
+    " ORDER BY rank DESC, d.id LIMIT 20"
+)
+
+# The same, within one mandate: the query, then the mandate id.
+SEARCH_MANDATE_DOCUMENTS_ENGLISH = (
+    "SELECT d.advisor_id, d.id, ts_rank_cd(d.tsv, q) AS rank"
+    " FROM documents d, websearch_to_tsquery('english', %s) AS q"
+    " WHERE d.lang = 'english' AND d.mandate_id = %s AND d.tsv @@ q"
+    " ORDER BY rank DESC, d.id LIMIT 20"
+)
+
+SEARCH_MANDATE_DOCUMENTS_GERMAN = (
+    "SELECT d.advisor_id, d.id, ts_rank_cd(d.tsv, q) AS rank"
+    " FROM documents d, websearch_to_tsquery('german', %s) AS q"
+    " WHERE d.lang = 'german' AND d.mandate_id = %s AND d.tsv @@ q"
+    " ORDER BY rank DESC, d.id LIMIT 20"
+)
+
+# The global product sheets (ADR 0010), read in any advisor transaction.
+SEARCH_SHEETS_ENGLISH = (
+    "SELECT s.id, ts_rank_cd(s.tsv, q) AS rank"
+    " FROM product_sheets s, websearch_to_tsquery('english', %s) AS q"
+    " WHERE s.lang = 'english' AND s.tsv @@ q"
+    " ORDER BY rank DESC, s.id LIMIT 20"
+)
+
+SEARCH_SHEETS_GERMAN = (
+    "SELECT s.id, ts_rank_cd(s.tsv, q) AS rank"
+    " FROM product_sheets s, websearch_to_tsquery('german', %s) AS q"
+    " WHERE s.lang = 'german' AND s.tsv @@ q"
+    " ORDER BY rank DESC, s.id LIMIT 20"
+)
+
+# The vector lists: cosine distance to the query's vector (bound in pgvector's text
+# form), among vectors of the query's model and revision only. An HNSW scan goes on
+# past the rows the policies hide (hnsw.iterative_scan, app/db/session.py); in
+# relaxed_order its rows may come a little out of order, so they are sorted again outside
+# the MATERIALIZED query, as pgvector's README does it. The `+ 0` matters: PostgreSQL 17
+# takes the CTE's own order as given and would only sort within equal distances
+# (an incremental sort, measured), which keeps an out-of-order row where it is.
+NEAREST_CHUNKS = (
+    "WITH nearest AS MATERIALIZED ("
+    "SELECT c.advisor_id, c.document_id, c.embedding <=> %s::vector AS distance"
+    " FROM chunks c WHERE c.embedding_model = %s AND c.embedding_revision = %s"
+    " ORDER BY distance LIMIT 20)"
+    " SELECT n.advisor_id, n.document_id, n.distance FROM nearest n"
+    " ORDER BY n.distance + 0, n.document_id"
+)
+
+# The same, within one mandate: the vector, the mandate id, the model, the revision.
+NEAREST_MANDATE_CHUNKS = (
+    "WITH nearest AS MATERIALIZED ("
+    "SELECT c.advisor_id, c.document_id, c.embedding <=> %s::vector AS distance"
+    " FROM chunks c JOIN documents d"
+    " ON d.advisor_id = c.advisor_id AND d.id = c.document_id"
+    " WHERE d.mandate_id = %s AND c.embedding_model = %s AND c.embedding_revision = %s"
+    " ORDER BY distance LIMIT 20)"
+    " SELECT n.advisor_id, n.document_id, n.distance FROM nearest n"
+    " ORDER BY n.distance + 0, n.document_id"
+)
+
+# Six sheets, one vector each: no index, an exact distance.
+NEAREST_SHEETS = (
+    "SELECT s.id, s.embedding <=> %s::vector AS distance FROM product_sheets s"
+    " WHERE s.embedding_model = %s AND s.embedding_revision = %s"
+    " ORDER BY distance, s.id LIMIT 20"
+)
+
+# What a hit shows, for the ids the fusion kept. Trust is the record's own column
+# (ADR 0010), never inferred from an id.
+DOCUMENT_DETAILS = (
+    "SELECT d.advisor_id, d.id, d.mandate_id, d.title, d.lang, d.trust FROM documents d"
+    " WHERE d.id = ANY(%s)"
+)
+
+# Each document's stored passage nearest the query, of the query's model: the ids, the
+# model, the revision, the vector.
+DOCUMENT_PASSAGES = (
+    "SELECT DISTINCT ON (c.document_id) c.advisor_id, c.document_id, c.body FROM chunks c"
+    " WHERE c.document_id = ANY(%s) AND c.embedding_model = %s AND c.embedding_revision = %s"
+    " ORDER BY c.document_id, c.embedding <=> %s::vector, c.ordinal"
+)
+
+SHEET_DETAILS = (
+    "SELECT s.id, s.title, s.lang, s.trust, s.body FROM product_sheets s WHERE s.id = ANY(%s)"
+)
+
+# A mandate the model names, looked up inside the advisor transaction: another
+# advisor's mandate is not there, like one that exists nowhere.
+MANDATE_VISIBLE = "SELECT m.advisor_id, m.id FROM mandates m WHERE m.id = %s"
+
+# The mandate's portfolio report, from the portfolio system only, so no e-mail can pose
+# as one. The corpus holds one per mandate; were there more, the first by id, since no
+# document carries a date the database stores.
+PORTFOLIO_REPORT = (
+    "SELECT d.advisor_id, d.id, d.mandate_id, d.title, d.lang, d.body FROM documents d"
+    " WHERE d.mandate_id = %s AND d.origin = 'portfolio_system' ORDER BY d.id LIMIT 1"
 )
 
 # The signed-in advisor's mandates (app/api/mandates.py). No advisor in the statement:
@@ -61,18 +166,3 @@ LOAD_INSERT_PRODUCT_SHEET = (
     "INSERT INTO product_sheets (id, title, body, lang, url, origin, embedding,"
     " embedding_model, embedding_revision) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
 )
-
-# Retrieval (ADR 0013). Scaffolding (M1 PR 8, commit 1): inert, the statements come with
-# the build.
-SEARCH_MANDATE_DOCUMENTS_ENGLISH = "SELECT NULL WHERE false"
-SEARCH_MANDATE_DOCUMENTS_GERMAN = "SELECT NULL WHERE false"
-SEARCH_SHEETS_ENGLISH = "SELECT NULL WHERE false"
-SEARCH_SHEETS_GERMAN = "SELECT NULL WHERE false"
-NEAREST_CHUNKS = "SELECT NULL WHERE false"
-NEAREST_MANDATE_CHUNKS = "SELECT NULL WHERE false"
-NEAREST_SHEETS = "SELECT NULL WHERE false"
-DOCUMENT_DETAILS = "SELECT NULL WHERE false"
-DOCUMENT_PASSAGES = "SELECT NULL WHERE false"
-SHEET_DETAILS = "SELECT NULL WHERE false"
-MANDATE_VISIBLE = "SELECT NULL WHERE false"
-PORTFOLIO_REPORT = "SELECT NULL WHERE false"

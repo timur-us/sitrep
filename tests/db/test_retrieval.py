@@ -439,6 +439,8 @@ def test_the_iterative_scan_fills_the_vector_branch(app_pool: ConnectionPool) ->
         control = handlers.nearest_chunks(conn, MINE.id, query, CROWD_MODEL, CROWD_REVISION)
     assert setting == session.ITERATIVE_SCAN
     assert "Index Scan using chunks_embedding" in plan, plan
+    # Sorted again in full: PostgreSQL 17 would otherwise trust the relaxed order.
+    assert plan.startswith("Sort") and "Presorted Key" not in plan, plan
     assert len(found) == handlers.CANDIDATES, found
     assert {document for document, _ in found} == {crowd_document(MINE)}
     assert [distance for _, distance in found] == sorted(distance for _, distance in found)
@@ -528,10 +530,19 @@ def test_a_query_over_the_models_limit_is_refused(
 
 def test_no_query_text_reaches_a_log_record(read: Any, caplog: pytest.LogCaptureFixture) -> None:
     canary = "cnry" + secrets.token_hex(6)
-    with caplog.at_level(logging.DEBUG):
+    # psycopg holds its own logger at WARNING; here the driver and the pool log all.
+    with (
+        caplog.at_level(logging.DEBUG),
+        caplog.at_level(logging.DEBUG, logger="psycopg"),
+        caplog.at_level(logging.DEBUG, logger="psycopg.pool"),
+    ):
+        # Control: the capture sees the driver's DEBUG records.
+        logging.getLogger("psycopg").debug("control %s", "record")
         read[SEARCH](issue(MINE.id), SearchClientDocs(query=f"{canary} Vermögensbericht"))
         read[PORTFOLIO](issue(MINE.id), GetPortfolio(mandate_id=canary))
-    assert caplog.records, "nothing was logged at all: the check is vacuous"
+    assert [r.getMessage() for r in caplog.records if r.name == "psycopg"][:1] == ["control record"]
+    # Measured: about twenty records of the driver and the pool for these two calls.
+    assert sum(r.name == "psycopg.pool" for r in caplog.records) > 1, "the pool logged nothing"
     logged = "\n".join(
         f"{record.getMessage()} {record.args!r} {record.exc_text}" for record in caplog.records
     )

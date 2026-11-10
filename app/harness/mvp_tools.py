@@ -1,4 +1,4 @@
-"""The four MVP tools of docs/brief.md, declared only: the handlers are M1's.
+"""The four MVP tools of docs/brief.md: their arguments and results.
 
 | Tool | Effect | Approval |
 |---|---|---|
@@ -10,18 +10,19 @@
 All four touch client data, so all four are CONFIDENTIAL. The READ tools return
 Untrusted results; the other two return a Proposal, which approves nothing
 (app/harness/approval.py). No argument names an advisor: whose mandates a call reaches
-is decided by the login and row-level security. M1's handlers must therefore look up a
-mandate id the model names only inside the advisor transaction (app/db/session.py),
-where another advisor's mandate does not exist; M1 tests that through these tools. Each
-argument has bounds; the canary scan and the recipient allowlist are M2's
-(app/harness/policy.py).
+is decided by the login and row-level security. The handlers live apart from these
+declarations: the READ tools' in app/harness/handlers.py (M1 PR 8, ADR 0013), which look
+up a mandate id the model names only inside the advisor transaction
+(app/db/session.py), where another advisor's mandate does not exist; the other two are
+M1 PR 14's. Each argument has bounds; the canary scan and the recipient allowlist are
+M2's (app/harness/policy.py).
 """
 
 from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -42,7 +43,11 @@ class Arguments(BaseModel):
 class SearchClientDocs(Arguments):
     query: str = Field(min_length=1, max_length=500, description="What to look for.")
     mandate_id: MandateId | None = Field(
-        default=None, description="Search one mandate only; all of the advisor's otherwise."
+        default=None,
+        description=(
+            "Search this mandate's documents only, and no product sheets;"
+            " all of the advisor's documents and the product sheets otherwise."
+        ),
     )
     limit: int = Field(default=8, ge=1, le=20, description="At most this many hits.")
 
@@ -68,25 +73,38 @@ class CreateFollowup(Arguments):
 
 @dataclass(frozen=True)
 class DocumentHit:
+    """One search hit (ADR 0013): a document of the advisor's mandates, or a product
+    sheet, which belongs to no mandate. trust is the record's own column (ADR 0010):
+    provenance, never permission. excerpt is the stored passage nearest the query,
+    whole; a sheet is one passage."""
+
+    kind: Literal["document", "product_sheet"]
     document_id: str
-    mandate_id: str
+    mandate_id: str | None
     title: str
     lang: str
+    trust: str
     excerpt: str
 
 
 @dataclass(frozen=True)
 class Portfolio:
+    """A mandate's portfolio report, from the portfolio system. No document carries a
+    date the database stores; the report's own text names its reference date."""
+
     mandate_id: str
     document_id: str
-    as_of: datetime.date
+    title: str
+    lang: str
     report: str
 
 
 TOOLS = (
     ToolSpec(
         name="search_client_docs",
-        description="Search the documents of the advisor's own mandates.",
+        description=(
+            "Search the documents of the advisor's own mandates and the bank's product sheets."
+        ),
         arguments=SearchClientDocs,
         result=Untrusted[list[DocumentHit]],
         effect=Effect.READ,
@@ -95,9 +113,12 @@ TOOLS = (
     ),
     ToolSpec(
         name="get_portfolio",
-        description="The latest portfolio report of one of the advisor's mandates.",
+        description=(
+            "The portfolio report of one of the advisor's mandates;"
+            " null if there is no such mandate."
+        ),
         arguments=GetPortfolio,
-        result=Untrusted[Portfolio],
+        result=Untrusted[Portfolio | None],
         effect=Effect.READ,
         data_class=DataClass.CONFIDENTIAL,
         requires_approval=False,
