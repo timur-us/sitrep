@@ -29,6 +29,10 @@ ALLOWED = frozenset(
         "argparse",
         "collections",
         "contextlib",
+        # app/db/load.py only: the generator's ORIGIN, trust_for, LANGS and paths
+        # (data/synthetic/generate.py, standard library and branding only; ADR 0010).
+        # The image carries no data/, and no request path imports the loader.
+        "data",
         "dataclasses",
         # app/harness/model_client.py: the cost, exact to the table's cents.
         "decimal",
@@ -176,6 +180,8 @@ POOL_FILE = "app/db/session.py"
 EMBEDDER_FILE = "app/embeddings/onnx.py"
 # The model client: the one file that talks to the model API (ADR 0012).
 MODEL_CLIENT_FILE = "app/harness/model_client.py"
+# The loader: the one file that reads the synthetic corpus's generator (ADR 0010).
+LOADER_FILE = "app/db/load.py"
 # Modules that one file alone may import.
 SINGLE_FILE = {
     "anthropic": MODEL_CLIENT_FILE,
@@ -184,6 +190,7 @@ SINGLE_FILE = {
     "numpy": EMBEDDER_FILE,
     "onnxruntime": EMBEDDER_FILE,
     "tokenizers": EMBEDDER_FILE,
+    "data": LOADER_FILE,
 }
 # In the model client, the SDK's names it may use, and nothing else of the package: no
 # other client, no credential helper, no beta namespace, no copied client (review
@@ -302,6 +309,7 @@ def test_import_allowlist() -> None:
         "app/db/connect.py",
         EMBEDDER_FILE,
         MODEL_CLIENT_FILE,
+        LOADER_FILE,
     ):
         assert required in sources, f"{required} was not scanned"
     modules, problems = check(sources)
@@ -348,6 +356,9 @@ PLANTED = [
     ("import tokenizers\n", "tokenizers outside app/embeddings/onnx.py"),
     ("from tokenizers import Tokenizer\n", "tokenizers outside"),
     ("import numpy as np\n", "numpy outside app/embeddings/onnx.py"),
+    # The generator, outside the loader (ADR 0010).
+    ("from data.synthetic import generate\n", "data outside app/db/load.py"),
+    ("import data.synthetic.generate\n", "data outside app/db/load.py"),
     # Their network and native-code paths, anywhere.
     ("Tokenizer.from_pretrained('org/model')\n", ".from_pretrained"),
     ("from transformers import from_pretrained\n", "import from_pretrained"),
@@ -456,6 +467,12 @@ def test_the_model_client_libraries_are_allowed_in_their_own_file() -> None:
     assert scan("import anthropic.lib.vertex\n", MODEL_CLIENT_FILE)[1] != []
     # The near miss: httpx2 is not httpx, and httpx stays banned.
     assert banned_module("httpx2") is None and banned_module("httpx") == "httpx"
+
+
+def test_the_generator_is_allowed_in_the_loader_only() -> None:
+    source = "from data.synthetic import generate\n"
+    assert scan(source, LOADER_FILE)[1] == []
+    assert scan(source, "app/db/migrate.py")[1] != []
 
 
 def test_connect_is_allowed_in_its_own_file() -> None:

@@ -37,6 +37,26 @@ Not caught here: a statement inside an advisor transaction that calls set_config
 acts as another advisor for the rest of that transaction, and the setting is gone before
 the next checkout. That is the residual risk in docs/threat-model.md;
 tests/test_sql_hygiene.py keeps every statement a literal with bound values.
+
+owner_advisor_scope() is the loader's advisor transaction (ADR 0010; the M1 plan's
+question 2), and the second place that sets the advisor. The app role only reads, so the
+corpus is written by the owner, which FORCE binds to the advisor of the transaction like
+any other role. The helper takes a plain advisor id, since the loader has no login, and
+refuses before it writes anything unless all of these hold:
+- the id is one of the cast's advisors (app/config/branding.py);
+- the connection is idle, so the helper opens the transaction itself: one advisor per
+  transaction, and a second call inside the first is refused;
+- session_user is the migrator and current_user the owner (the migrator after SET ROLE),
+  neither of them a superuser or BYPASSRLS, with the role's own search_path and no
+  advisor set yet;
+- the login itself is the migrator: a superuser can take the migrator's session
+  authorization, which changes session_user but not the login pg_stat_activity shows;
+- the session holds no temporary relation: the loader's statements name tables without
+  a schema, and the owner may create temporary tables, which a name finds first.
+Request code cannot reach it: tests/test_loader_scope.py reports any use outside this
+definition and its one call in app/db/load.py, and any import of app/db/load.py in app/.
+That scan reads names and literals, so getattr() with a built string is not caught; the
+checks above are the second line, and the app role fails the first of them.
 """
 
 from __future__ import annotations
@@ -48,12 +68,15 @@ from psycopg.pq import TransactionStatus
 from psycopg_pool import ConnectionPool
 
 from app.auth.identity import VerifiedAdvisor
+from app.config import branding
 from app.config.settings import check_database_url
 from app.db import names
 from app.db.connect import CheckedConnection
 
 Pool = ConnectionPool[CheckedConnection]
 ROLE_SETTINGS = [f"search_path={names.SEARCH_PATH}"]
+# The advisors the loader may write for: the cast's, and no one else.
+CAST_ADVISORS = frozenset(person.id for person in branding.ADVISORS)
 
 
 class GuardError(Exception):
@@ -161,3 +184,60 @@ def advisor_transaction(pool: Pool, advisor: VerifiedAdvisor) -> Iterator[Checke
         with conn.transaction():
             conn.execute("SELECT set_config('app.advisor_id', %s, true)", (advisor.advisor_id,))
             yield conn
+
+
+def owner_session_problems(row: tuple[object, ...] | None) -> list[str]:
+    """What is wrong with a session for the loader, from the row owner_advisor_scope()
+    reads: session_user, current_user, whether either is a superuser or BYPASSRLS, the
+    advisor setting, the search_path, the login (pg_stat_activity), and how many
+    temporary relations the session holds."""
+    if row is None:
+        return ["the session's roles have no pg_roles row"]
+    session_user, current_user, session_privileged, current_privileged = row[:4]
+    advisor, search_path, login, temporary = row[4:]
+    found = []
+    if (session_user, current_user) != (names.MIGRATOR_ROLE, names.OWNER_ROLE):
+        found.append(
+            f"session_user {session_user}, current_user {current_user}, "
+            f"expected {names.MIGRATOR_ROLE} acting as {names.OWNER_ROLE}"
+        )
+    # SET SESSION AUTHORIZATION changes session_user, never the login (review sec-5).
+    if login != names.MIGRATOR_ROLE:
+        found.append(f"the login is not {names.MIGRATOR_ROLE}")
+    if session_privileged or current_privileged:
+        found.append("a role of the session is a superuser or has BYPASSRLS")
+    if advisor not in (None, ""):
+        found.append("an advisor is already set in this transaction")
+    if search_path != names.SEARCH_PATH:
+        found.append(f"search_path is not {names.SEARCH_PATH}")
+    # Unqualified names find a temporary table first: it would take the writes (sec-4).
+    if temporary != 0:
+        found.append("the session holds temporary relations, which come first by name")
+    return found
+
+
+@contextmanager
+def owner_advisor_scope(conn: CheckedConnection, advisor_id: str) -> Iterator[CheckedConnection]:
+    """A transaction on conn in which the owner writes advisor_id's rows only (the loader's)."""
+    if type(advisor_id) is not str or advisor_id not in CAST_ADVISORS:
+        raise GuardError("the advisor is not one of the cast's advisors")
+    if conn.info.transaction_status != TransactionStatus.IDLE:
+        raise GuardError("the connection is not idle: one advisor per transaction")
+    with conn.transaction():
+        row = conn.execute(
+            "SELECT session_user, current_user, s.rolsuper OR s.rolbypassrls,"
+            " c.rolsuper OR c.rolbypassrls,"
+            " pg_catalog.current_setting('app.advisor_id', true),"
+            " pg_catalog.current_setting('search_path'),"
+            " (SELECT a.usename FROM pg_catalog.pg_stat_activity a"
+            "  WHERE a.pid = pg_catalog.pg_backend_pid()),"
+            " (SELECT count(*) FROM pg_catalog.pg_class t"
+            "  WHERE t.relnamespace = pg_catalog.pg_my_temp_schema())"
+            " FROM pg_catalog.pg_roles s, pg_catalog.pg_roles c"
+            " WHERE s.rolname = session_user AND c.rolname = current_user"
+        ).fetchone()
+        found = owner_session_problems(row)
+        if found:
+            raise GuardError("; ".join(found))
+        conn.execute("SELECT set_config('app.advisor_id', %s, true)", (advisor_id,))
+        yield conn

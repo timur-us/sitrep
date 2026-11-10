@@ -3,22 +3,27 @@
 Discovery reads pg_catalog as the app role, over every schema that is not a system
 schema: every relation it can read is a table with row-level security enabled and
 forced, or a security_invoker view; materialized views and foreign tables are refused.
-The readable set is exactly the expected tables, each with exactly one policy of the
-canonical shape. The grants are exact: SELECT only on the tables, nothing on functions
-or sequences, USAGE on no type but the tables' own row types. No SECURITY DEFINER
-function exists outside the system schemas. Every unique index, primary keys included,
-contains advisor_id, which closes the referential-integrity channel: a key that exists
-for another advisor cannot be probed through a unique or foreign-key violation.
+The readable set is exactly the expected tables. Each advisor-scoped table has exactly
+one policy of the canonical shape; product_sheets, the one global table (ADR 0010),
+has exactly its two, pinned as PostgreSQL deparses them. No policy anywhere admits
+advisor_id IS NULL. The grants are exact: SELECT only on the tables, nothing on
+functions or sequences, USAGE on no type but the tables' own row types. No SECURITY
+DEFINER function exists outside the system schemas. Every unique index, primary keys
+included, contains advisor_id, which closes the referential-integrity channel: a key
+that exists for another advisor cannot be probed through a unique or foreign-key
+violation. product_sheets is exempt from the advisor_id rules by its name alone, holds
+no advisor_id, and no foreign key leads into or out of it.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 
 import pytest
 from dbtools import Connection, column
-from seed_rows import TABLES, readable
+from seed_rows import ADVISOR_TABLES, GLOBAL_TABLES, SHEETS, TABLES, readable
 
 from app.config.settings import Settings
 from app.db import names
@@ -29,8 +34,23 @@ pytestmark = pytest.mark.usefixtures("database")
 
 APP = names.APP_ROLE
 OWNER = names.OWNER_ROLE
-# How PostgreSQL deparses the one policy every table carries (USING and WITH CHECK).
+# How PostgreSQL deparses the one policy every advisor-scoped table carries (USING and
+# WITH CHECK).
 CANONICAL = "(advisor_id = NULLIF(current_setting('app.advisor_id'::text, true), ''::text))"
+# product_sheets' two policies (ADR 0010), as (name, command, permissive, roles, USING,
+# WITH CHECK): the app role reads every sheet inside an advisor transaction, and the
+# owner, which FORCE binds, writes them.
+SHEET_POLICIES = [
+    (
+        "advisor_read",
+        "r",
+        True,
+        [APP],
+        "(NULLIF(current_setting('app.advisor_id'::text, true), ''::text) IS NOT NULL)",
+        None,
+    ),
+    ("owner_write", "*", True, [OWNER], "true", "true"),
+]
 TABLE_PRIVILEGES = (
     "SELECT",
     "INSERT",
@@ -124,14 +144,14 @@ def test_one_canonical_policy_per_table(app: Connection) -> None:
         " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
         " LEFT JOIN pg_policy p ON p.polrelid = c.oid"
         " WHERE n.nspname || '.' || c.relname = ANY(%s) ORDER BY 1, 2",
-        (sorted(TABLES),),
+        (sorted(ADVISOR_TABLES),),
     ).fetchall()
     policies: dict[str, list[tuple]] = {}
     for table, name, *shape in rows:
         policies.setdefault(table, [])
         if name is not None:
             policies[table].append(tuple(shape))
-    assert set(policies) == TABLES, sorted(policies)
+    assert set(policies) == ADVISOR_TABLES, sorted(policies)
     canonical = ("*", True, True, CANONICAL, CANONICAL)
     wrong = [
         f"{table}: {len(found)} policies {found}, expected one {canonical}"
@@ -139,6 +159,57 @@ def test_one_canonical_policy_per_table(app: Connection) -> None:
         if found != [canonical]
     ]
     assert not wrong, "\n".join(wrong)
+
+
+POLICIES_OF = (
+    "SELECT p.polname, p.polcmd, p.polpermissive,"
+    " ARRAY(SELECT r.rolname::text FROM pg_roles r WHERE r.oid = ANY(p.polroles)"
+    "  ORDER BY r.rolname),"
+    " pg_get_expr(p.polqual, p.polrelid), pg_get_expr(p.polwithcheck, p.polrelid)"
+    " FROM pg_policy p WHERE p.polrelid = %s::regclass ORDER BY 1"
+)
+
+
+def test_product_sheets_have_exactly_their_policies(app: Connection) -> None:
+    assert GLOBAL_TABLES == {f"{names.SCHEMA}.product_sheets"}, GLOBAL_TABLES
+    found = [tuple(row) for row in app.execute(POLICIES_OF, (SHEETS,)).fetchall()]
+    assert found == [tuple(policy) for policy in SHEET_POLICIES], found
+
+
+# Every policy outside the system schemas, both expressions: none may let a row without
+# an advisor through (ADR 0010; the bypass PR 8 sec-8 forbids).
+ALL_POLICIES = (
+    "SELECT n.nspname || '.' || c.relname || ' ' || p.polname,"
+    " coalesce(pg_get_expr(p.polqual, p.polrelid), '') || ' '"
+    " || coalesce(pg_get_expr(p.polwithcheck, p.polrelid), '')"
+    " FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid"
+    " JOIN pg_namespace n ON n.oid = c.relnamespace"
+    " WHERE n.nspname NOT LIKE %s AND n.nspname <> 'information_schema' ORDER BY 1"
+)
+NULL_ADVISOR = re.compile(r"advisor_id\)?\s+IS\s+NULL", re.IGNORECASE)
+
+
+def null_advisor_policies(rows: list[tuple]) -> list[str]:
+    return [name for name, text in rows if NULL_ADVISOR.search(text)]
+
+
+def test_no_policy_admits_a_null_advisor(app: Connection) -> None:
+    rows = app.execute(ALL_POLICIES, (SYSTEM,)).fetchall()
+    # Non-vacuity: every table's policies are read, the sheets' two among them.
+    assert len(rows) == len(ADVISOR_TABLES) + len(SHEET_POLICIES), rows
+    found = null_advisor_policies(rows)
+    assert not found, f"policies that admit advisor_id IS NULL: {found}"
+
+
+def test_control_a_null_advisor_policy_is_seen(superuser: Connection) -> None:
+    mandates = f"{names.SCHEMA}.mandates"
+    with planted(
+        superuser,
+        f"CREATE POLICY null_probe ON {mandates} FOR SELECT USING (advisor_id IS NULL)",
+        f"CREATE POLICY null_probe_2 ON {mandates} FOR SELECT USING ((advisor_id) is  null)",
+    ) as conn:
+        found = null_advisor_policies(conn.execute(ALL_POLICIES, (SYSTEM,)).fetchall())
+    assert found == [f"{mandates} null_probe", f"{mandates} null_probe_2"], found
 
 
 SCHEMAS = [names.SCHEMA, names.META_SCHEMA]
@@ -292,26 +363,43 @@ def test_control_a_security_definer_function_is_seen(superuser: Connection) -> N
 
 
 UNIQUE_INDEXES = (
-    "SELECT i.indexrelid::regclass::text, i.indisprimary,"
+    "SELECT n.nspname || '.' || c.relname, i.indexrelid::regclass::text, i.indisprimary,"
     " ARRAY(SELECT a.attname FROM unnest(i.indkey) AS k(attnum)"
     "  JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum)"
     " FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid"
     " JOIN pg_namespace n ON n.oid = c.relnamespace"
-    " WHERE n.nspname = %s AND i.indisunique ORDER BY 1"
+    " WHERE n.nspname = %s AND i.indisunique ORDER BY 2"
 )
+
+
+def unique_index_problems(rows: list[tuple]) -> list[str]:
+    """Unique indexes without advisor_id, outside the global table, which is exempt by name."""
+    return [
+        f"unique index without advisor_id: {name} {columns}"
+        for table, name, _, columns in rows
+        if table not in GLOBAL_TABLES and "advisor_id" not in columns
+    ]
 
 
 def test_every_unique_index_contains_advisor_id(app: Connection) -> None:
     indexes = app.execute(UNIQUE_INDEXES, (names.SCHEMA,)).fetchall()
-    primaries = [name for name, primary, _ in indexes if primary]
+    primaries = [name for _, name, primary, _ in indexes if primary]
     assert len(primaries) == len(TABLES), f"primary keys: {primaries}"
     assert len(indexes) > len(primaries), f"no unique index besides the keys: {indexes}"
-    wrong = [
-        f"unique index without advisor_id: {name} {columns}"
-        for name, _, columns in indexes
-        if "advisor_id" not in columns
-    ]
+    wrong = unique_index_problems(indexes)
     assert not wrong, "\n".join(wrong)
+    # The exemption is used: the sheets' keys, id and url, hold no advisor_id.
+    sheets = sorted((primary, columns) for table, _, primary, columns in indexes if table == SHEETS)
+    assert sheets == [(False, ["url"]), (True, ["id"])], sheets
+
+
+def test_planted_unique_indexes_are_checked() -> None:
+    # The exemption is the global table's name, and no other: a table that merely looks
+    # global is reported.
+    other = f"{names.SCHEMA}.lookalike"
+    rows = [(SHEETS, "s_pkey", True, ["id"]), (other, "l_pkey", True, ["id"])]
+    assert unique_index_problems(rows) == ["unique index without advisor_id: l_pkey ['id']"]
+    assert unique_index_problems([(other, "l_pkey", True, ["advisor_id", "id"])]) == []
 
 
 # Foreign keys and exclusion constraints (review finding sec-6): a key check bypasses
@@ -344,9 +432,42 @@ def constraint_problems(rows: list[tuple]) -> list[str]:
 def test_every_key_check_contains_advisor_id(app: Connection) -> None:
     rows = app.execute(CONSTRAINTS, (names.SCHEMA,)).fetchall()
     foreign = [row for row in rows if row[1] == "f"]
-    assert len(foreign) == len(TABLES) - 1, f"foreign keys: {rows}"
+    # Every advisor-scoped table but advisors has one; the global table has none.
+    assert len(foreign) == len(ADVISOR_TABLES) - 1, f"foreign keys: {rows}"
     wrong = constraint_problems(rows)
     assert not wrong, "\n".join(wrong)
+
+
+def test_no_foreign_key_touches_the_global_table(app: Connection) -> None:
+    # ADR 0010 (PR 1 review sec-2): no key leads into or out of product_sheets, so no
+    # advisor's row hangs off a global one, nor the other way round.
+    found = column(
+        app,
+        "SELECT conname FROM pg_constraint WHERE contype = 'f'"
+        " AND %s::regclass IN (conrelid, confrelid)",
+        (SHEETS,),
+    )
+    assert found == [], found
+
+
+def test_mandate_contacts_keys(app: Connection) -> None:
+    # Recipients per mandate (PR 8 sec-2): advisor_id leads every key.
+    contacts = f"{names.SCHEMA}.mandate_contacts"
+    rows = app.execute(
+        "SELECT c.contype,"
+        " ARRAY(SELECT a.attname FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, place)"
+        "  JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum"
+        "  ORDER BY k.place),"
+        " c.confrelid::regclass::text"
+        " FROM pg_constraint c WHERE c.conrelid = %s::regclass AND c.contype IN ('p', 'u', 'f')"
+        " ORDER BY 1",
+        (contacts,),
+    ).fetchall()
+    assert [(kind, columns) for kind, columns, _ in rows] == [
+        ("f", ["advisor_id", "mandate_id"]),
+        ("p", ["advisor_id", "mandate_id", "email"]),
+    ], rows
+    assert rows[0][2].rpartition(".")[2] == "mandates", rows
 
 
 def test_control_key_checks_without_advisor_id_are_seen(superuser: Connection) -> None:
@@ -367,7 +488,9 @@ def test_every_table_has_a_required_advisor_id(app: Connection) -> None:
         "SELECT n.nspname || '.' || c.relname, a.attnotnull, a.atttypid::regtype::text"
         " FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
         " JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'advisor_id'"
+        " AND NOT a.attisdropped"
         " WHERE n.nspname || '.' || c.relname = ANY(%s) ORDER BY 1",
         (sorted(TABLES),),
     ).fetchall()
-    assert found == [(table, True, "text") for table in sorted(TABLES)], found
+    # Every table but the global one, which has no advisor_id at all (ADR 0010).
+    assert found == [(table, True, "text") for table in sorted(ADVISOR_TABLES)], found

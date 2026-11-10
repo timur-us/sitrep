@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (Timur, 2026-10-28, in the M0 plan; recorded and amended by its review in M0 PR 5a; completed in PR 5b; URLs prefixed in M1 PR 3, Timur 2026-11-08).
+Accepted (Timur, 2026-10-28, M0 plan; amended in M0 PRs 5a and 5b, and M1 PRs 3 and 7).
 
 ## Date
 
@@ -32,9 +32,9 @@ The third option.
 
   The superuser creates `vector` (not trusted) and owns `public`. PUBLIC loses CONNECT on `postgres` and `template1`, and the large-object creators. The owner's future functions and types are not PUBLIC (default privileges; table row types aside, which open no rows).
 - **Migrations:** numbered SQL files, forward only. The runner refuses any login but the migrator and records sha256, `session_user` and `current_user` per file. A changed or missing applied file stops the run before any DDL. New files run in one transaction, under a lock; a file that ends it, or changes role or `search_path`, is refused unrecorded (detected, not prevented).
-- **Row-level security:** ENABLE and FORCE everywhere, one policy on `NULLIF(current_setting('app.advisor_id', true), '')`; `advisor_id` in every key and unique index (no referential-integrity channel); app role `SELECT` only in M0. The advisor: `set_config('app.advisor_id', %s, true)` in a real `BEGIN`, the bindable `SET LOCAL`.
+- **Row-level security:** ENABLE and FORCE everywhere, one policy on `NULLIF(current_setting('app.advisor_id', true), '')`; `advisor_id` in every key and unique index (no referential-integrity channel); app role `SELECT` only. `product_sheets` is global: ADR 0010. The advisor: `set_config('app.advisor_id', %s, true)` in a real `BEGIN`, the bindable `SET LOCAL`.
 - **Pool:** `psycopg-pool` 3.3.3, lazy, on `connect()`'s connection class; a guard at connect and checkout closes any session but the clean app role.
-- **Identity:** `advisor_transaction()` takes only a `VerifiedAdvisor`, issued by `app/auth/`. No signed advisor context in M0 (Timur, 2026-10-28): a forged `set_config` is a documented residual risk.
+- **Identity:** `advisor_transaction()` takes only a `VerifiedAdvisor`, issued by `app/auth/`; the loader writes through `owner_advisor_scope()` (ADR 0010). No signed advisor context (Timur, 2026-10-28): a forged `set_config` is a documented residual risk.
 - **Local port:** 55432, not 5432, where a native PostgreSQL may answer (Timur, 2026-10-30).
 
 ## Consequences
@@ -56,3 +56,4 @@ The third option.
 - psycopg 3.3.6 on PyPI, uploaded 2026-09-18, https://pypi.org/project/psycopg/ (lock resolved 2026-10-30).
 - psycopg-pool 3.3.3 on PyPI, uploaded 2026-09-22, https://pypi.org/project/psycopg-pool/ (locked 2026-10-31); its `pool.py` read for how `connection_class`, `configure` and `check` are called.
 - Timur's answer 1 to the PR 7 questions (the `SITREP_` prefix for both URLs), `docs/plans/m0-foundation.md`, amendment recorded in PR 9 (2026-11-08); built in M1 PR 3, `docs/plans/m1-mvp-core.md` (2026-11-08).
+- The loader and `product_sheets`: `docs/decisions/0010-loader-and-trust.md` and `docs/plans/m1-mvp-core.md`, PR 7 and question 2; built in M1 PR 7 (2026-11-09).

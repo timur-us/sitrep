@@ -7,10 +7,14 @@ SHELL := /bin/sh
 # uv fails instead of rewriting uv.lock when pyproject.toml and the lock disagree.
 export UV_LOCKED := 1
 
+# Every target runs uv this way: no env file is loaded, not even one a shell names in
+# UV_ENV_FILE, so the targets read the environment alone (M1 PR 3, Timur's answer 2).
+UV_RUN := uv run --no-env-file
+
 # The local image tag. The smoke test publishes on 127.0.0.1 only, on a free port.
 IMAGE := sitrep:local
 
-.PHONY: help up down migrate model lint fmt test lint-test audit docker-build web-deps web-test evals redteam data
+.PHONY: help up down migrate model load lint fmt test lint-test audit docker-build web-deps web-test evals redteam data
 
 help: ## List the targets
 	@grep -E '^[a-z][a-z0-9-]*:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-13s %s\n", $$1, $$2}'
@@ -26,7 +30,7 @@ down: ## Stop PostgreSQL and delete its data
 	docker compose -f compose.yaml down --volumes
 
 migrate: ## Apply db/migrations as the migration role (after make up)
-	uv run python -P -m app.db.migrate
+	$(UV_RUN) python -P -m app.db.migrate
 
 # The embedding model (ADR 0005): exactly FILES at REVISION, from app/config/embedding.py,
 # into models/ (git-ignored). `missing` deletes a file with other bytes and lists what to
@@ -39,7 +43,7 @@ MODEL_CURL := curl -q --fail --silent --show-error --location --proto '=https' -
 
 model: ## Download the embedding model's pinned files into models/ and check each sha256 (needs the network)
 	@set -eu; \
-	todo="$$(uv run python -P -m app.embeddings.model_files missing)"; \
+	todo="$$($(UV_RUN) python -P -m app.embeddings.model_files missing)"; \
 	printf '%s\n' "$$todo" | while read -r url path; do \
 	  test -n "$$url" || continue; \
 	  mkdir -p "$$(dirname "$$path")"; \
@@ -50,19 +54,26 @@ model: ## Download the embedding model's pinned files into models/ and check eac
 	  $(MODEL_CURL) -o "$$tmp" "$$url"; \
 	  mv -f "$$tmp" "$$path"; \
 	done
-	uv run python -P -m app.embeddings.model_files verify
+	$(UV_RUN) python -P -m app.embeddings.model_files verify
+
+# The loader (ADR 0010): the corpus from `data`, checked against the reviewed manifest
+# hash, chunked and embedded with the model from `model`, then written as the migrator
+# acting as the owner, one advisor per transaction, then the product sheets. It needs a
+# migrated database (make up, make migrate). A second run gives the same rows.
+load: model data ## Load the synthetic corpus into the database as the owner (after make up and make migrate)
+	$(UV_RUN) python -P -m app.db.load
 
 lint: ## Check lint and formatting with ruff
-	uv run ruff check
-	uv run ruff format --check
+	$(UV_RUN) ruff check
+	$(UV_RUN) ruff format --check
 
 fmt: ## Format the code with ruff
-	uv run ruff format
+	$(UV_RUN) ruff format
 
 # Offline means no network beyond loopback: tests/db needs `make up` and `make migrate`
 # first, tests/embeddings needs `make model`, and both fail, never skip, without them.
 test: lint ## Lint, then run the offline tests (all of tests/ except tests/web; needs make up, make migrate, make model)
-	uv run python -P -m pytest --ignore=tests/web
+	$(UV_RUN) python -P -m pytest --ignore=tests/web
 
 # CI runs one target per job (.github/workflows/ci.yml); tests/ci/ pins both sides.
 # Prerequisites run in order: the database is up and migrated, and the model is in
@@ -79,26 +90,26 @@ audit: ## Re-resolve the lock, then pip-audit it with hashes (needs the network)
 	req="$$(mktemp)"; \
 	trap 'rm -f "$$req"' EXIT; \
 	uv export --format requirements.txt --locked --no-emit-project --all-groups --quiet -o "$$req"; \
-	uv run pip-audit -r "$$req" --require-hashes --disable-pip --progress-spinner off
+	$(UV_RUN) pip-audit -r "$$req" --require-hashes --disable-pip --progress-spinner off
 
 # No --with-deps: it runs apt as root. The runner image is trusted to carry the libraries.
 web-deps: ## Download Chromium for Playwright (from Playwright's CDN, not hash-pinned)
-	uv run playwright install chromium
+	$(UV_RUN) playwright install chromium
 
 # pytest exits 5 when it collects nothing, and make fails on it.
 web-test: web-deps ## The browser smoke test (tests/web) against the app on 127.0.0.1
-	uv run python -P -m pytest tests/web
+	$(UV_RUN) python -P -m pytest tests/web
 
 evals: ## The eval gate, offline: check the corpus against evals/gate.toml (no scoring in M0)
-	uv run python -P -m app.runners.evals
+	$(UV_RUN) python -P -m app.runners.evals
 
 redteam: ## The red-team gate, offline: check the attacks against redteam/gate.toml (no scoring in M0)
-	uv run python -P -m app.runners.redteam
+	$(UV_RUN) python -P -m app.runners.redteam
 
 # Standard library only, fixed seed: the same templates give the same bytes. The output
 # is git-ignored. `data` is phony, or make would take the data/ directory for it.
 data: ## Regenerate the synthetic corpus (fixed seed) into data/synthetic/out/ (git-ignored)
-	uv run python -P -m data.synthetic.generate
+	$(UV_RUN) python -P -m data.synthetic.generate
 
 docker-build: ## Build the image, then smoke-test it: /health on 127.0.0.1, non-root, plaintext and dev login refused
 	docker build -t $(IMAGE) .

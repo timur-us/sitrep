@@ -16,9 +16,14 @@ from repo_files import ROOT
 
 from app.config.settings import env_name
 
+# Every target runs uv without an env file, not even one named in UV_ENV_FILE (M1 PR 3,
+# Timur's answer 2; built in PR 7).
+UV_RUN = "uv run --no-env-file"
 # Key commands per target, as `make -n` prints them.
-MODEL_MISSING = "uv run python -P -m app.embeddings.model_files missing"
-MODEL_VERIFY = "uv run python -P -m app.embeddings.model_files verify"
+MODEL_MISSING = f"{UV_RUN} python -P -m app.embeddings.model_files missing"
+MODEL_VERIFY = f"{UV_RUN} python -P -m app.embeddings.model_files verify"
+DATA = f"{UV_RUN} python -P -m data.synthetic.generate"
+LOAD = f"{UV_RUN} python -P -m app.db.load"
 # The download (ADR 0005): curl's first argument skips ~/.curlrc; https only, redirects
 # included; the URL and the target come from model_files, never from the Makefile.
 MODEL_COMMANDS = [
@@ -39,16 +44,16 @@ TARGET_COMMANDS = {
     "lint-test": [
         # -f names compose.yaml alone: no override file and no COMPOSE_FILE is merged in.
         "docker compose -f compose.yaml up -d --wait",
-        "uv run python -P -m app.db.migrate",
+        f"{UV_RUN} python -P -m app.db.migrate",
         *MODEL_COMMANDS,
-        "uv run ruff check",
-        "uv run ruff format --check",
-        "uv run python -P -m pytest --ignore=tests/web",
+        f"{UV_RUN} ruff check",
+        f"{UV_RUN} ruff format --check",
+        f"{UV_RUN} python -P -m pytest --ignore=tests/web",
     ],
     "audit": [
         "uv lock --check --refresh",
         "uv export --format requirements.txt --locked --no-emit-project --all-groups",
-        "uv run pip-audit -r",
+        f"{UV_RUN} pip-audit -r",
         "--require-hashes",
         "--disable-pip",
     ],
@@ -63,10 +68,16 @@ TARGET_COMMANDS = {
         f"-e {env_name('host')}=",
     ],
     "model": MODEL_COMMANDS,
-    "web-deps": ["uv run playwright install chromium"],
-    "web-test": ["uv run playwright install chromium", "uv run python -P -m pytest tests/web"],
-    "evals": ["uv run python -P -m app.runners.evals"],
-    "redteam": ["uv run python -P -m app.runners.redteam"],
+    # Not a CI job yet (PR 12 puts it before web-test): the model, the corpus, then the
+    # loader.
+    "load": [*MODEL_COMMANDS, DATA, LOAD],
+    "web-deps": [f"{UV_RUN} playwright install chromium"],
+    "web-test": [
+        f"{UV_RUN} playwright install chromium",
+        f"{UV_RUN} python -P -m pytest tests/web",
+    ],
+    "evals": [f"{UV_RUN} python -P -m app.runners.evals"],
+    "redteam": [f"{UV_RUN} python -P -m app.runners.redteam"],
 }
 
 # Ways a recipe or the Makefile keeps going after a failed command.
@@ -140,6 +151,53 @@ def test_lint_test_fetches_and_checks_the_model_before_pytest() -> None:
     steps = ["python -P -m app.db.migrate", MODEL_MISSING, "curl -q ", MODEL_VERIFY, "-m pytest"]
     positions = [out.find(step) for step in steps]
     assert -1 not in positions and positions == sorted(positions), f"order {positions}:\n{out}"
+
+
+def test_load_fetches_the_model_and_the_corpus_first() -> None:
+    out = dry_run("load")
+    steps = [MODEL_VERIFY, DATA, LOAD]
+    positions = [out.find(step) for step in steps]
+    assert -1 not in positions and positions == sorted(positions), f"order {positions}:\n{out}"
+    assert out.rstrip().endswith(LOAD), "the loader is not the last step"
+
+
+def bare_uv_runs(text: str) -> list[str]:
+    """Lines that run `uv run` without --no-env-file right after it."""
+    return [
+        line.strip()
+        for line in text.splitlines()
+        for match in re.finditer(r"\buv\s+run\b(?!\s+--no-env-file\b)", line)
+    ]
+
+
+def test_every_uv_run_skips_env_files() -> None:
+    # In what each target runs, as make prints it, and in the Makefile's text, where
+    # only the one definition may name `uv run`.
+    targets = re.findall(
+        r"^([a-z][a-z0-9-]*):.*## ", (ROOT / "Makefile").read_text("utf-8"), re.MULTILINE
+    )
+    assert len(targets) >= 15, targets
+    runs = 0
+    for target in targets:
+        out = dry_run(target)
+        runs += out.count(UV_RUN)
+        assert not bare_uv_runs(out), f"make -n {target}: {bare_uv_runs(out)}"
+    assert runs >= 15, f"only {runs} uv runs seen"
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    definitions = re.findall(r"^UV_RUN\s*:=\s*(.+)$", makefile, re.MULTILINE)
+    assert definitions == [UV_RUN], definitions
+    others = [line for line in makefile.splitlines() if "uv run" in line]
+    assert others == [f"UV_RUN := {UV_RUN}"], others
+
+
+def test_planted_uv_runs_are_caught() -> None:
+    assert bare_uv_runs("uv run python -m x\nuv  run ruff\n\t@x=$$(uv run y)") == [
+        "uv run python -m x",
+        "uv  run ruff",
+        "@x=$$(uv run y)",
+    ]
+    assert bare_uv_runs("uv run --no-env-file python\nuv lock --check\nuv export") == []
+    assert bare_uv_runs("uv run --no-env-filex python") == ["uv run --no-env-filex python"]
 
 
 def test_the_model_download_is_anonymous_and_checked() -> None:

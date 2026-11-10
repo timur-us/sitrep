@@ -255,7 +255,7 @@ New for two sessions:
 
 **Tests that fail before the change.**
 - `SITREP_DATABASE_URL` is read.
-- An unprefixed `DATABASE_URL` naming `192.0.2.1` changes nothing: no error, and the default stands.
+- An unprefixed `DATABASE_URL` naming `192.0.2.1` changes nothing: no error, and the default stands. Amended (Timur, 2026-11-09, answer 1 on #25): the entry points name such a variable on stderr (`ignored: …`), never its value; the value is still not read.
 - `env_name()` is prefixed for every field.
 - `.env.example` and the runbook name only the prefixed variables.
 
