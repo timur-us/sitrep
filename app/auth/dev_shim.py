@@ -51,6 +51,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from app.auth.identity import attach, issue
 from app.config import branding
 from app.config.settings import LOOPBACK
+from app.http import host_check
 
 COOKIE = f"{branding.SLUG}_dev_session"
 FORM_TYPE = "application/x-www-form-urlencoded"
@@ -119,7 +120,7 @@ class DevShimMiddleware:
     def __init__(self, app: ASGIApp, sessions: Sessions, port: int) -> None:
         self.app = app
         self.sessions = sessions
-        self.host = f"{LOOPBACK}:{port}".encode()
+        self.hosts = frozenset({f"{LOOPBACK}:{port}".encode()})
         self.origin = f"http://{LOOPBACK}:{port}".encode()
 
     def refusal(self, scope: Scope) -> Response | None:
@@ -131,7 +132,9 @@ class DevShimMiddleware:
         if not client or client[0] != LOOPBACK:
             return PlainTextResponse("Forbidden", status_code=403)
         headers = scope["headers"]
-        if _values(headers, b"host") != [self.host]:
+        # The app's own Host check (app/http/host_check.py) ran before this; the shim
+        # repeats it with loopback alone, whatever the allowed_hosts setting says.
+        if not host_check.host_allowed(headers, self.hosts):
             return PlainTextResponse("Bad Request", status_code=400)
         if scope["method"] != "GET":
             if _values(headers, b"origin") != [self.origin]:

@@ -86,7 +86,13 @@ def traced(settings: Settings) -> tuple[FastAPI, InMemorySpanExporter]:
 
 
 def _client(app: FastAPI) -> TestClient:
-    return TestClient(app, follow_redirects=False, raise_server_exceptions=False)
+    # The Host the app allows by default (M1 PR 5): loopback on the settings' port.
+    return TestClient(
+        app,
+        base_url="http://127.0.0.1:8000",
+        follow_redirects=False,
+        raise_server_exceptions=False,
+    )
 
 
 def _spans(memory: InMemorySpanExporter, name: str) -> list:
@@ -166,10 +172,12 @@ def test_index_title_comes_from_branding(traced: tuple[FastAPI, InMemorySpanExpo
     assert "{{" not in response.text, "a placeholder was not filled in"
 
 
-def redirects(app: FastAPI) -> tuple[set[str], int, list[str]]:
+def redirects(app: FastAPI) -> tuple[set[str], int, list[str], set[int]]:
     """Every route with and without a trailing slash, plus /static, a 404 and the usual
-    open-redirect shapes, under every method, with a foreign Host and forwarding headers.
-    Returns the paths, the number of requests and every 3xx or Location."""
+    open-redirect shapes, under every method, with forwarding headers naming the attacker.
+    The Host is the one the app allows (M1 PR 5), so the requests reach the routing; a
+    foreign Host is refused before it (tests/test_host_check.py). Returns the paths, the
+    number of requests, every 3xx or Location, and the statuses seen."""
     attacker = branding.DOMAINS.attacker
     paths = {"/static", "/static/", "/static/x", "/nope", "/nope/"}
     paths |= {f"//{attacker}/", f"/%2F%2F{attacker}", "/health//", "/./health/", "/health/.."}
@@ -179,30 +187,35 @@ def redirects(app: FastAPI) -> tuple[set[str], int, list[str]]:
         paths |= {variant for variant in (stem, stem + "/") if variant != "/" or path == "/"}
     paths.discard("")
     headers = {
-        "host": branding.DOMAINS.canary,
+        "host": "127.0.0.1:8000",
         "x-forwarded-host": attacker,
         "x-forwarded-proto": "https",
         "forwarded": f"host={attacker};proto=https",
     }
     client = _client(app)
-    count, found = 0, []
+    count, found, statuses = 0, [], set()
     for path in sorted(paths):
         for method in METHODS:
             # An absolute URL, so that "//host/" stays a path and is not read as a host.
-            response = client.request(method, f"http://testserver{path}", headers=headers)
+            response = client.request(method, f"http://127.0.0.1:8000{path}", headers=headers)
             count += 1
+            statuses.add(response.status_code)
             location = response.headers.get("location")
             if 300 <= response.status_code < 400 or location is not None:
                 found.append(f"{method} {path}: {response.status_code} {location}")
-    return paths, count, found
+    return paths, count, found, statuses
 
 
 def test_no_redirects(traced: tuple[FastAPI, InMemorySpanExporter]) -> None:
     app, _ = traced
     routes = {route.path for route in app.routes}
     assert {"/", "/health"} <= routes, f"routes: {sorted(routes)}"
-    paths, count, found = redirects(app)
+    paths, count, found, statuses = redirects(app)
     assert {"/", "/health", "/health/"} <= paths, sorted(paths)
+    # The routing answered (review finding test-2): a refusal at the Host check alone
+    # would make "no redirect" hold for any app.
+    assert {200, 404, 405} <= statuses, sorted(statuses)
+    assert 400 not in statuses, sorted(statuses)
     assert count == len(paths) * len(METHODS) >= 13 * len(METHODS), f"only {count} requests"
     assert not found, "redirects:\n" + "\n".join(found)
 
@@ -211,7 +224,7 @@ def test_redirect_check_catches_a_redirect() -> None:
     # Positive control: FastAPI's default redirects a trailing slash.
     plain = FastAPI()
     plain.add_api_route("/health", lambda: {"status": "ok"})
-    _, _, found = redirects(plain)
+    _, _, found, _ = redirects(plain)
     assert any(line.startswith("GET /health/: 307") for line in found), found
 
 

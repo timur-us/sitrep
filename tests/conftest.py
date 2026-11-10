@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
+import threading
+import warnings
 from collections.abc import Iterator
 
 import pytest
@@ -50,6 +53,16 @@ def settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("NO_PROXY", "*")
     monkeypatch.setenv("no_proxy", "*")
     return Settings(_env_file=None)
+
+
+@pytest.fixture(autouse=True)
+def restore_exception_hooks() -> Iterator[None]:
+    """Put back the process-wide hooks app.__main__.main() replaces (M1 PR 5), so a test
+    that runs main() in process does not leave the app's hooks for the next one, and
+    pytest's own thread and unraisable hooks stay in place (review finding test-1)."""
+    saved = (threading.excepthook, sys.unraisablehook, sys.excepthook, warnings.showwarning)
+    yield
+    threading.excepthook, sys.unraisablehook, sys.excepthook, warnings.showwarning = saved
 
 
 @pytest.fixture

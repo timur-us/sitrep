@@ -27,6 +27,9 @@ ALLOWED = frozenset(
         "anthropic",
         "app",
         "argparse",
+        # app/main.py sets the loop's exception handler (M1 PR 5); the connecting and
+        # serving calls of asyncio stay banned below.
+        "asyncio",
         "collections",
         "contextlib",
         # app/db/load.py only: the generator's ORIGIN, trust_for, LANGS and paths
@@ -76,6 +79,9 @@ ALLOWED = frozenset(
         "stat",
         "starlette",
         "sys",
+        # app/observability/logs.py replaces threading.excepthook (M1 PR 5); no thread is
+        # started in app/.
+        "threading",
         # The model's tokenizer (ADR 0005), in app/embeddings/onnx.py only. It can reach
         # the network through Tokenizer.from_pretrained(), which is banned below; the lock
         # leaves out the Hub client it would call (tests/test_lock.py).
@@ -84,6 +90,9 @@ ALLOWED = frozenset(
         "types",
         "typing",
         "unicodedata",
+        # app/observability/logs.py replaces warnings.showwarning (M1 PR 5, review finding
+        # sec-1): a warning's text can quote a value.
+        "warnings",
         "uvicorn",
     }
 )
@@ -92,6 +101,7 @@ ALLOWED = frozenset(
 BANNED_MODULES = frozenset(
     {
         "aiohttp",
+        "asyncio.subprocess",
         # The SDK's other clients and runners: Bedrock, Vertex, Foundry, AWS, the tool
         # runner's toolset and the environments worker (ADR 0012).
         "anthropic.lib",
@@ -134,6 +144,29 @@ BANNED_ATTRIBUTES = frozenset(
         "create_subprocess_exec",
         "create_subprocess_shell",
         "create_unix_connection",
+        # asyncio's own lookup, servers, programs, pipes and raw sends (review finding
+        # sec-2 of M1 PR 5): asyncio is reviewed in for the loop's exception handler only.
+        "connect_read_pipe",
+        "connect_write_pipe",
+        "create_unix_server",
+        "getaddrinfo",
+        "getnameinfo",
+        "sock_sendall",
+        "sock_sendfile",
+        "sock_sendto",
+        "start_unix_server",
+        "subprocess_exec",
+        "subprocess_shell",
+        "to_thread",
+        # Threads and executors anywhere, and the sends that need a socket (review
+        # finding sec-r6 of M1 PR 5): logs.py replaces the thread hook, it starts none.
+        "Thread",
+        "Timer",
+        "connect_accepted_socket",
+        "run_in_executor",
+        "sendfile",
+        "start_new_thread",
+        "start_tls",
         "add_external_initializers",
         # The SDK's HTTP clients read proxy variables from the environment even with
         # trust_env off (ADR 0012).
@@ -184,6 +217,10 @@ MODEL_CLIENT_FILE = "app/harness/model_client.py"
 LOADER_FILE = "app/db/load.py"
 # Modules that one file alone may import.
 SINGLE_FILE = {
+    # The loop's exception handler, set in the lifespan; the hooks (M1 PR 5).
+    "asyncio": "app/main.py",
+    "threading": "app/observability/logs.py",
+    "warnings": "app/observability/logs.py",
     "anthropic": MODEL_CLIENT_FILE,
     "httpx2": MODEL_CLIENT_FILE,
     "psycopg_pool": POOL_FILE,
@@ -236,6 +273,9 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
             if not node.level:
                 dotted.add(module)
                 dotted.update(f"{module}.{alias.name}" for alias in node.names)
+            if any(alias.name == "*" for alias in node.names):
+                # A star import binds names the scan never sees (review finding test-r1).
+                problems.append(f"{rel}:{node.lineno}: from {module or '.'} import *")
             if top == "anthropic" and rel == MODEL_CLIENT_FILE:
                 problems += [
                     f"{rel}:{node.lineno}: from {module} import {alias.name}"
@@ -371,6 +411,26 @@ PLANTED = [
     ("options.profile_file_prefix = 'p'\n", ".profile_file_prefix"),
     ("options.optimized_model_filepath = 'm.onnx'\n", ".optimized_model_filepath"),
     ("tokenizers.Tokenizer.from_file('tokenizer.json')\n", ".from_file"),
+    # Review finding sec-2 of M1 PR 5: asyncio's other ways out, and one file each.
+    ("import asyncio\nasyncio.get_running_loop().getaddrinfo('x', 1)\n", ".getaddrinfo"),
+    ("loop.subprocess_exec(p, 'x')\n", ".subprocess_exec"),
+    ("loop.subprocess_shell(p, 'x')\n", ".subprocess_shell"),
+    ("asyncio.start_unix_server(h, 'p')\n", ".start_unix_server"),
+    ("loop.create_unix_server(f, 'p')\n", ".create_unix_server"),
+    ("loop.connect_write_pipe(p, f)\n", ".connect_write_pipe"),
+    ("loop.sock_sendto(s, b'x', a)\n", ".sock_sendto"),
+    ("loop.sock_sendall(s, b'x')\n", ".sock_sendall"),
+    ("asyncio.to_thread(f)\n", ".to_thread"),
+    ("import asyncio.subprocess\n", "banned module asyncio.subprocess"),
+    ("from asyncio import *\nopen_connection('h', 1)\n", "from asyncio import *"),
+    ("from app.config import *\n", "from app.config import *"),
+    ("loop.run_in_executor(None, f)\n", ".run_in_executor"),
+    ("threading.Thread(target=f).start()\n", ".Thread"),
+    ("from threading import Timer\n", "import Timer"),
+    ("loop.start_tls(t, p, c)\n", ".start_tls"),
+    ("from asyncio import subprocess\n", "banned module asyncio.subprocess"),
+    ("import asyncio\n", "asyncio outside app/main.py"),
+    ("import threading\n", "threading outside app/observability/logs.py"),
     # The model client's libraries, outside app/harness/model_client.py (ADR 0012).
     ("import anthropic\n", "anthropic outside app/harness/model_client.py"),
     ("from anthropic import Anthropic\n", "anthropic outside app/harness/model_client.py"),

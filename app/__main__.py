@@ -2,6 +2,8 @@
 
 uvicorn runs without an access log (it would log paths and query strings), without
 trusting proxy headers, without a server header, and with the redacting log config.
+Before anything else, Python's thread, unraisable, main-thread and warning hooks are
+replaced by ones that log the type and the trace id only (M1 PR 5).
 
 Settings are named here by their fields (host, port, dev_auth, trace_plaintext); each is
 read from a variable with the product prefix (env_name(), ADR 0009). An unprefixed
@@ -9,7 +11,8 @@ database URL variable in the environment is named on stderr as ignored, never wi
 value. The entry point refuses to start, with exit code 2 and before it binds anything:
 - any command-line argument, --uds and --fd included, with or without the dev login:
   the bind is the host and port settings, on TCP only;
-- trace_plaintext at "1" anywhere but 127.0.0.1 (ADR 0007);
+- trace_plaintext at "1" anywhere but 127.0.0.1, and while any
+  OTEL_INSTRUMENTATION_HTTP_CAPTURE_HEADERS_* variable is set (ADR 0007, M1 PR 5);
 - dev_auth at "1" (the dev login, ADR 0009) unless the host is exactly 127.0.0.1 and
   the port is not 0, and unless app.auth.dev_shim can be imported (the image leaves it
   out);
@@ -32,6 +35,7 @@ the host it was validated for through create_app(bind_host=...).
 
 from __future__ import annotations
 
+import logging.config
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -50,7 +54,7 @@ from app.config.settings import (
 )
 from app.harness import model_client
 from app.main import create_app
-from app.observability.logs import LOG_CONFIG
+from app.observability.logs import LOG_CONFIG, install_exception_hooks
 from app.observability.tracing import PlaintextRefused
 
 # Exit code for a configuration the entry point refuses to start with.
@@ -99,7 +103,9 @@ def check_environment(environ: Mapping[str, str]) -> None:
 
 def invalid_settings(error: ValidationError) -> str:
     """The settings a ValidationError refuses and why, without their values: errors()
-    carries the input itself even with hide_input_in_errors (review finding sec-3)."""
+    carries the input itself even with hide_input_in_errors (review finding sec-3 of M1
+    PR 6). With the hooks installed first, an uncaught one would also lose its text to
+    the main-thread hook (review finding sec-r1 of M1 PR 5)."""
     details = error.errors(include_input=False, include_context=False, include_url=False)
     return "; ".join(
         f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}" for detail in details
@@ -164,6 +170,12 @@ class VerifiedServer(uvicorn.Server):
 
 
 def main(argv: Sequence[str] = ()) -> int:
+    # The redacting log config first, so what is logged before uvicorn applies it again
+    # goes through it too; then the hooks: an exception in a thread, one escaping the main
+    # thread, one that cannot be raised and a warning log their type and the trace id
+    # only, not Python's full text on stderr (ADR 0007, M1 PR 5).
+    logging.config.dictConfig(LOG_CONFIG)
+    install_exception_hooks()
     # An old, unprefixed URL in the environment is not read: say so, by name (review
     # finding sec-1). One in .env is dropped without a word (the runbook says so).
     for notice in ignored_url_notices(os.environ):
@@ -175,6 +187,7 @@ def main(argv: Sequence[str] = ()) -> int:
         model_client.check_start(settings, os.environ)
         config = server_config(settings)
     except ValidationError as invalid:
+        # The field and the rule, never the value (M1 PR 6 sec-3, M1 PR 5 sec-r1).
         print(f"refused to start: invalid settings: {invalid_settings(invalid)}", file=sys.stderr)
         return REFUSED
     except (

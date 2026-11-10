@@ -15,6 +15,8 @@ from __future__ import annotations
 import errno
 import logging
 import sys
+import threading
+import warnings
 
 from app.observability.tracing import current_trace_id
 
@@ -71,6 +73,20 @@ class RedactFilter(logging.Filter):
         return True
 
 
+class AsyncioFilter(logging.Filter):
+    """On the "asyncio" logger: its default exception handler builds the message from
+    the context's reprs (the task, its coroutine, the exception's text). It runs on any
+    loop without the app's handler, and when that handler raises. The record keeps a
+    fixed message and the exception's type (RedactFilter then drops the rest)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # A report without an exception (a slow callback, an unclosed transport) keeps a
+        # message of its own and its level (review finding sec-r4).
+        record.msg = ASYNCIO_MESSAGE if record.exc_info else ASYNCIO_REPORT
+        record.args = ()
+        return True
+
+
 class SafeFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         RedactFilter().filter(record)
@@ -107,7 +123,10 @@ class StderrHandler(logging.StreamHandler):
 LOG_CONFIG: dict = {
     "version": 1,
     "disable_existing_loggers": False,
-    "filters": {"redact": {"()": "app.observability.logs.RedactFilter"}},
+    "filters": {
+        "redact": {"()": "app.observability.logs.RedactFilter"},
+        "asyncio": {"()": "app.observability.logs.AsyncioFilter"},
+    },
     "formatters": {"safe": {"()": "app.observability.logs.SafeFormatter"}},
     "handlers": {
         "stderr": {
@@ -116,6 +135,104 @@ LOG_CONFIG: dict = {
             "filters": ["redact"],
         }
     },
-    "loggers": {name: {"level": "INFO", "filters": ["redact"]} for name in REDACTED_LOGGERS},
+    "loggers": {
+        **{name: {"level": "INFO", "filters": ["redact"]} for name in REDACTED_LOGGERS},
+        "asyncio": {"level": "INFO", "filters": ["asyncio", "redact"]},
+    },
     "root": {"level": "INFO", "handlers": ["stderr"]},
 }
+
+
+# Python's own hooks print an exception whole, message and traceback, to stderr: one in a
+# thread, one that cannot be raised (a __del__, a finaliser), one in an asyncio task that
+# nobody retrieved. These replace them (ADR 0007's Watch item for M1, M1 PR 5): a fixed
+# message on the "app" logger, which RedactFilter guards, with the exception's type and
+# the trace id as fields. No message, no traceback, no exception object on the record,
+# and nothing of the thread, the object or the task (their reprs can carry data).
+HOOK_LOGGER = "app"
+MAIN_MESSAGE = "an unhandled exception in the main thread"
+THREAD_MESSAGE = "an unhandled exception in a thread"
+UNRAISABLE_MESSAGE = "an exception that could not be raised"
+ASYNCIO_MESSAGE = "an unhandled exception in an asyncio task"
+ASYNCIO_REPORT = "an asyncio report"
+WARNING_MESSAGE = "a warning"
+# Written straight to stderr when a hook cannot log: never the exception itself.
+HOOK_FAILED = "logging error: an unhandled exception could not be logged\n"
+
+
+def _log(message: str, extra: dict, level: int) -> None:
+    logging.getLogger(HOOK_LOGGER).log(level, message, extra=extra)
+
+
+def _log_unhandled(
+    message: str,
+    exc: BaseException | None,
+    kind: type | None = None,
+    level: int = logging.ERROR,
+) -> None:
+    # A hook that raises makes Python print the original exception after its own, so
+    # nothing escapes here (review finding sec-r2 of M1 PR 5).
+    try:
+        trace_id = getattr(exc, TRACE_ID_ATTRIBUTE, None) if exc is not None else None
+        cls = kind if kind is not None else (type(exc) if exc is not None else None)
+        extra = {
+            "exc_type": exception_type(cls) if cls is not None else None,
+            "trace_id": trace_id if isinstance(trace_id, str) else current_trace_id() or NO_TRACE,
+        }
+        _log(message, extra, level)
+    except BaseException:  # noqa: BLE001 - the exception being reported must not escape
+        try:
+            sys.stderr.write(HOOK_FAILED)
+        except BaseException:  # noqa: BLE001, S110 - nowhere left to report to
+            pass
+
+
+def main_excepthook(cls: type[BaseException], exc: BaseException, tb: object) -> None:
+    """For sys.excepthook: what escapes the main thread. Ctrl-C stays quiet."""
+    if issubclass(cls, KeyboardInterrupt):
+        return
+    _log_unhandled(MAIN_MESSAGE, exc)
+
+
+def showwarning(
+    message: Warning | str,
+    category: type[Warning],
+    filename: str,
+    lineno: int,
+    file: object = None,
+    line: str | None = None,
+) -> None:
+    """For warnings.showwarning: the category only. The text can quote a value, as
+    pydantic's serializer warnings do (review finding sec-1 of M1 PR 5)."""
+    _log_unhandled(WARNING_MESSAGE, None, kind=category, level=logging.WARNING)
+
+
+def thread_excepthook(args: threading.ExceptHookArgs) -> None:
+    # SystemExit in a thread ends it quietly, as threading's own hook does.
+    if args.exc_type is SystemExit:
+        return
+    _log_unhandled(THREAD_MESSAGE, args.exc_value)
+
+
+def unraisable_hook(unraisable: sys.UnraisableHookArgs) -> None:
+    _log_unhandled(UNRAISABLE_MESSAGE, unraisable.exc_value)
+
+
+def asyncio_exception_handler(loop: object, context: dict) -> None:
+    """For loop.set_exception_handler(): the context's message, task and transport are
+    left out; they are reprs."""
+    exc = context.get("exception")
+    # A raise here would make asyncio fall back to its default handler with the context's
+    # reprs (review finding sec-3); AsyncioFilter covers that path too.
+    try:
+        _log_unhandled(ASYNCIO_MESSAGE, exc if isinstance(exc, BaseException) else None)
+    except Exception:  # noqa: BLE001, S110 - nothing of the context may reach stderr
+        pass
+
+
+def install_exception_hooks() -> None:
+    """The process-wide hooks; the asyncio handler is per loop (app/main.py's lifespan)."""
+    threading.excepthook = thread_excepthook
+    sys.unraisablehook = unraisable_hook
+    sys.excepthook = main_excepthook
+    warnings.showwarning = showwarning

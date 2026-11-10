@@ -25,7 +25,8 @@ FROM python:3.12.16-slim-trixie@sha256:8523d6abeb48ceae0b7240d30c5808fc26cb79c1a
 RUN groupadd --gid 10001 app && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin app
 COPY --from=build /opt/venv /opt/venv
 # SITREP_HOST=0.0.0.0 is the container's own interface; `make docker-build` publishes it
-# on 127.0.0.1 only. SITREP_DEV_AUTH stays off: .dockerignore leaves the dev login shim
+# on 127.0.0.1 only. The app answers only the Host 127.0.0.1:8000 unless
+# SITREP_ALLOWED_HOSTS names the published address (M1 PR 5): the smoke test sets it. SITREP_DEV_AUTH stays off: .dockerignore leaves the dev login shim
 # out of the image, and the entry point refuses SITREP_DEV_AUTH=1 without it (ADR 0009).
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \

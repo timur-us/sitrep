@@ -20,7 +20,7 @@ from collections.abc import Iterator
 
 import anyio
 import pytest
-from fastapi import WebSocket
+from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -408,10 +408,22 @@ def _with_websocket(settings: Settings, bind_host: str | None) -> TestClient:
 
 def test_websockets_are_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     # Review finding test-3: the shim closes any connection that is not HTTP, so none
-    # goes around its Host check. Control: without the shim the route accepts.
+    # goes around its Host check. Since M1 PR 5 the app's own Host check closes them too,
+    # shim or not. Control: the same route on a bare app accepts.
     settings = dev_settings(monkeypatch)
-    with _with_websocket(settings, bind_host=None).websocket_connect("/probe-ws") as socket:
-        assert socket is not None, "control: the route accepts without the shim"
+    bare = FastAPI()
+
+    async def echo(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.close()
+
+    bare.add_api_websocket_route("/probe-ws", echo)
+    with TestClient(bare, base_url=BASE).websocket_connect("/probe-ws") as socket:
+        assert socket is not None, "control: the route accepts on a bare app"
+    unshimmed = _with_websocket(settings, bind_host=None)
+    with pytest.raises(WebSocketDisconnect) as closed, unshimmed.websocket_connect("/probe-ws"):
+        pass
+    assert closed.value.code == 1008, closed.value.code
     shimmed = _with_websocket(settings, bind_host=LOOPBACK)
     with pytest.raises(WebSocketDisconnect) as closed, shimmed.websocket_connect("/probe-ws"):
         pass

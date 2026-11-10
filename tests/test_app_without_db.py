@@ -32,7 +32,8 @@ def closed_port() -> int:
 
 def test_app_starts_without_db(settings: Settings, restore_logging: None) -> None:
     url = f"postgresql://{names.APP_ROLE}@{LOOPBACK}:{closed_port()}/{names.DATABASE}"
-    local = settings.model_copy(update={"port": 0, "database_url": url})
+    # A port chosen beforehand, not 0: the app allows exactly 127.0.0.1:<port> (M1 PR 5).
+    local = settings.model_copy(update={"port": closed_port(), "database_url": url})
     config = server_config(local)
     pool = config.app.state.pool
     server = uvicorn.Server(config)

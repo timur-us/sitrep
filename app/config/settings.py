@@ -98,6 +98,40 @@ URL_REQUIRED = URL_KEYS
 URL_ROLES = {"database_url": names.APP_ROLE, "migration_database_url": names.MIGRATOR_ROLE}
 
 
+# One Host the app answers (M1 PR 5): a lower-case DNS name or a dotted IPv4 address,
+# optionally with a port of 1 to 65535 without a leading zero. The Host header must equal
+# one of them byte for byte; no wildcard, scheme, path, user or IPv6 literal.
+_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+HOST_ITEM = re.compile(rf"{_LABEL}(?:\.{_LABEL})*(?::[1-9][0-9]{{0,4}})?")
+
+
+# The names a loopback bind may allow.
+LOOPBACK_NAMES = frozenset({LOOPBACK, "localhost"})
+
+
+def check_allowed_hosts(value: str) -> str:
+    """The allowlist unchanged, or ValueError naming the rule it breaks (never a value).
+    Empty means the default, 127.0.0.1 on the app's port."""
+    if value == "":
+        return value
+    for item in value.split(","):
+        if not HOST_ITEM.fullmatch(item):
+            raise ValueError(
+                "a comma-separated list of lower-case host[:port], without spaces,"
+                " wildcards, schemes or paths"
+            )
+        name, _, port = item.partition(":")
+        if port and int(port) > 65535:
+            raise ValueError("a port must be from 1 to 65535")
+        # A name that anyone on the network can answer reopens DNS rebinding (review
+        # finding sec-5 of M1 PR 5): a single label (search domains, LLMNR) or .local (mDNS).
+        if (name != "localhost" and "." not in name) or name.endswith(".local"):
+            raise ValueError(
+                "a single-label or .local name is resolved locally: name a full DNS name"
+            )
+    return value
+
+
 def flag(value: str) -> bool:
     return value == "1"
 
@@ -153,6 +187,10 @@ class Settings(BaseSettings):
     # Spans to the console without the allowlist, for local debugging only: refused
     # unless the exporter is the console and the entry point binds 127.0.0.1 (ADR 0007).
     trace_plaintext: str = "0"
+    # The Hosts the app answers, on every route, with or without the dev login (M1 PR 5,
+    # ADR 0009): empty for exactly 127.0.0.1:<port>; the image's smoke test names its
+    # published address, M3 the Azure host. Anything else is 400.
+    allowed_hosts: str = Field(default="", validation_alias=env_name("allowed_hosts"))
     # The model (ADR 0012), from the prefixed variable like every other setting.
     model: str = Field(default=DEFAULT_MODEL, min_length=1)
     # The model API key, from ANTHROPIC_API_KEY (no prefix). Empty is no key. A SecretStr:
@@ -204,6 +242,26 @@ class Settings(BaseSettings):
     @property
     def dev_auth_on(self) -> bool:
         return flag(self.dev_auth)
+
+    @field_validator("allowed_hosts")
+    @classmethod
+    def _allowed_hosts(cls, value: str, info: ValidationInfo) -> str:
+        check_allowed_hosts(value)
+        # On a loopback bind, whoever answers the client's DNS can rebind any name, so
+        # the list holds loopback values only (review finding sec-r5 of M1 PR 5). A name
+        # or another address is for a bind off loopback, as the image's.
+        if value and info.data.get("host") == LOOPBACK:
+            names = {item.partition(":")[0] for item in value.split(",")}
+            if not names <= LOOPBACK_NAMES:
+                raise ValueError("on a 127.0.0.1 bind only 127.0.0.1 and localhost may be named")
+        return value
+
+    @property
+    def allowed_host_values(self) -> tuple[str, ...]:
+        """The Host values the app answers, the default filled in."""
+        if self.allowed_hosts == "":
+            return (f"{LOOPBACK}:{self.port}",)
+        return tuple(self.allowed_hosts.split(","))
 
     @property
     def trace_plaintext_on(self) -> bool:

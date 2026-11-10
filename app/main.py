@@ -7,6 +7,7 @@ global tracer provider is never set.
 
 from __future__ import annotations
 
+import asyncio
 import html
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -20,9 +21,10 @@ from app.api import mandates
 from app.config import branding
 from app.config.settings import LOOPBACK, Settings
 from app.db import session
+from app.http.host_check import HostCheckMiddleware, allowed_hosts
 from app.http.security_headers import SecurityHeadersMiddleware, response_headers
 from app.observability import tracing
-from app.observability.logs import tag_trace_id
+from app.observability.logs import asyncio_exception_handler, tag_trace_id
 
 INDEX = Path(__file__).parent / "web" / "static" / "index.html"
 TITLE = "{{title}}"
@@ -66,6 +68,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # An exception in a task nobody awaits logs its type and the trace id only, on the
+        # loop that serves the app (ADR 0007, M1 PR 5).
+        asyncio.get_running_loop().set_exception_handler(asyncio_exception_handler)
         pool.open()
         try:
             yield
@@ -98,6 +103,9 @@ def create_app(
 
         dev_shim.mount(app, port=settings.port)
 
+    # Every route, shim or not (M1 PR 5, ADR 0009): added after the shim, so it runs
+    # first; before the security headers, so its 400 carries them.
+    app.add_middleware(HostCheckMiddleware, allowed=allowed_hosts(settings))
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_exception_handler(Exception, internal_error)
     tracing.instrument(app, tracer_provider)

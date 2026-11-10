@@ -60,8 +60,12 @@ TARGET_COMMANDS = {
     "docker-build": [
         "docker build",
         "id -u",
-        "-p 127.0.0.1::8000",
-        f"-e {env_name('trace_plaintext')}=1",
+        # M1 PR 5: the published port is chosen before the start, so the allowlist can
+        # name it, and a foreign Host is refused inside the image.
+        "-p 127.0.0.1:$port:8000",
+        f"-e {env_name('allowed_hosts')}=127.0.0.1:$port",
+        "-H 'Host: 192.0.2.1:8000'",
+        f"docker create -e {env_name('trace_plaintext')}=1",
         # The dev login shim is not in the image, and asking for it refuses to start.
         "import app.auth.dev_shim",
         f"-e {env_name('dev_auth')}=1",
@@ -124,13 +128,37 @@ def test_docker_smoke_refuses_the_dev_login_on_both_hosts() -> None:
     end = out.find('echo "smoke: the dev login refused', loop)
     assert end > loop, out
     body = out[loop:end]
-    run = f"docker run -d -e {env_name('dev_auth')}=1 -e {env_name('host')}=$host"
+    run = f"docker create -e {env_name('dev_auth')}=1 -e {env_name('host')}=$host"
     for needle in (
         run,
         'test "$state" = "exited 2"',
         f"refused to start: {env_name('dev_auth')}=1",
     ):
         assert needle in body, f"the dev-login loop lacks {needle!r}:\n{body}"
+
+
+def test_docker_smoke_refuses_a_foreign_host_after_it_is_up() -> None:
+    # Review findings test-7 and sec-6: the checks that make the smoke test fail, and
+    # their order: the port probed in isolated mode, the container created and cleaned
+    # up before it starts, the publish checked, the app up, then the foreign Host refused.
+    out = dry_run("docker-build")
+    needles = [
+        "python3 -I -c",
+        "-p 127.0.0.1:$port:8000",
+        "trap 'docker rm -f \"$cid\" >/dev/null' EXIT",
+        'docker start "$cid"',
+        'test "$addr" = "127.0.0.1:$port"',
+        '"http://$addr/health" 2>/dev/null && break',
+        "-w '%{http_code}' -H 'Host: 192.0.2.1:8000'",
+        'test "$code" = 400',
+    ]
+    positions = [out.find(needle) for needle in needles]
+    assert -1 not in positions, [n for n, p in zip(needles, positions, strict=True) if p < 0]
+    assert positions == sorted(positions), list(zip(needles, positions, strict=True))
+    assert "docker create" in out[: positions[3]], "the container is not created first"
+    # Review finding sec-r7: the other two containers are created, trapped, then started.
+    assert out.count("docker create") == 3, out.count("docker create")
+    assert out.count("docker run -d") == 0, "a container started before its trap"
 
 
 def test_lint_test_starts_and_migrates_the_database_before_pytest() -> None:

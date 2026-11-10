@@ -158,6 +158,7 @@ def test_settings_names_are_prefixed() -> None:
         f"{prefix}TRACE_PLAINTEXT",
         f"{prefix}DATABASE_URL",
         f"{prefix}MIGRATION_DATABASE_URL",
+        f"{prefix}ALLOWED_HOSTS",
         f"{prefix}MODEL",
         "ANTHROPIC_API_KEY",
     }
@@ -411,7 +412,8 @@ def test_entry_point_with_an_old_dotenv(
     err = capsys.readouterr().err
     assert "ignored" not in err and NOT_ECHOED not in err, err
     # Control: the same file with the prefixed names is read, and refused: since M1 PR 6
-    # with exit 2, naming the variables and not their values (review finding sec-3).
+    # with exit 2, naming the variables and not their values (review findings sec-3 of
+    # M1 PR 6 and sec-r1 of M1 PR 5).
     (tmp_path / ".env").write_text("".join(f"{branding.SLUG.upper()}_{line}" for line in lines))
     assert entry.main() == 2
     err = capsys.readouterr().err
