@@ -303,8 +303,10 @@ def test_request_follows_the_contract(context: BrowserContext, app_url: str) -> 
     headers = sent["headers"]
     assert isinstance(headers, dict)
     assert headers.get("content-type") == "application/json", headers
-    # The Origin check of every non-GET route (ADR 0009): fetch in cors mode sends the
-    # real origin even under Referrer-Policy: no-referrer, where a form sends "null".
+    # The Origin check of every non-GET route (ADR 0009): Chromium's fetch sends the real
+    # origin even under Referrer-Policy: no-referrer, where a form sends "null". The
+    # mutant run showed it in same-origin mode as well, so this pins the header, not the
+    # mode.
     assert headers.get("origin") == app_url, headers
 
 

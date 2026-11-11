@@ -178,9 +178,11 @@
     button.textContent = "Asking...";
     let response = null;
     try {
-      // Default mode (cors): a same-origin fetch then sends the page's real Origin,
-      // which the Origin check of every non-GET route requires, even under the app's
-      // Referrer-Policy: no-referrer. No redirect is followed.
+      // The default mode: Chromium sends this same-origin POST with the page's real
+      // Origin, which the Origin check of every non-GET route requires, even under the
+      // app's Referrer-Policy: no-referrer, where a form sends "null". Measured in
+      // tests/web/test_answer.py (in same-origin mode too, M1 PR 11's mutant run). No
+      // redirect is followed.
       response = await fetch(ASK, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
