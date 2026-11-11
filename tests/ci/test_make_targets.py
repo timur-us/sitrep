@@ -72,11 +72,16 @@ TARGET_COMMANDS = {
         f"-e {env_name('host')}=",
     ],
     "model": MODEL_COMMANDS,
-    # Not a CI job yet (PR 12 puts it before web-test): the model, the corpus, then the
-    # loader.
+    # The model, the corpus, then the loader; web-test runs it (M1 PR 12).
     "load": [*MODEL_COMMANDS, DATA, LOAD],
     "web-deps": [f"{UV_RUN} playwright install chromium"],
+    # M1 PR 12: the read path in Chromium needs the database, migrated and loaded.
     "web-test": [
+        "docker compose -f compose.yaml up -d --wait",
+        f"{UV_RUN} python -P -m app.db.migrate",
+        *MODEL_COMMANDS,
+        DATA,
+        LOAD,
         f"{UV_RUN} playwright install chromium",
         f"{UV_RUN} python -P -m pytest tests/web",
     ],
@@ -187,6 +192,23 @@ def test_load_fetches_the_model_and_the_corpus_first() -> None:
     positions = [out.find(step) for step in steps]
     assert -1 not in positions and positions == sorted(positions), f"order {positions}:\n{out}"
     assert out.rstrip().endswith(LOAD), "the loader is not the last step"
+
+
+def test_web_test_loads_the_corpus_before_pytest() -> None:
+    # M1 PR 12: tests/web/test_ask.py reads the loaded corpus through the real handlers,
+    # and fails, never skips, without it.
+    out = dry_run("web-test")
+    steps = [
+        "docker compose -f compose.yaml up -d --wait",
+        "python -P -m app.db.migrate",
+        MODEL_VERIFY,
+        DATA,
+        LOAD,
+        "playwright install chromium",
+        "-m pytest tests/web",
+    ]
+    positions = [out.find(step) for step in steps]
+    assert -1 not in positions and positions == sorted(positions), f"order {positions}:\n{out}"
 
 
 def bare_uv_runs(text: str) -> list[str]:

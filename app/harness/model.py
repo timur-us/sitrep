@@ -26,7 +26,11 @@ class ModelClient(Protocol):
       loop's; the client does not retry on its own beyond what the loop allows.
     - Traces carry the model id, token counts, stop reason, latency and hashes, never
       prompt or completion text (CLAUDE.md rule 10, ADR 0007).
+    - model is the id the client sends, from settings: POST /api/ask passes it to the
+      loop, which refuses a reply from any other (M1 PR 12).
     """
+
+    model: str
 
     def create(
         self,

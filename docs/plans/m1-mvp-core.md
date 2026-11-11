@@ -1,6 +1,6 @@
 # M1 — MVP core, local: plan
 
-Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
+Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date; PR 12: the API contract's details) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
 
 ## Context
 
@@ -171,6 +171,19 @@ All routes need the login (401 otherwise). Every non-GET route needs the shim's 
 - **`POST /api/proposals/{id}/redeem`** `{token}` → `{state: "done", result_id}`; every refusal is the same 409. (PR 15)
 
 A change to this contract is a plan amendment.
+
+Amended (Timur, 2026-11-11, answer 1 on #35): the details of `POST /api/ask` that the contract left open, as PR 12 built them and PR 11's page reads them (#34, question 1):
+- **The request.** `Content-Type` exactly `application/json`, one header, and a body of at most 32 KiB. Without `mandate_id`, an ask covers all of the advisor's own mandates. Anything else is one fixed 422, `{"detail": "invalid request"}`, which repeats nothing it was sent.
+- **The response.**
+  - `cost_usd` is the exact cost as a plain decimal string, never an exponent; the page also accepts a non-negative JSON number.
+  - `trace_id` is 32 lower-case hex digits, the request's `X-Trace-Id`, always set when the app serves the request.
+  - `stop` is one of the four; every count is a non-negative integer, and `unmatched <= figures`.
+- **The refusals,** each one fixed `{"detail": …}`:
+  - 429 `too many requests`: 10 asks started in any 60 seconds per advisor, or one already in flight;
+  - 503 `model unavailable` (no key), `search unavailable` (no embedding model) or `database unavailable`;
+  - 502 `the model call failed`;
+  - 500 `the request failed` for any other failure, a row of another advisor among them.
+- **Trust in `citations`** (Timur, 2026-11-11, answer 2 on #35) comes as its own amendment, with a small PR after the cut line.
 
 ## Working protocol (every PR)
 

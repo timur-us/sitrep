@@ -35,12 +35,11 @@ import logging
 import math
 import secrets
 from collections.abc import Iterator
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import pytest
 from dbtools import SUPERUSER_URL, Connection
+from loaded_corpus import Tables, ensure_loaded, read_tables, table
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 from seed_rows import MINE, OTHER, SEED
@@ -48,17 +47,14 @@ from seed_rows import MINE, OTHER, SEED
 from app.auth.identity import issue
 from app.config import branding
 from app.config.embedding import DIM, MAX_TOKENS
-from app.config.settings import loopback_database_url
 from app.db import load, names, queries, session
 from app.db.connect import connect
-from app.db.migrate import become_owner
 from app.db.session import advisor_transaction
 from app.embeddings.base import query_input
 from app.embeddings.onnx import OnnxEmbedder
 from app.harness import handlers
 from app.harness.context import Untrusted, wrap
 from app.harness.mvp_tools import GetPortfolio, SearchClientDocs
-from data.synthetic import generate
 
 pytestmark = pytest.mark.usefixtures("database")
 
@@ -67,7 +63,6 @@ PORTFOLIO = "get_portfolio"
 DEMO = branding.DEMO_MANDATE
 FAMILY = DEMO.family
 OTHERS = [person for person in branding.ADVISORS if person.id != DEMO.advisor_id]
-MIGRATOR_URL = loopback_database_url(names.MIGRATOR_ROLE)
 
 # Plain questions an advisor might ask, two per language, and the demo family's.
 QUERIES = {
@@ -83,79 +78,17 @@ FAMILY_QUERIES = {
 EVERY_QUERY = QUERIES | FAMILY_QUERIES
 
 
-def table(name: str) -> sql.Identifier:
-    return sql.Identifier(names.SCHEMA, name)
-
-
-def is_loaded(corpus: load.Corpus, embedder: OnnxEmbedder) -> bool:
-    """Every corpus document and sheet is in the database, as the corpus has it (title and
-    body too, so a load from an older generator is reloaded), with a vector of this model."""
-    model = (embedder.model_id, embedder.revision)
-    with connect(SUPERUSER_URL) as su:
-        documents = set(
-            su.execute(
-                sql.SQL(
-                    "SELECT d.advisor_id, d.id, d.title, d.body FROM {} d JOIN {} c"
-                    " ON c.advisor_id = d.advisor_id AND c.document_id = d.id"
-                    " WHERE c.embedding_model = %s AND c.embedding_revision = %s"
-                ).format(table("documents"), table("chunks")),
-                model,
-            ).fetchall()
-        )
-        sheets = {
-            tuple(row)
-            for row in su.execute(
-                sql.SQL(
-                    "SELECT id, title, body FROM {}"
-                    " WHERE embedding_model = %s AND embedding_revision = %s"
-                ).format(table("product_sheets")),
-                model,
-            ).fetchall()
-        }
-    wanted = {(d.advisor_id, d.id, d.title, d.body) for d in corpus.documents}
-    wanted_sheets = {(sheet.id, sheet.title, sheet.body) for sheet in corpus.sheets}
-    return wanted <= documents and wanted_sheets <= sheets
-
-
 @pytest.fixture(scope="module")
 def corpus(
     database: None, embedder: OnnxEmbedder, tmp_path_factory: pytest.TempPathFactory
 ) -> load.Corpus:
     """The reviewed corpus, in the database: `make load`'s rows, or loaded here."""
-    out: Path = tmp_path_factory.mktemp("corpus")
-    assert generate.main(["--out", str(out)]) == 0
-    corpus = load.read_corpus(out)
-    if not is_loaded(corpus, embedder):
-        with connect(MIGRATOR_URL, autocommit=True) as conn:
-            become_owner(conn)
-            load.write(conn, load.prepare(corpus, embedder, embedder.tokenizer))
-    assert is_loaded(corpus, embedder)
-    return corpus
-
-
-@dataclass(frozen=True)
-class Tables:
-    """What the superuser sees: whose each document is, the sheets, and every trust."""
-
-    owner: dict[str, str]
-    sheets: frozenset[str]
-    trust: dict[str, str]
+    return ensure_loaded(embedder, tmp_path_factory.mktemp("corpus"))
 
 
 @pytest.fixture(scope="module")
 def tables(corpus: load.Corpus) -> Tables:
-    with connect(SUPERUSER_URL) as su:
-        documents = su.execute(
-            sql.SQL("SELECT id, advisor_id, trust FROM {}").format(table("documents"))
-        ).fetchall()
-        sheets = su.execute(
-            sql.SQL("SELECT id, trust FROM {}").format(table("product_sheets"))
-        ).fetchall()
-    return Tables(
-        owner={record: advisor for record, advisor, _ in documents},
-        sheets=frozenset(record for record, _ in sheets),
-        trust={record: trust for record, *_, trust in documents + sheets},
-    )
+    return read_tables()
 
 
 @pytest.fixture

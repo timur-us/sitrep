@@ -23,6 +23,8 @@ from playwright.sync_api import Browser, sync_playwright
 
 from app.config.settings import env_name
 
+TESTS = Path(__file__).resolve().parent.parent
+
 START_TIMEOUT = 20.0
 NO_NAMES = "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"
 # WebRTC sends UDP that neither the resolver rules nor Playwright's events see. This
@@ -64,7 +66,21 @@ def dev_app_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     yield from _serve(tmp_path_factory.mktemp("dev-app"), {env_name("dev_auth"): "1"})
 
 
-def _serve(workdir: Path, variables: dict[str, str]) -> Iterator[str]:
+@pytest.fixture(scope="session")
+def ask_app_url(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """create_app() with the dev login on and a scripted model (tests/web/ask_server.py),
+    on the real database and embedder (M1 PR 12). PYTHONPATH names tests/ for the
+    scripted model; -P keeps the working directory and the script's off sys.path."""
+    yield from _serve(
+        tmp_path_factory.mktemp("ask-app"),
+        {env_name("dev_auth"): "1", "PYTHONPATH": str(TESTS)},
+        command=[sys.executable, "-P", str(TESTS / "web" / "ask_server.py")],
+    )
+
+
+def _serve(
+    workdir: Path, variables: dict[str, str], command: list[str] | None = None
+) -> Iterator[str]:
     port = free_port()
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -77,7 +93,7 @@ def _serve(workdir: Path, variables: dict[str, str]) -> Iterator[str]:
     log = workdir / "stderr.log"  # a file, not a pipe: a full pipe would block the app
     with log.open("wb") as stderr:
         server = subprocess.Popen(
-            [sys.executable, "-P", "-m", "app"],
+            command or [sys.executable, "-P", "-m", "app"],
             cwd=workdir,
             env=env,
             stdout=subprocess.DEVNULL,

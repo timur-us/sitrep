@@ -24,15 +24,18 @@ from collections.abc import Callable, Iterator
 from decimal import Decimal
 from typing import Any
 
+import psycopg
 import pytest
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from psycopg_pool import PoolTimeout
 from pydantic import BaseModel
 
 from app.auth.identity import VerifiedAdvisor, issue
 from app.config import branding
-from app.harness import loop, prompt
+from app.db.session import GuardError
+from app.harness import handlers, loop, prompt
 from app.harness.context import Provenance, Untrusted
 from app.harness.grounding import CITATION_FORM
 from app.harness.model_client import PRICES, ModelCallError, cost_usd
@@ -1026,3 +1029,128 @@ PROMPT_V1_SHA256 = "6aef4295bb959585a20e556962e477798ce8987d0be2e0b702cd47e9291f
 def test_the_v1_prompt_is_pinned() -> None:
     assert prompt.PROMPT_VERSION == "v1"
     assert prompt.PROMPT_SHA256 == PROMPT_V1_SHA256
+
+
+# --- Handler failures (M1 PR 12, the handovers of #32 and #33) ------------------------
+
+
+def with_search(search: loop.Handler) -> dict[str, loop.Handler]:
+    return {"search_client_docs": search, "get_portfolio": Handlers().portfolio}
+
+
+def raising(error: BaseException) -> loop.Handler:
+    def handler(advisor: VerifiedAdvisor, arguments: BaseModel) -> Untrusted[Any]:
+        raise error
+
+    return handler
+
+
+def test_a_refused_call_gives_the_model_its_kind(traced: Traced) -> None:
+    # ToolFailed's kind is a fixed word, so it reaches the model and the span; the
+    # model learns why (a query too long can be shortened) and the turn goes on.
+    client = ScriptedClient(response(SEARCH, stop="tool_use"), response(text("Shorter.")))
+    outcome: list[loop.LoopResult] = []
+
+    def body() -> None:
+        outcome.append(
+            loop.run(
+                issue(ADVISOR),
+                "q",
+                client=client,
+                handlers=with_search(raising(handlers.ToolFailed(handlers.QUERY_TOO_LONG))),
+                model=MODEL,
+            )
+        )
+
+    attributes = traced(body)
+    [block] = tool_results(client.calls[1])
+    assert block["is_error"] is True
+    assert '"type":"query_too_long"' in block["content"], block["content"]
+    assert "tool_failed" not in block["content"] and "ToolFailed" not in block["content"]
+    assert outcome[0].stop == "end_turn"
+    assert attributes[key("loop.tool_errors")] == ("query_too_long",)
+
+
+def test_the_kinds_the_model_may_see_are_reviewed() -> None:
+    assert handlers.TOOL_FAILURES == frozenset({handlers.QUERY_TOO_LONG})
+
+
+def test_an_unreviewed_kind_is_a_plain_failure(traced: Traced) -> None:
+    # A kind outside handlers.TOOL_FAILURES (here one built like an input) is neither shown to
+    # the model nor put on the span: the model sees tool_failed, the span the class.
+    unreviewed = CANARY.replace("-", "_")
+    client = ScriptedClient(response(SEARCH, stop="tool_use"), response(text("ok")))
+
+    def body() -> None:
+        loop.run(
+            issue(ADVISOR),
+            "q",
+            client=client,
+            handlers=with_search(raising(handlers.ToolFailed(unreviewed))),
+            model=MODEL,
+        )
+
+    attributes = traced(body)
+    [block] = tool_results(client.calls[1])
+    assert '"type":"tool_failed"' in block["content"] and unreviewed not in block["content"]
+    assert attributes[key("loop.tool_errors")] == ("ToolFailed",)
+    assert unreviewed not in repr(attributes)
+
+
+@pytest.mark.parametrize(
+    ("error", "kind"),
+    [
+        (GuardError(f"a row of another advisor {CANARY}"), "guard"),
+        (psycopg.OperationalError(f"connection refused {CANARY}"), "database"),
+        (PoolTimeout(f"couldn't get a connection {CANARY}"), "database"),
+        (psycopg.errors.QueryCanceled(f"canceling statement {CANARY}"), "database"),
+    ],
+    ids=["guard", "operational", "pool-timeout", "query-canceled"],
+)
+def test_a_guard_or_database_failure_ends_the_request(
+    traced: Traced, error: Exception, kind: str
+) -> None:
+    # A GuardError means a row of another advisor reached a handler, or the pool refused
+    # a dirty connection: a broken boundary, not a failed call. A database that does not
+    # answer is the route's 503. Neither lets the turn go on.
+    later = Handlers()
+    client = ScriptedClient(
+        response(SEARCH, PORTFOLIO, stop="tool_use"), response(text("must not be asked"))
+    )
+    caught: list[loop.LoopError] = []
+
+    def body() -> None:
+        with pytest.raises(loop.LoopError) as failed:
+            loop.run(
+                issue(ADVISOR),
+                "q",
+                client=client,
+                handlers={"search_client_docs": raising(error), "get_portfolio": later.portfolio},
+                model=MODEL,
+            )
+        caught.append(failed.value)
+
+    attributes = traced(body)
+    assert caught[0].kind == kind
+    # Raised outside the except: the original's text is neither cause nor context.
+    assert caught[0].__cause__ is None and caught[0].__context__ is None
+    assert len(client.calls) == 1, "the model was asked again after the failure"
+    assert later.calls == [], "the turn's next tool ran after the failure"
+    assert attributes[key("loop.error")] == kind
+    assert CANARY not in repr(attributes)
+
+
+def test_a_data_error_still_lets_the_turn_go_on() -> None:
+    # PR 8 sec-9: a NUL in an argument is a DataError, a failed call, not the database
+    # going away: the model gets tool_failed and answers.
+    client = ScriptedClient(response(SEARCH, stop="tool_use"), response(text("Sorry.")))
+    result = loop.run(
+        issue(ADVISOR),
+        "q",
+        client=client,
+        handlers=with_search(raising(psycopg.DataError("NUL"))),
+        model=MODEL,
+    )
+    [block] = tool_results(client.calls[1])
+    assert '"type":"tool_failed"' in block["content"]
+    assert result.stop == "end_turn"

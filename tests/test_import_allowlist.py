@@ -84,6 +84,10 @@ ALLOWED = frozenset(
         # app/observability/logs.py replaces threading.excepthook (M1 PR 5); no thread is
         # started in app/.
         "threading",
+        # app/api/ask.py reads time.monotonic for the route's deadline and the rate limit
+        # per advisor (M1 PR 12; Timur's answer 1 on #33: the loop stays without a clock).
+        # Nothing else in app/ reads a clock, and nothing sleeps (`sleep`, banned below).
+        "time",
         # The model's tokenizer (ADR 0005), in app/embeddings/onnx.py only. It can reach
         # the network through Tokenizer.from_pretrained(), which is banned below; the lock
         # leaves out the Hub client it would call (tests/test_lock.py).
@@ -164,6 +168,9 @@ BANNED_ATTRIBUTES = frozenset(
         # finding sec-r6 of M1 PR 5): logs.py replaces the thread hook, it starts none.
         "Thread",
         "Timer",
+        # No request waits on a timer (M1 PR 12): a backoff is not built, and the route's
+        # deadline only compares the clock.
+        "sleep",
         "connect_accepted_socket",
         "run_in_executor",
         "sendfile",
@@ -223,6 +230,8 @@ SINGLE_FILE = {
     "asyncio": "app/main.py",
     "threading": "app/observability/logs.py",
     "warnings": "app/observability/logs.py",
+    # The route's clock (M1 PR 12).
+    "time": "app/api/ask.py",
     "anthropic": MODEL_CLIENT_FILE,
     "httpx2": MODEL_CLIENT_FILE,
     "psycopg_pool": POOL_FILE,
@@ -433,6 +442,12 @@ PLANTED = [
     ("from asyncio import subprocess\n", "banned module asyncio.subprocess"),
     ("import asyncio\n", "asyncio outside app/main.py"),
     ("import threading\n", "threading outside app/observability/logs.py"),
+    # The clock, outside the route that needs it, and any sleep (M1 PR 12).
+    ("import time\n", "time outside app/api/ask.py"),
+    ("from time import monotonic\n", "time outside app/api/ask.py"),
+    ("import time\ntime.sleep(1)\n", ".sleep"),
+    ("from time import sleep\n", "import sleep"),
+    ("await asyncio.sleep(1)\n", ".sleep"),
     # The model client's libraries, outside app/harness/model_client.py (ADR 0012).
     ("import anthropic\n", "anthropic outside app/harness/model_client.py"),
     ("from anthropic import Anthropic\n", "anthropic outside app/harness/model_client.py"),
@@ -474,6 +489,11 @@ def test_clean_code_is_not_reported() -> None:
     modules, problems = scan(source, "app/clean.py")
     assert problems == [], problems
     assert modules == {"logging", "re", "os", "app", "fastapi", "opentelemetry"}
+
+
+def test_the_clock_is_allowed_in_the_ask_route_only() -> None:
+    assert scan("import time\nnow = time.monotonic\n", "app/api/ask.py")[1] == []
+    assert scan("import time\ntime.sleep(1)\n", "app/api/ask.py")[1] != []
 
 
 def test_the_pool_is_allowed_in_its_own_file() -> None:

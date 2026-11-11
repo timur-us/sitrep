@@ -31,15 +31,21 @@ control sits here, between the model and the tools, where tests reach it:
   the worst case (the estimated input plus MAX_TOKENS) must fit, and a failed call is
   charged that worst case (PR 6 handover sec-6). The estimate counts ASCII at
   CHARS_PER_TOKEN and every other UTF-8 byte as a token. Running out ends the turn with
-  stop "budget" and no answer; a finished reply keeps its own stop. There is no
-  wall-clock deadline: that needs a clock, which app/ does not read.
+  stop "budget" and no answer; a finished reply keeps its own stop. The loop reads no
+  clock: the route's deadline (app/api/ask.py, M1 PR 12) wraps the model client and
+  raises BudgetExceeded instead of starting a call, which ends the turn the same way.
 - **Failures.** One immediate retry for a connection failure or a transient status
   (429, 5xx, 529). A timeout, which may have billed, and a "response" failure are not
   retried (PR 6 handover sec-r7). A usage the price table cannot price ends the request
   (PriceUnknown), and so does a reply from another model than the configured one. A
-  handler that raises gives the model a fixed "tool_failed" result; its class name goes
-  to the span. Any other exception becomes LoopError("internal"). LoopError carries a
-  kind, no text, and the span is written on every path.
+  handler that refuses a call with a reviewed ToolFailed kind (handlers.TOOL_FAILURES)
+  gives the model that kind, a fixed word, which goes to the span too (M1 PR 12). Any
+  other exception from a handler gives the model a fixed "tool_failed" result, its class
+  name going to the span, and the turn goes on; but a GuardError (a row of another
+  advisor reached the handler, or the pool refused a connection) ends the request as
+  LoopError("guard"), and a database that does not answer (psycopg's OperationalError)
+  as LoopError("database"). Any other exception becomes LoopError("internal").
+  LoopError carries a kind, no text, and the span is written on every path.
 - **Traces.** The request's span gets the attributes of tracing.LOOP and nothing else:
   the prompt's version and hash, the model, token counts, stop, turns, the registered
   tool names called and the error types (sorted sets: order and repetition carry
@@ -60,13 +66,16 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal, Protocol
 
+import psycopg
 from opentelemetry import trace
 from pydantic import BaseModel
 
 from app.auth.identity import VerifiedAdvisor
+from app.db.session import GuardError
 from app.harness import grounding
 from app.harness.context import BudgetExceeded, Provenance, Untrusted, wrap
 from app.harness.grounding import GroundingReport
+from app.harness.handlers import TOOL_FAILURES, ToolFailed
 from app.harness.model import ModelClient
 from app.harness.model_client import ModelCallError, PriceUnknown, cost_usd
 from app.harness.mvp_tools import TOOLS
@@ -110,6 +119,24 @@ UNKNOWN_TOOL = "unknown_tool"
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 Stop = Literal["end_turn", "refusal", "budget", "max_turns"]
+# Every kind a LoopError may carry (the route maps each to a status, app/api/ask.py).
+KINDS = frozenset(
+    {
+        "model_call",
+        "message_refused",
+        "unexpected_stop",
+        "protocol",
+        "handler",
+        "price_unknown",
+        "guard",
+        "database",
+        "internal",
+    }
+)
+# What the model is told for a failure it cannot act on (review finding sec-8 of PR 10).
+TOOL_FAILED = {"type": "tool_failed", "msg": "the tool failed"}
+# The message beside a reviewed ToolFailed kind, which names the reason itself.
+TOOL_REFUSED = "the tool refused the call"
 
 
 class Handler(Protocol):
@@ -140,9 +167,11 @@ class LoopResult:
 
 
 class LoopError(Exception):
-    """The request ended outside its contract. kind is one of "model_call",
-    "message_refused", "unexpected_stop", "protocol", "handler", "price_unknown" and
-    "internal" (any other exception, raised without it); the error carries nothing else, so it is safe in a log line or a span."""
+    """The request ended outside its contract. kind is one of KINDS: "model_call",
+    "message_refused", "unexpected_stop", "protocol", "handler", "price_unknown",
+    "guard" and "database" (a handler's GuardError or OperationalError, M1 PR 12), and
+    "internal" (any other exception, raised without it). The error carries nothing else,
+    so it is safe in a log line or a span."""
 
     def __init__(self, kind: str) -> None:
         super().__init__(kind)
@@ -371,12 +400,28 @@ def _tool(
     name = call.spec.name
     record.tools.add(name)
     record.calls += 1
+    ended: str | None = None
     try:
         result = handlers[name](advisor, call.arguments)
+    except ToolFailed as error:
+        if error.kind in TOOL_FAILURES:
+            # A reviewed fixed word, never input: the model may act on it (M1 PR 12).
+            record.errors.add(error.kind)
+            return _refused(name, [{"type": error.kind, "msg": TOOL_REFUSED}]), True
+        record.errors.add(_identifier(type(error).__name__))
+        return _refused(name, [TOOL_FAILED]), True
+    except GuardError:
+        ended = "guard"  # a broken boundary, not a failed call: M2 alarms on it
+    except psycopg.OperationalError:
+        ended = "database"  # PoolTimeout and QueryCanceled are OperationalErrors too
     except Exception as error:  # noqa: BLE001 - the model learns that it failed, the turn goes on
         # The class name goes to the span only (review finding sec-8).
         record.errors.add(_identifier(type(error).__name__))
-        return _refused(name, [{"type": "tool_failed", "msg": "the tool failed"}]), True
+        return _refused(name, [TOOL_FAILED]), True
+    if ended is not None:
+        # Raised outside the except block, so the handler's exception, whose text may
+        # name a value, is neither the cause nor the context (as for "internal").
+        raise LoopError(ended)
     if type(result) is not Untrusted or result.provenance.tool != name:
         raise LoopError("handler")
     return result, False

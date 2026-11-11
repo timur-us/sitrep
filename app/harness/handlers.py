@@ -30,6 +30,12 @@ get_portfolio looks the mandate up the same way, then reads its report from the
 portfolio system only, so no e-mail can pose as one; None when there is no such mandate
 or no report.
 
+cited_records() gives POST /api/ask the title and kind of each record an answer cites
+(M1 PR 12): one more advisor transaction after the loop, for the ids a tool returned.
+
+ToolFailed's kinds in TOOL_FAILURES reach the model as they are (the loop gives every
+other failure a fixed "tool_failed"); a GuardError ends the request (M1 PR 12).
+
 Every row of an advisor-scoped table carries its advisor_id, and the handlers refuse a
 row of another advisor (GuardError) rather than return it: row-level security is the
 boundary, this is a second line behind it. Trust is provenance, never permission: every
@@ -39,6 +45,7 @@ result is Untrusted (CLAUDE.md rule 9). The handlers log nothing.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
@@ -74,6 +81,39 @@ class ToolFailed(Exception):
     def __init__(self, kind: str) -> None:
         super().__init__(kind)
         self.kind = kind
+
+
+# The kinds of ToolFailed the loop gives the model and puts on the span (M1 PR 12): each
+# a fixed word the model can act on. Any other kind reaches neither.
+TOOL_FAILURES = frozenset({QUERY_TOO_LONG})
+
+
+@dataclass(frozen=True, slots=True)
+class Cited:
+    """A record an answer cites, as POST /api/ask names it: id, title and kind."""
+
+    record_id: str
+    title: str
+    kind: str
+
+
+def cited(conn: AdvisorConnection, advisor_id: str, record_ids: Sequence[str]) -> list[Cited]:
+    """The cited records' titles and kinds, in the order cited, inside an advisor
+    transaction. A record gone since the search is left out; a document of another
+    advisor is refused (GuardError), as in a search."""
+    if not record_ids:
+        return []
+    ids = list(record_ids)
+    rows = _own(advisor_id, conn.execute(queries.CITED_DOCUMENTS, (ids,)).fetchall())
+    documents = {record: title for _, record, title in rows}
+    sheets = dict(conn.execute(queries.CITED_SHEETS, (ids,)).fetchall())
+    found = []
+    for record in ids:
+        if record in documents:
+            found.append(Cited(record, documents[record], DOCUMENT))
+        elif record in sheets:
+            found.append(Cited(record, sheets[record], PRODUCT_SHEET))
+    return found
 
 
 def fuse(ranked: Sequence[Sequence[Key]], k: int = RRF_K) -> list[Key]:
@@ -279,6 +319,16 @@ def get_portfolio(
         report = portfolio(conn, advisor.advisor_id, arguments.mandate_id)
     records = () if report is None else (report.document_id,)
     return Untrusted(report, Provenance(tool=PORTFOLIO, record_ids=records))
+
+
+def cited_records(pool: Pool, advisor: VerifiedAdvisor, record_ids: Sequence[str]) -> list[Cited]:
+    """cited() in its own advisor transaction: POST /api/ask's citations (M1 PR 12)."""
+    if type(advisor) is not VerifiedAdvisor:
+        raise TypeError(f"cited_records takes a VerifiedAdvisor, not {type(advisor).__name__}")
+    if not record_ids:
+        return []
+    with advisor_transaction(pool, advisor) as conn:
+        return cited(conn, advisor.advisor_id, record_ids)
 
 
 def read_handlers(
