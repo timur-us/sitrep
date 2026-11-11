@@ -30,6 +30,8 @@ TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
 HEADER_TRACE_ID = "00f067aa0ba902b700f067aa0ba902b7"
 QUESTION = f"What do I need to know before the call with {FAMILY}?"
 # Every element the hostile text names. None of them may exist on the page.
+# Playwright waits 30 s by default; a missing element should fail a test quickly.
+TIMEOUT_MS = 5000
 MARKUP = "img, a, svg, iframe, object, embed, style, script:not([src]), link:not([href])"
 
 HOSTILE_ANSWER = (
@@ -95,6 +97,7 @@ class Api:
 @pytest.fixture
 def context(browser: Browser) -> Iterator[BrowserContext]:
     context = browser.new_context(service_workers="block")
+    context.set_default_timeout(TIMEOUT_MS)
     context.add_init_script(LISTEN_FOR_VIOLATIONS)
     yield context
     context.close()
@@ -103,6 +106,7 @@ def context(browser: Browser) -> Iterator[BrowserContext]:
 @pytest.fixture
 def context_without_csp(browser: Browser) -> Iterator[BrowserContext]:
     context = browser.new_context(service_workers="block", bypass_csp=True)
+    context.set_default_timeout(TIMEOUT_MS)
     context.add_init_script(LISTEN_FOR_VIOLATIONS)
     yield context
     context.close()
@@ -358,3 +362,75 @@ def test_control_csp_reports_an_injected_image(context: BrowserContext, app_url:
     page.goto(app_url + "/")
     page.evaluate("(a) => { document.getElementById('answer').innerHTML = a; }", HOSTILE_ANSWER)
     page.wait_for_function("window.__violations.includes('img-src')", timeout=5000)
+
+
+# --- more than one question ---------------------------------------------------------
+
+
+class Held:
+    """Keeps every POST /api/ask unanswered until the test fulfils it."""
+
+    def __init__(self, context: BrowserContext, base: str) -> None:
+        self.routes: list[Route] = []
+        context.route(base + "/api/ask", self.routes.append)
+
+    def wait_for(self, page: Page, count: int) -> None:
+        for _ in range(100):
+            if len(self.routes) >= count:
+                return
+            page.wait_for_timeout(50)
+        pytest.fail(f"{len(self.routes)} requests held, expected {count}")
+
+    @staticmethod
+    def fulfil(route: Route, body: dict[str, object]) -> None:
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+
+
+def test_a_newer_question_wins(context: BrowserContext, app_url: str) -> None:
+    # The second question is asked with Ctrl+Enter while the first is pending; the
+    # first's late response is dropped.
+    held = Held(context, app_url)
+    page = context.new_page()
+    page.goto(app_url + "/")
+    ask(page, "first")
+    held.wait_for(page, 1)
+    page.fill("#question", "second")
+    page.press("#question", "Control+Enter")
+    held.wait_for(page, 2)
+    first, second = held.routes
+    assert json.loads(first.request.post_data or "") == {"question": "first"}
+    assert json.loads(second.request.post_data or "") == {"question": "second"}
+    held.fulfil(second, answer(answer="the second answer"))
+    shown(page)
+    held.fulfil(first, answer(answer="the first answer"))
+    page.wait_for_timeout(300)
+    assert text(page, "#answer") == "the second answer"
+    assert page.locator("#ask button").is_enabled()
+
+
+def test_a_blank_question_drops_the_pending_one(context: BrowserContext, app_url: str) -> None:
+    held = Held(context, app_url)
+    page = context.new_page()
+    page.goto(app_url + "/")
+    ask(page, "first")
+    held.wait_for(page, 1)
+    page.fill("#question", " ")
+    page.press("#question", "Control+Enter")
+    assert text(page, "#status") == "Ask a question first."
+    held.fulfil(held.routes[0], answer(answer="the first answer"))
+    page.wait_for_timeout(300)
+    assert page.locator("#result").is_hidden()
+    assert text(page, "#status") == "Ask a question first."
+    assert page.locator("#ask button").is_enabled()
+    assert len(held.routes) == 1
+
+
+def test_an_overlong_question_is_not_sent(context: BrowserContext, app_url: str) -> None:
+    # maxlength stops typing, not a value set by script; the page checks again.
+    api = Api(context, app_url)
+    page = context.new_page()
+    page.goto(app_url + "/")
+    page.evaluate("() => { document.getElementById('question').value = 'x'.repeat(2001); }")
+    page.click("#ask button[type=submit]")
+    assert text(page, "#status") == "The question is too long: at most 2000 characters."
+    assert api.requests == []
