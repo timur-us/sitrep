@@ -14,7 +14,7 @@
 (() => {
   const ASK = "/api/ask";
   const MAX_QUESTION = 2000;
-  const TRACE_ID = /[0-9a-f]{32}/;
+  const TRACE_ID = /^[0-9a-f]{32}$/;
   const DECIMAL = /^[0-9]{1,12}(?:\.[0-9]{1,12})?$/;
   const STOPS = Object.freeze({
     end_turn: "",
@@ -74,6 +74,7 @@
       isCount(grounding.figures) &&
       isCount(grounding.unmatched) &&
       isCount(grounding.unknown_citations) &&
+      grounding.unmatched <= grounding.figures &&
       usage !== null &&
       typeof usage === "object" &&
       isCount(usage.input_tokens) &&
@@ -116,7 +117,7 @@
     const entry = document.createElement("li");
     entry.append(
       span("title", item.title),
-      span("kind", item.kind in KINDS ? KINDS[item.kind] : item.kind),
+      span("kind", Object.hasOwn(KINDS, item.kind) ? KINDS[item.kind] : item.kind),
       span("record", item.record_id),
     );
     return entry;
@@ -143,7 +144,7 @@
   }
 
   function show(data) {
-    byId("answer").innerHTML = data.answer;
+    byId("answer").textContent = data.answer;
     const reason = STOPS[data.stop];
     byId("stop").textContent = reason;
     byId("stop").hidden = reason === "";
@@ -164,7 +165,7 @@
     const mine = ++latest;
     const button = byId("ask").querySelector("button");
     clear();
-    if (question.length === 0 || question.length >= MAX_QUESTION) {
+    if (question.length === 0 || question.length > MAX_QUESTION) {
       byId("status").textContent =
         question.length === 0
           ? "Ask a question first."
@@ -185,10 +186,12 @@
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ question }),
         credentials: "same-origin",
-        mode: "same-origin",
         cache: "no-store",
-        redirect: "follow",
+        redirect: "error",
       });
+      if (mine !== latest) {
+        return;
+      }
       if (!response.ok) {
         const status = response.status;
         const known = Object.hasOwn(FAILURES, status);
@@ -201,6 +204,9 @@
       } catch {
         data = null;
       }
+      if (mine !== latest) {
+        return;
+      }
       if (!isAnswer(data)) {
         fail("Unexpected response.", response);
         return;
@@ -208,10 +214,14 @@
       byId("status").textContent = "";
       show(data);
     } catch {
-      fail("The request failed: no answer from the server.", response);
+      if (mine === latest) {
+        fail("The request failed: no answer from the server.", response);
+      }
     } finally {
-      button.disabled = false;
-      button.textContent = "Ask";
+      if (mine === latest) {
+        button.disabled = false;
+        button.textContent = "Ask";
+      }
     }
   }
 
