@@ -37,9 +37,11 @@ ALLOWED = frozenset(
         # The image carries no data/, and no request path imports the loader.
         "data",
         "dataclasses",
-        # app/harness/model_client.py: the cost, exact to the table's cents.
+        # app/harness/model_client.py: the cost, exact to the table's cents; the number
+        # guard's figures (app/harness/grounding.py, app/harness/context.py).
         "decimal",
-        # app/harness/mvp_tools.py: the follow-up's due date. No clock is read in app/.
+        # app/harness/mvp_tools.py: the follow-up's due date; the number guard's dates
+        # (app/harness/grounding.py). No clock is read in app/.
         "datetime",
         "enum",
         "errno",
