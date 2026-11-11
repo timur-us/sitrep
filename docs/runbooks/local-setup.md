@@ -268,7 +268,7 @@ Errors name the file (escaped unless it is a plain name, so no file name can sta
 ## The advisor page (M1)
 
 `/` is a box for one question. Ask sends `POST /api/ask` with `{"question": …}` (the plan's contract; the route is M1 PR 12's, and until it exists the page shows a failure), and shows:
-- the answer, as written, line breaks kept, in a box labelled as model output (it can quote e-mails and documents, and nothing in it is a link);
+- the answer, as written, line breaks kept, in a box labelled as model output (it can quote e-mails and documents, nothing in it is a clickable link, and the advisor is told not to copy addresses from it into a browser);
 - the stop reason, when the loop stopped early or the model declined;
 - the sources: title, kind and record id of each cited record;
 - the grounding counts: "n of m figures found in the sources" and the number of cited ids that no source returned. Never "verified": the number guard shows where a figure was found, not that it is right, and a figure from an attacker's e-mail counts as found (`app/harness/grounding.py`);
