@@ -16,7 +16,6 @@ so nothing here opens a socket or needs a key. The loop:
 from __future__ import annotations
 
 import copy
-import datetime
 import hashlib
 import json
 import logging
@@ -113,10 +112,12 @@ class Handlers:
     def search(self, advisor: VerifiedAdvisor, arguments: BaseModel) -> Untrusted[Any]:
         self.calls.append(("search_client_docs", advisor.advisor_id, arguments))
         hit = DocumentHit(
+            kind="document",
             document_id="doc-1",
             mandate_id=MANDATE,
             title="Report",
             lang="en",
+            trust="internal",
             excerpt=self.hit_text,
         )
         return Untrusted([hit], Provenance(tool="search_client_docs", record_ids=("doc-1",)))
@@ -126,7 +127,8 @@ class Handlers:
         value = Portfolio(
             mandate_id=MANDATE,
             document_id="doc-2",
-            as_of=datetime.date(2026, 3, 5),
+            title="Portfolio report",
+            lang="en",
             report="Equity share 42.5%",
         )
         return Untrusted(value, Provenance(tool="get_portfolio", record_ids=("doc-2",)))
