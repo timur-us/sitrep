@@ -132,6 +132,12 @@ PORTFOLIO_REPORT = (
 # row-level security scopes it to the advisor of the transaction.
 LIST_MANDATES = "SELECT m.id, m.family FROM mandates m ORDER BY m.id"
 
+# The title and kind of each record an answer cites (POST /api/ask, M1 PR 12), after the
+# loop, in the advisor's own transaction: row-level security scopes the documents, and
+# the advisor_id column lets the caller refuse a row of another advisor (a second line).
+CITED_DOCUMENTS = "SELECT d.advisor_id, d.id, d.title FROM documents d WHERE d.id = ANY(%s)"
+CITED_SHEETS = "SELECT s.id, s.title FROM product_sheets s WHERE s.id = ANY(%s)"
+
 # The loader (app/db/load.py; ADR 0010), as the owner, one advisor per transaction under
 # owner_advisor_scope(): row-level security scopes each statement to that advisor, and
 # the bound advisor_id says the same again. No statement names trust, which the

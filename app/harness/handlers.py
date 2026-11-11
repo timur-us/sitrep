@@ -39,6 +39,7 @@ result is Untrusted (CLAUDE.md rule 9). The handlers log nothing.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
@@ -74,6 +75,23 @@ class ToolFailed(Exception):
     def __init__(self, kind: str) -> None:
         super().__init__(kind)
         self.kind = kind
+
+
+# The kinds of ToolFailed the loop gives the model and puts on the span (M1 PR 12).
+TOOL_FAILURES: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True)
+class Cited:
+    """A record an answer cites, as POST /api/ask names it: id, title and kind."""
+
+    record_id: str
+    title: str
+    kind: str
+
+
+def cited(conn: AdvisorConnection, advisor_id: str, record_ids: Sequence[str]) -> list[Cited]:
+    raise NotImplementedError("M1 PR 12")
 
 
 def fuse(ranked: Sequence[Sequence[Key]], k: int = RRF_K) -> list[Key]:

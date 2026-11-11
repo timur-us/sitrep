@@ -365,3 +365,49 @@ def test_the_vector_lists_compare_one_model(name: str) -> None:
 
 def test_the_portfolio_comes_from_the_portfolio_system() -> None:
     assert "d.origin = 'portfolio_system'" in queries.PORTFOLIO_REPORT
+
+
+# The citations' titles and kinds (M1 PR 12; the PR 9 handover): looked up after the loop,
+# in the advisor's own transaction, for the cited ids a tool returned.
+
+
+def test_citations_keep_the_cited_order_with_title_and_kind() -> None:
+    conn = FakeConnection(
+        {
+            queries.CITED_DOCUMENTS: [(MINE, "doc-b", "Call notes"), (MINE, "doc-a", "Report")],
+            queries.CITED_SHEETS: [("sheet-1", "Fund sheet")],
+        }
+    )
+    found = handlers.cited(conn, MINE, ["doc-a", "sheet-1", "doc-b"])
+    assert found == [
+        handlers.Cited("doc-a", "Report", handlers.DOCUMENT),
+        handlers.Cited("sheet-1", "Fund sheet", handlers.PRODUCT_SHEET),
+        handlers.Cited("doc-b", "Call notes", handlers.DOCUMENT),
+    ]
+    assert conn.ran == [queries.CITED_DOCUMENTS, queries.CITED_SHEETS]
+
+
+def test_a_cited_record_gone_since_is_left_out() -> None:
+    conn = FakeConnection({queries.CITED_DOCUMENTS: [(MINE, "doc-a", "Report")]})
+    assert handlers.cited(conn, MINE, ["gone", "doc-a"]) == [
+        handlers.Cited("doc-a", "Report", handlers.DOCUMENT)
+    ]
+
+
+def test_no_citation_runs_no_statement() -> None:
+    conn = FakeConnection({})
+    assert handlers.cited(conn, MINE, []) == []
+    assert conn.ran == []
+
+
+def test_the_citations_refuse_a_row_of_another_advisor() -> None:
+    conn = FakeConnection({queries.CITED_DOCUMENTS: [(OTHER, "doc-a", "Their report")]})
+    with pytest.raises(GuardError, match="another advisor"):
+        handlers.cited(conn, MINE, ["doc-a"])
+
+
+def test_the_citation_statements_take_the_ids_bound() -> None:
+    for statement in (queries.CITED_DOCUMENTS, queries.CITED_SHEETS):
+        assert "= ANY(%s)" in statement and "%s" in statement.partition("ANY(")[2], statement
+    assert queries.CITED_DOCUMENTS.startswith("SELECT d.advisor_id, d.id, d.title FROM documents d")
+    assert queries.CITED_SHEETS.startswith("SELECT s.id, s.title FROM product_sheets s")

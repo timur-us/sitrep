@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import html
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,10 +17,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from opentelemetry.sdk.trace import TracerProvider
 
-from app.api import mandates
+from app.api import ask, mandates
 from app.config import branding
 from app.config.settings import LOOPBACK, Settings
 from app.db import session
+from app.embeddings.base import Embedder
+from app.harness.model import ModelClient
 from app.http.host_check import HostCheckMiddleware, allowed_hosts
 from app.http.security_headers import SecurityHeadersMiddleware, response_headers
 from app.observability import tracing
@@ -49,6 +51,10 @@ def create_app(
     settings: Settings,
     tracer_provider: TracerProvider | None = None,
     bind_host: str | None = None,
+    *,
+    model_client: ModelClient | None = None,
+    embedder: Embedder | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> FastAPI:
     """bind_host is the address the entry point binds; None when it is not known.
 
@@ -93,6 +99,7 @@ def create_app(
 
     # Always mounted: without a login (the shim off, Entra ID not before M3) it answers 401.
     mandates.mount(app)
+    ask.mount(app, settings, model_client=model_client, embedder=embedder, clock=clock)
 
     # The dev login (ADR 0009): only for exactly "1", and only when the entry point binds
     # exactly 127.0.0.1 (it has refused every other host by then). Imported here, not at
