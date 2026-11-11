@@ -8,33 +8,44 @@ output_tokens}`, `cost_usd`, `stop` and `trace_id` out. JSON only, with
 page). A request meets, in this order:
 
 1. The login (401, current_advisor()) and, with the dev login, the shim's Host and
-   Origin checks (400, 403), which run before any route (app/auth/dev_shim.py).
-2. The rate limit per verified advisor (429): at most REQUESTS_PER_WINDOW requests
+   Origin checks (400, 403), which run before any route (app/auth/dev_shim.py). The
+   request's clock starts here, for the deadline below.
+2. The content type (422): exactly one Content-Type of exactly application/json. It is
+   checked before the rate limit counts, so a cross-site form (text/plain, which needs
+   no preflight) cannot spend an advisor's asks (review finding sec-2).
+3. The rate limit per verified advisor (429): at most REQUESTS_PER_WINDOW requests
    started in any WINDOW_SECONDS, and one in flight. In process memory, one entry per
-   advisor that asked. A refused request is not counted; a malformed one is.
-3. The body (422, one fixed body that echoes nothing): Content-Type exactly
-   application/json, at most MAX_BODY bytes, a JSON object of exactly `question` (1 to
-   MAX_QUESTION characters, not blank) and an optional `mandate_id` of the loop's form.
-4. The model client, built from settings at the first ask and kept (ADR 0012): without
-   a key, 503. The embedding model, loaded at the first ask and kept (about 1.5 s, once):
-   without its files, 503. A failure is kept too: settings and model files are read
-   once, so a restart retries. Nothing is built at startup, so the app serves /health
-   without either.
-5. The database (503): one advisor transaction opens and closes before the first model
+   advisor that asked. A refused request is not counted; a malformed body is.
+4. The body (422, one fixed body that echoes nothing): at most MAX_BODY bytes as they
+   arrive, a JSON object of exactly `question` (1 to MAX_QUESTION characters, not
+   blank) and an optional `mandate_id` of the loop's form. Without a mandate the ask
+   covers all of the advisor's own mandates.
+5. The model client, built from settings at the first ask and kept (ADR 0012): without
+   a key, 503, kept until a restart (the settings are read once). The embedding model,
+   loaded at the first ask and kept (about 1.5 s, once, on the event loop): without its
+   files, or with other bytes than the pinned ones, 503, kept until a restart; any other
+   failure to load (an I/O error, say) is 503 and tried again at the next ask. Nothing
+   is built at startup, so the app serves /health without either.
+6. The database (503): one advisor transaction opens and closes before the first model
    call, so a database that is down costs no model call.
-6. The loop (app/harness/loop.py) with the READ handlers bound to the app's pool and
+7. The loop (app/harness/loop.py) with the READ handlers bound to the app's pool and
    embedder (read_handlers()). Each tool call opens and closes its own advisor
    transaction, so no connection is held while the model is called (PR 5b sec-5). The
    model client is wrapped in DeadlineClient: no model call starts DEADLINE_SECONDS or
-   more after the route began, and the request then ends with stop "budget", as when
-   its tokens run out (Timur's answer 1 on #33: the loop itself reads no clock). A call
-   already running ends within the client's own timeout.
-7. The citations' titles and kinds, in one more advisor transaction
+   more after the request's clock started, and the request then ends with stop
+   "budget", as when its tokens run out (Timur's answer 1 on #33: the loop itself reads
+   no clock). This is no wall-clock bound: a call already running ends within the
+   client's own timeouts (per phase, ADR 0012), and the tool calls of its turn still run,
+   each statement without a timeout until M2 (PR 8's sec-4).
+8. The citations' titles and kinds, in one more advisor transaction
    (handlers.cited_records()), for the ids a tool returned and the answer cites.
 
 A LoopError maps to STATUS by its kind, with one fixed body each: 502 for a failed model
-call, 503 for the database, 500 for every other kind. The cost is an exact decimal
-string. Nothing is logged here; the loop traces the request's span.
+call, 503 for the database, 500 for every other kind. A GuardError or a lost database in
+the route's own transactions (steps 6 and 8) ends the request the same way, and the
+route names the kind on the span as the loop does, so M2's alarm on a broken boundary
+sees every one (review finding sec-1). The cost is an exact decimal string; trace_id is
+the request span's, always set under create_app(). Nothing is logged here.
 
 The rate limit and the lazy builds keep state between requests without a lock: they run
 in async dependencies, on the event loop alone, with no await between a check and its
@@ -54,22 +65,26 @@ from typing import Annotated, Any
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from opentelemetry import trace
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.auth.identity import VerifiedAdvisor, current_advisor
 from app.config.settings import Settings
 from app.db.session import GuardError, advisor_transaction
 from app.embeddings.base import Embedder
+from app.embeddings.model_files import ModelFileError
 from app.harness import loop
 from app.harness.context import BudgetExceeded
 from app.harness.handlers import cited_records, read_handlers
 from app.harness.model import ModelClient
 from app.harness.model_client import ModelClientRefused, build_model_client
+from app.observability import tracing
 
 ROUTE = "/api/ask"
 CONTENT_TYPE = "application/json"
-# Bytes: the longest valid ask, every character escaped as \uXXXX, fits (a test pins it).
-MAX_BODY = 16_384
+# Bytes: the longest valid ask, every character escaped, characters outside the BMP as
+# surrogate pairs of 12 bytes (Python's json.dumps), fits: about 24.8 KB (a test posts it).
+MAX_BODY = 32_768
 MAX_QUESTION = loop.MAX_QUESTION
 MAX_MANDATE_ID = loop.MAX_MANDATE_ID
 MANDATE_ID = r"^[A-Za-z0-9][A-Za-z0-9_-]*$"  # the loop's form (app/harness/loop.py)
@@ -109,12 +124,24 @@ class AskRequest(BaseModel):
     )
 
 
-def build_embedder() -> Embedder:
-    """The real embedder (ADR 0005), from the checked model files."""
-    # Imported here, so the model runtime loads at the first ask, not when the app starts.
-    from app.embeddings.onnx import OnnxEmbedder
+class EmbedderUnavailable(Exception):
+    """The model files are missing or not the pinned bytes, or the graph is refused."""
 
-    return OnnxEmbedder()
+
+def build_embedder() -> Embedder:
+    """The real embedder (ADR 0005), from the checked model files; EmbedderUnavailable
+    for files that are missing or not the pinned bytes, or a refused graph."""
+    # Imported here, so the model runtime loads at the first ask, not when the app starts.
+    from app.embeddings.onnx import EmbedderError, OnnxEmbedder
+
+    try:
+        embedder: Embedder | None = OnnxEmbedder()
+    except (ModelFileError, EmbedderError):
+        embedder = None
+    if embedder is None:
+        # Raised outside the except, so the file error is neither cause nor context.
+        raise EmbedderUnavailable("the embedding model is not in place")
+    return embedder
 
 
 class RateLimit:
@@ -191,11 +218,14 @@ class AskState:
         return self._model_client
 
     def embedder(self) -> Embedder | None:
-        if self._embedder is None and not self._no_embedder:
-            try:
-                self._embedder = build_embedder()
-            except Exception:  # noqa: BLE001 - files missing or not the pinned bytes, a refused graph
-                self._no_embedder = True
+        if self._embedder is not None or self._no_embedder:
+            return self._embedder
+        try:
+            self._embedder = build_embedder()
+        except EmbedderUnavailable:
+            self._no_embedder = True  # the files are read once: a restart reads them again
+        except Exception:  # noqa: BLE001 - another failure (an I/O error, say) is tried again
+            return None
         return self._embedder
 
 
@@ -206,8 +236,13 @@ def _state(request: Request) -> AskState:
 async def admitted(
     request: Request, advisor: Annotated[VerifiedAdvisor, Depends(current_advisor)]
 ) -> AsyncIterator[VerifiedAdvisor]:
-    """The login's advisor, within the rate limit (429 otherwise), until the route ends."""
-    limit = _state(request).limit
+    """The login's advisor, with a JSON body (422 otherwise) and within the rate limit
+    (429 otherwise), until the route ends. The request's clock starts here."""
+    state = _state(request)
+    request.state.ask_began = state.clock()
+    if request.headers.getlist("content-type") != [CONTENT_TYPE]:
+        raise _invalid()  # before the limit counts (review finding sec-2)
+    limit = state.limit
     if not limit.admit(advisor.advisor_id):
         raise HTTPException(status_code=429, detail=TOO_MANY)
     try:
@@ -221,19 +256,19 @@ def _invalid() -> HTTPException:
 
 
 async def ask_body(request: Request) -> AskRequest:
-    """The body as an AskRequest, or one fixed 422."""
-    if request.headers.getlist("content-type") != [CONTENT_TYPE]:
-        raise _invalid()
+    """The body as an AskRequest, or one fixed 422 (the content type is admitted()'s)."""
     body = b""
     async for chunk in request.stream():
         body += chunk
         if len(body) > MAX_BODY:
             raise _invalid()
+    ask: AskRequest | None
     try:
         ask = AskRequest.model_validate_json(body)
     except ValidationError:
-        raise _invalid() from None  # the errors quote the input
-    if not ask.question.strip():
+        ask = None
+    # Raised outside the except: pydantic's errors quote the input (review finding sec-7).
+    if ask is None or not ask.question.strip():
         raise _invalid()
     return ask
 
@@ -251,7 +286,12 @@ async def services(request: Request) -> tuple[ModelClient, Embedder]:
 
 
 def _failed(kind: str) -> HTTPException:
-    status, detail = STATUS.get(kind, (500, FAILED))
+    """The fixed answer for a LoopError's kind, named on the request's span as the loop
+    names its own (a reviewed word: tracing.LOOP's error key)."""
+    span = trace.get_current_span()
+    if span.is_recording():
+        span.set_attribute(tracing.LOOP["error"], kind)
+    status, detail = STATUS[kind]
     return HTTPException(status_code=status, detail=detail)
 
 
@@ -263,7 +303,7 @@ def post_ask(
     found: Annotated[tuple[ModelClient, Embedder], Depends(services)],
 ) -> JSONResponse:
     state = _state(request)
-    began = state.clock()
+    began: float = request.state.ask_began
     pool = request.app.state.pool
     client, embedder = found
     failure: str | None = None

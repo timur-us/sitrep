@@ -15,7 +15,7 @@ SITREP (situation report) lets a model call four tools for an advisor. Two of th
 ## Options
 
 - **SDK tool runner** (`client.beta.messages.tool_runner`). Little code. It is beta, and Anthropic's own page says to use the manual loop "when you need human-in-the-loop approval, custom logging, or conditional execution", which is all three of ours.
-- **Claude Agent SDK.** A full agent runtime with file, shell and web tools; without `setting_sources` it reads the Claude Code CLI's user, project and local settings and CLAUDE.md files. For a bank copilot, the wrong default surface.
+- **Claude Agent SDK.** A full runtime with file, shell and web tools; without `setting_sources` it reads the Claude Code CLI's user, project and local settings and CLAUDE.md files. For a bank copilot, the wrong default surface.
 - **Claude Managed Agents.** A hosted harness with a managed sandbox (beta). It moves the loop and its state out of our process and our traces, and it is not eligible for zero data retention.
 - **Own loop on the Messages API.** More code, and we own its correctness.
 
@@ -35,7 +35,7 @@ Timur's decisions after Fable's security review of PR 6:
 ### Amendments (PR 10, 2026-11-10; PR 12, 2026-11-11)
 
 - `app/harness/loop.py`: READ tools only; a block allowlist; 6 turns, 8 calls per turn, 24 per request, 150,000 tokens. `max_tokens` stops as "budget"; `pause_turn` fails. One retry, not for timeouts. No refusal fallback (ADR 0003).
-- PR 12: `ToolFailed`'s reviewed kinds reach the model; `GuardError` and database failures end the request. The route's clock stops model calls after 90 s ("budget").
+- PR 12: `ToolFailed`'s reviewed kinds reach the model; `GuardError` and database failures end the request. The route stops model calls after 90 s ("budget").
 
 ## Consequences
 
@@ -44,7 +44,7 @@ Timur's decisions after Fable's security review of PR 6:
   - `stop_reason` handling: `end_turn`, `tool_use`, `max_tokens`, `stop_sequence`, `pause_turn`, `refusal` (an HTTP 200, not an error) and `model_context_window_exceeded`;
   - the ordering rule: in the user turn after a `tool_use`, the `tool_result` blocks come first;
   - retries, budgets and the turn limit;
-  - no forced `tool_choice` on Sonnet 5.5 (400 for `any` and `tool`); Haiku 5.5, for the guard layer, accepts it.
+  - no forced `tool_choice` on Sonnet 5.5, whatever the thinking settings (400 for `any` and `tool`); Haiku 5.5 (the guard layer) accepts it.
 - **Watch:** if the tool runner leaves beta with an approval hook, re-check this ADR.
 
 ## Sources
