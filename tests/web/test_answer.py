@@ -372,7 +372,8 @@ class Held:
 
     def __init__(self, context: BrowserContext, base: str) -> None:
         self.routes: list[Route] = []
-        context.route(base + "/api/ask", self.routes.append)
+        # A lambda: Playwright cannot wrap a builtin method such as list.append.
+        context.route(base + "/api/ask", lambda route: self.routes.append(route))
 
     def wait_for(self, page: Page, count: int) -> None:
         for _ in range(100):
