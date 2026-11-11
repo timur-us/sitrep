@@ -26,6 +26,7 @@ search returned. No socket but loopback, no key.
 
 from __future__ import annotations
 
+import re
 import secrets
 from collections.abc import Iterator
 from decimal import Decimal
@@ -495,3 +496,17 @@ def test_a_failure_is_traced_by_kind(start: Any, monkeypatch: pytest.MonkeyPatch
     assert response.status_code == 500
     [server] = [s for s in exporter.get_finished_spans() if s.name == f"POST {ask.ROUTE}"]
     assert dict(server.attributes or {})[f"{branding.SLUG}.loop.error"] == "guard"
+
+
+def test_the_response_passes_the_pages_reading_of_the_contract(start: Any) -> None:
+    # #34 (PR 11), question 1: the page accepts a response only if trace_id is 32
+    # lower-case hex digits, stop is one of the four, every count is a non-negative
+    # integer with unmatched <= figures, and cost_usd is a non-negative JSON number or a
+    # plain decimal string without an exponent. The real route's response passes.
+    body = start(EchoModel(DEMO.family)).ask(MINE).json()
+    assert re.fullmatch(r"[0-9a-f]{32}", body["trace_id"]), body["trace_id"]
+    assert body["stop"] in {"end_turn", "refusal", "budget", "max_turns"}
+    counts = [*body["grounding"].values(), *body["usage"].values()]
+    assert all(type(count) is int and count >= 0 for count in counts), counts
+    assert body["grounding"]["unmatched"] <= body["grounding"]["figures"]
+    assert re.fullmatch(r"[0-9]+(\.[0-9]+)?", body["cost_usd"]), body["cost_usd"]

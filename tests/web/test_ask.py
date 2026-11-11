@@ -158,25 +158,28 @@ def test_another_advisor_asks_the_same_and_gets_nothing_of_theirs(
 def test_control_a_page_on_another_port_is_refused_by_the_origin_check(
     context: BrowserContext, ask_app_url: str, unused_port: int
 ) -> None:
+    # The classic forged form: a page on another local port posts to /api/ask in a
+    # top-level navigation (text/plain, so no preflight). 127.0.0.1 on another port is
+    # the same site, so the SameSite=Strict session cookie goes with it; only the Origin
+    # check stops it. A navigation, not fetch(): Cross-Origin-Resource-Policy would block
+    # a cross-origin fetch's answer before the test could read its status.
     page = context.new_page()
     sign_in(page, ask_app_url, MINE)
-    elsewhere = f"http://127.0.0.1:{unused_port}/"
-    context.route(
-        elsewhere,
-        lambda route: route.fulfill(
-            body="<!doctype html><title>x</title>", content_type="text/html"
-        ),
+    elsewhere = f"http://127.0.0.1:{unused_port}"
+    form = (
+        f'<!doctype html><form method="post" action="{ask_app_url}{ROUTE}" enctype="text/plain">'
+        """<input name='{"question": "q", "x": "' value='"}'><button>go</button></form>"""
     )
-    page.goto(elsewhere)
-    # A simple request (text/plain, no preflight), so the POST itself is sent, with the
-    # cookie: 127.0.0.1 on another port is the same site.
+    context.route(
+        elsewhere + "/",
+        lambda route: route.fulfill(body=form, content_type="text/html"),
+    )
+    page.goto(elsewhere + "/")
     with page.expect_response(ask_app_url + ROUTE) as answered:
-        page.evaluate(
-            """(url) => fetch(url, {method: "POST", mode: "no-cors", credentials: "include",
-                 headers: {"Content-Type": "text/plain"}, body: '{"question": "q"}'})""",
-            ask_app_url + ROUTE,
-        )
+        page.click("button")
     refused = answered.value
-    assert refused.request.header_value("origin") == elsewhere.rstrip("/")
-    assert f"{dev_shim.COOKIE}=" in (refused.request.header_value("cookie") or ""), "no cookie"
+    assert refused.request.method == "POST"
+    assert refused.request.header_value("origin") == elsewhere
+    cookie = refused.request.header_value("cookie") or ""
+    assert f"{dev_shim.COOKIE}=" in cookie, "control: the session cookie was not sent"
     assert refused.status == 403, refused.status

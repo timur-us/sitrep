@@ -96,8 +96,10 @@ audit: ## Re-resolve the lock, then pip-audit it with hashes (needs the network)
 web-deps: ## Download Chromium for Playwright (from Playwright's CDN, not hash-pinned)
 	$(UV_RUN) playwright install chromium
 
-# pytest exits 5 when it collects nothing, and make fails on it.
-web-test: web-deps ## The browser smoke test (tests/web) against the app on 127.0.0.1
+# pytest exits 5 when it collects nothing, and make fails on it. Since M1 PR 12 the read
+# path in Chromium (tests/web/test_ask.py) reads the loaded corpus, so the database is
+# up, migrated and loaded first, with the model in place.
+web-test: up migrate model load web-deps ## The browser tests (tests/web) against the app on 127.0.0.1: up, migrate, model, load, Chromium, then pytest
 	$(UV_RUN) python -P -m pytest tests/web
 
 evals: ## The eval gate, offline: check the corpus against evals/gate.toml (no scoring in M0)

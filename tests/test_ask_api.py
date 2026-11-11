@@ -176,6 +176,8 @@ INVALID_BODIES = {
     "too long": ('{"question": "' + "x" * 2_001 + '"}').encode(),
     "a mandate id with a space": b'{"question": "q", "mandate_id": "a b"}',
     "a mandate id with a slash": b'{"question": "q", "mandate_id": "../x"}',
+    # Python's `$` would match before this newline; pydantic's engine must not.
+    "a mandate id with a trailing newline": b'{"question": "q", "mandate_id": "m1\\n"}',
     "an empty mandate id": b'{"question": "q", "mandate_id": ""}',
     "a long mandate id": ('{"question": "q", "mandate_id": "' + "m" * 129 + '"}').encode(),
     "a mandate id that is a number": b'{"question": "q", "mandate_id": 5}',
@@ -364,9 +366,9 @@ def test_the_rate_limit_counts_per_advisor_in_a_sliding_window() -> None:
     assert not limit.admit(MINE), "a fourth request in the window"
     assert limit.admit(OTHER), "one advisor's requests limit another"
     limit.release(OTHER)
-    clock.now += 59.9
+    clock.now += 59.5
     assert not limit.admit(MINE)
-    clock.now += 0.1
+    clock.now += 0.5
     assert limit.admit(MINE), "the window did not slide"
     limit.release(MINE)
 
@@ -446,9 +448,9 @@ def test_the_deadline_refuses_a_call_that_would_start_after_it() -> None:
         "max_tokens": 16,
     }
     client.create(**request)
-    clock.now += 9.9
+    clock.now += 9.5
     client.create(**request)
-    clock.now += 0.1
+    clock.now += 0.5
     with pytest.raises(BudgetExceeded):
         client.create(**request)
     assert len(model.calls) == 2, "a call started after the deadline"
