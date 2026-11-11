@@ -1,18 +1,20 @@
-"""The read path in Chromium (M1 plan, PR 12): sign in, ask, get a cited answer.
+"""The read path in Chromium (M1 plan, PR 12): sign in, ask in the page, see a cited answer.
 
 The app is tests/web/ask_server.py: create_app() with the dev login on 127.0.0.1, the
 real database (`make load`'s corpus) and embedder, and a scripted model that searches
 for the demo family and cites what the advisor's own search returned. Chromium resolves
 no name and reaches no address but 127.0.0.1 (tests/web/conftest.py).
 
-- The demo advisor signs in through the login form, opens the app's page, and asks. The
-  ask is the page's own fetch(), same-origin, as the UI sends it: until PR 11's ask box
-  is merged there is no form to type into, so the page runs the request itself. It
-  carries the app's exact Origin under the app's no-referrer policy (a fetch is "cors"
-  mode, where the policy does not null the Origin, unlike the login form's navigation).
-  The answer cites the demo advisor's own documents, titles from the database, as JSON
-  with no-store; no CSP violation fires and no request leaves the origin.
-- Another advisor asks the same and gets no record id of the demo advisor's.
+- The demo advisor signs in through the login form, opens the advisor page (M1 PR 11),
+  types the question into its ask box and presses Ask. The page's request reaches the
+  real route through the real shim: exactly `{"question": ...}`, the app's exact Origin
+  (a same-origin fetch is "cors" mode, where the no-referrer policy does not null the
+  Origin, unlike the login form's navigation). The page shows the answer and its
+  sources: every listed record is the demo advisor's document or a product sheet, with
+  its title from the database and its kind; at least one is the advisor's own. The
+  route's JSON carries no-store; no CSP violation fires and no request leaves the origin.
+- Another advisor asks the same in the page and is shown sources, none of them, and
+  nothing on the page, the demo advisor's.
 - Control: a page on another local port (same site, so the SameSite=Strict cookie goes
   with it) posts to /api/ask with the session cookie, and the Origin check refuses it.
 """
@@ -38,20 +40,14 @@ MINE = next(person for person in branding.ADVISORS if person.id == DEMO.advisor_
 OTHER = next(person for person in branding.ADVISORS if person.id != MINE.id)
 QUESTION = f"What do I need to know before the call with {DEMO.family}?"
 ROUTE = "/api/ask"
+# What the page shows for each kind (app/web/static/app.js, KINDS).
+SHOWN_KINDS = {"document": "document", "product_sheet": "product sheet"}
 LISTEN_FOR_VIOLATIONS = """
 window.__violations = [];
 document.addEventListener("securitypolicyviolation", (event) => {
   window.__violations.push(event.effectiveDirective);
 });
 """
-ASK = """async ([route, question]) => {
-  const response = await fetch(route, {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({question}),
-  });
-  return {status: response.status, body: await response.text()};
-}"""
 
 
 def origin(url: str) -> tuple[str, str]:
@@ -95,15 +91,33 @@ def sign_in(page: Page, app_url: str, person: branding.Person) -> None:
     assert posted.value.status == 200, f"login as {person.id}: {posted.value.status}"
 
 
-def ask_from_the_page(page: Page, app_url: str) -> tuple[Any, dict[str, Any]]:
-    """Opens the app's page and asks from it; the network response and what fetch() saw."""
+def ask_in_the_page(page: Page, app_url: str) -> Any:
+    """Opens the advisor page, types the question and presses Ask; the route's response,
+    once the page shows the answer."""
     assert page.goto(app_url + "/").status == 200
+    page.fill("#question", QUESTION)
     with page.expect_response(app_url + ROUTE) as answered:
-        seen = page.evaluate(ASK, [ROUTE, QUESTION])
-    return answered.value, seen
+        page.click("#ask button[type=submit]")
+    assert answered.value.status == 200, answered.value.text()[:200]
+    # Not wait_for_function: the page's CSP refuses the eval it needs (#34).
+    page.wait_for_selector("#result:not([hidden])")
+    return answered.value
 
 
-def test_the_demo_advisor_asks_in_the_browser_and_gets_own_sources(
+def shown_sources(page: Page) -> list[tuple[str, str, str]]:
+    """(record id, title, kind) of each source the page lists, in order."""
+    items = page.locator("#citations li")
+    return [
+        (
+            items.nth(i).locator(".record").text_content() or "",
+            items.nth(i).locator(".title").text_content() or "",
+            items.nth(i).locator(".kind").text_content() or "",
+        )
+        for i in range(items.count())
+    ]
+
+
+def test_the_demo_advisor_asks_in_the_page_and_sees_own_sources(
     context: BrowserContext, ask_app_url: str
 ) -> None:
     owner, titles, sheets = corpus_rows()
@@ -111,24 +125,30 @@ def test_the_demo_advisor_asks_in_the_browser_and_gets_own_sources(
     context.on("request", lambda request: requests.append(request.url))
     page = context.new_page()
     sign_in(page, ask_app_url, MINE)
-    response, seen = ask_from_the_page(page, ask_app_url)
+    response = ask_in_the_page(page, ask_app_url)
 
-    assert response.status == 200 == seen["status"], seen["body"][:200]
-    assert response.request.method == "POST"
-    assert response.request.header_value("origin") == ask_app_url
+    sent = response.request
+    assert sent.method == "POST"
+    assert sent.post_data_json == {"question": QUESTION}, "the page sent another body"
+    assert sent.header_value("origin") == ask_app_url
     assert response.header_value("content-type") == "application/json"
     assert response.header_value("cache-control") == "no-store"
     body = response.json()
     assert body["stop"] == "end_turn" and body["proposals"] == []
-    citations = body["citations"]
-    assert citations, "no citation"
-    for item in citations:
-        record = item["record_id"]
+
+    sources = shown_sources(page)
+    assert sources, "the page lists no source"
+    assert [record for record, _, _ in sources] == [c["record_id"] for c in body["citations"]]
+    for record, title, kind in sources:
         assert owner.get(record) == MINE.id or record in sheets, (
             f"{record} is not the demo advisor's"
         )
-        assert item["title"] == titles[record]
-    assert any(owner.get(item["record_id"]) == MINE.id for item in citations)
+        assert title == titles[record]
+        expected = "product_sheet" if record in sheets else "document"
+        assert kind == SHOWN_KINDS[expected]
+    assert any(owner.get(record) == MINE.id for record, _, _ in sources)
+    assert page.locator("#answer").text_content() == body["answer"]
+    assert page.locator("#trace").text_content() == body["trace_id"]
     assert body["trace_id"] == response.header_value("x-trace-id")
 
     assert page.evaluate("window.__violations") == []
@@ -137,22 +157,20 @@ def test_the_demo_advisor_asks_in_the_browser_and_gets_own_sources(
     assert foreign == [], foreign
 
 
-def test_another_advisor_asks_the_same_and_gets_nothing_of_theirs(
+def test_another_advisor_asks_the_same_and_sees_nothing_of_theirs(
     context: BrowserContext, ask_app_url: str
 ) -> None:
     owner, _, _ = corpus_rows()
     page = context.new_page()
     sign_in(page, ask_app_url, OTHER)
-    response, seen = ask_from_the_page(page, ask_app_url)
-    assert response.status == 200, seen["body"][:200]
-    assert response.json()["citations"], (
-        "control: the other advisor's search returned nothing to cite"
-    )
+    response = ask_in_the_page(page, ask_app_url)
+    sources = shown_sources(page)
+    assert sources, "control: the other advisor's search returned nothing to cite"
+    assert all(owner.get(record) != MINE.id for record, _, _ in sources), sources
     theirs = [record for record, advisor in owner.items() if advisor == MINE.id]
-    leaked = [record for record in theirs if record in seen["body"]]
-    assert leaked == [], (
-        f"the demo advisor's record ids in the other advisor's answer: {leaked[:3]}"
-    )
+    shown = page.locator("body").text_content() or ""
+    leaked = [record for record in theirs if record in shown or record in response.text()]
+    assert leaked == [], f"the demo advisor's record ids shown to another advisor: {leaked[:3]}"
 
 
 def test_control_a_page_on_another_port_is_refused_by_the_origin_check(
