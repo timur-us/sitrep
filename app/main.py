@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import html
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -26,14 +27,29 @@ from app.http.security_headers import SecurityHeadersMiddleware, response_header
 from app.observability import tracing
 from app.observability.logs import asyncio_exception_handler, tag_trace_id
 
-INDEX = Path(__file__).parent / "web" / "static" / "index.html"
-TITLE = "{{title}}"
+STATIC = Path(__file__).parent / "web" / "static"
+INDEX = STATIC / "index.html"
+PLACEHOLDER = re.compile(r"\{\{(title|tagline)\}\}")
+# The page's script and stylesheet (M1 PR 11): two exact routes, no directory mount, so
+# nothing else in the package is served.
+ASSETS = {"app.js": "text/javascript", "app.css": "text/css"}
 
 
 def index_html() -> str:
-    """The placeholder page, its title filled in from branding."""
-    title = html.escape(f"{branding.PRODUCT.name} — {branding.BANK.display_name}")
-    return INDEX.read_text(encoding="utf-8").replace(TITLE, title)
+    """The advisor page, its title and tagline filled in from branding: escaped, and in
+    one pass, so a placeholder inside a value is not expanded again."""
+    values = {
+        "title": html.escape(f"{branding.PRODUCT.name} — {branding.BANK.display_name}"),
+        "tagline": html.escape(branding.PRODUCT.tagline),
+    }
+    return PLACEHOLDER.sub(lambda m: values[m.group(1)], INDEX.read_text(encoding="utf-8"))
+
+
+def _asset(body: bytes, media_type: str) -> Callable[[], Awaitable[Response]]:
+    async def asset() -> Response:
+        return Response(body, media_type=media_type)
+
+    return asset
 
 
 async def internal_error(request: Request, exc: Exception) -> Response:
@@ -86,6 +102,10 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
         return HTMLResponse(page)
+
+    for name, media_type in ASSETS.items():
+        body = (STATIC / name).read_bytes()
+        app.add_api_route(f"/static/{name}", _asset(body, media_type), methods=["GET"])
 
     @app.get("/health")
     async def health() -> dict[str, str]:

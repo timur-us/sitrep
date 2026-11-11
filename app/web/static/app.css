@@ -1,0 +1,139 @@
+/* The advisor page (M1 PR 11). System fonts only, and nothing here loads a resource:
+   tests/test_ui_page.py refuses every way a stylesheet can fetch one. */
+
+[hidden] {
+  display: none !important;
+}
+
+:root {
+  color-scheme: light dark;
+  --muted: #5f6368;
+  --line: #c9ccd1;
+  --accent: #1f4e79;
+}
+
+body {
+  margin: 0;
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+main {
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 1.5rem 0 0.5rem;
+}
+
+.tagline,
+.note,
+.citations .kind,
+.citations .record,
+.facts dt {
+  color: var(--muted);
+}
+
+.tagline {
+  margin: 0.25rem 0 1.5rem;
+}
+
+form {
+  display: grid;
+  gap: 0.5rem;
+}
+
+textarea {
+  font: inherit;
+  padding: 0.5rem;
+  resize: vertical;
+}
+
+button {
+  justify-self: start;
+  font: inherit;
+  padding: 0.4rem 1.2rem;
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+#status:empty {
+  display: none;
+}
+
+/* Model output, in its own labelled box, so text that imitates the page's sections
+   stays visibly inside it; shown as written: line breaks kept, long tokens wrapped,
+   and its direction isolated from the page around it. */
+.output {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+}
+
+.output-label {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.answer {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  unicode-bidi: plaintext;
+}
+
+.stop {
+  font-weight: 600;
+}
+
+.citations li {
+  margin-bottom: 0.25rem;
+  overflow-wrap: anywhere;
+}
+
+.citations span {
+  unicode-bidi: isolate;
+}
+
+.citations .kind,
+.citations .record {
+  margin-left: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.citations .record {
+  font-family: ui-monospace, monospace;
+}
+
+.note {
+  font-size: 0.9rem;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+  margin-top: 1.5rem;
+}
+
+.facts dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  overflow-wrap: anywhere;
+}
