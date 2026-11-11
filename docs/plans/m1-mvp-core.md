@@ -1,6 +1,6 @@
 # M1 — MVP core, local: plan
 
-Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
+Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
 
 ## Context
 
@@ -414,11 +414,12 @@ New for two sessions:
 - `app/harness/handlers.py`: a map from tool name to handler, kept apart from the specs.
   - Each handler runs in its own advisor transaction and returns `Untrusted` with `Provenance(tool, record_ids)`; nothing is kept past the block.
   - Search fuses full-text search per language with a vector search by reciprocal rank, and includes the product sheets. `DocumentHit` gains `kind` and an optional `mandate_id`.
+  - Amended (Timur, 2026-11-11, answer 2 on #32): `get_portfolio` drops `as_of` from `Portfolio`, and its description its "latest". No document carries a date the database stores (the loader writes none); the report's own text names its reference date.
   - A mandate id is looked up inside the transaction, so another advisor's mandate is "no such mandate", the same answer as a made-up id.
 - `app/db/session.py`:
   - `hnsw.iterative_scan` is set transaction-locally (default 13);
   - the connection the block yields becomes an invalidated handle on exit (PR 5b sec-5).
-- `db/migrations/0004_search_indexes.sql`: GIN indexes on both `tsv` columns.
+- `db/migrations/0004_search_indexes.sql`: GIN indexes on both `tsv` columns. Amended (Timur, 2026-11-11, answer 1 on #32): no GIN index, and no `0004`. `@@` is not leakproof, so under row-level security the planner runs the policy first and cannot use `tsv @@ q` as an index condition: a planted GIN index serves the superuser and never the app role (measured; ADR 0013).
 - `docs/decisions/0013-retrieval.md`: the ranking, the iterative-scan mode, the limits.
 - `tests/db/test_forged_tool_argument.py`, retargeted to the real handler.
 
@@ -430,7 +431,7 @@ New for two sessions:
 - **Clean connections.** After a search, the next checkout passes the pool guard, and the handle raises on use after the block.
 - **Product sheets** reach all three advisors.
 - **Language.** The German stem matches; the English branch does not match a German document.
-- **The index.** EXPLAIN shows the GIN index once the planner may not take a sequential scan.
+- **The index.** EXPLAIN shows the GIN index once the planner may not take a sequential scan. Amended (Timur, 2026-11-11, answer 1 on #32): the test pins why no index on `tsv` serves the app role instead: `@@` and `<=>` are not leakproof, no GIN or GiST index exists on the searched tables, and with sequential scans off a planted GIN index serves the superuser but not the app role.
 
 **Handover rows.** PR 5b sec-5, hnsw.iterative_scan and GIN index; PR 6 test-14 (the READ tools) and forged-argument handler. **Hours** 4.5.
 
@@ -655,7 +656,7 @@ New for two sessions:
 | PR 5b sec-5 | PR 8 (the invalidated handle), PR 12 (no connection held, no streaming) | |
 | PR 5b hnsw.iterative_scan | PR 8 | transaction-locally (default 13) |
 | PR 5b product sheets | PR 1 (ADR), PR 7 | |
-| PR 5b GIN index | PR 8 | with EXPLAIN evidence |
+| PR 5b GIN index | PR 8 | decided against, with EXPLAIN evidence (amendment, Timur, 2026-11-11) |
 | PR 6 sec-2 | PR 13 | type allowlist (default 11); below the cut line |
 | PR 6 sec-11 | PR 13 | below the cut line |
 | PR 6 test-14 | PR 8 (READ), PR 14 (DRAFT, SIDE_EFFECT) | |

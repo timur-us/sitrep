@@ -29,7 +29,7 @@ from collections.abc import Iterator
 import psycopg
 import pytest
 from dbtools import Connection
-from forged_payloads import BODIES, PAYLOAD_IDS, PAYLOADS, SEARCH, SETTING, WORD, own
+from forged_payloads import BODIES, PAYLOAD_IDS, PAYLOADS, SEARCH, SETTING, WORD, own, pairs
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 from seed_rows import (
@@ -436,11 +436,11 @@ def test_forged_parameter_positive_controls(
     lang: str, app_pool: ConnectionPool, superuser: Connection
 ) -> None:
     with advisor_transaction(app_pool, verified(OTHER)) as conn:
-        assert conn.execute(SEARCH[lang], (WORD,)).fetchall() == own(OTHER, lang)
+        assert pairs(conn.execute(SEARCH[lang], (WORD,)).fetchall()) == own(OTHER, lang)
     # The statements are not schema-qualified; the superuser has no role search_path.
     superuser.execute(sql.SQL("SET search_path = {}, public").format(sql.Identifier(names.SCHEMA)))
-    both = superuser.execute(SEARCH[lang], (WORD,)).fetchall()
-    assert both == sorted(own(MINE, lang) + own(OTHER, lang)), both
+    both = pairs(superuser.execute(SEARCH[lang], (WORD,)).fetchall())
+    assert sorted(both) == sorted(own(MINE, lang) + own(OTHER, lang)), both
 
 
 @pytest.mark.usefixtures("token_documents")
@@ -449,14 +449,16 @@ def test_forged_parameter_is_live_when_spliced(
     lang: str, payload: str, app_pool: ConnectionPool
 ) -> None:
     # What the hygiene scan keeps out of app/: the payload in the SQL text, sent by a
-    # client-side cursor. The set_config runs and hands the transaction over.
+    # client-side cursor. The set_config runs and hands the transaction over. The
+    # advisor transaction's handle exposes no connection (M1 PR 8), so this simulation
+    # takes the private one, inside the block.
     query = SEARCH[lang]
     assert query.count("%s") == 1
     spliced = query.replace("%s", "'" + payload + "'")
     with advisor_transaction(app_pool, verified(MINE)) as conn:
-        psycopg.ClientCursor(conn).execute(spliced).fetchall()
+        psycopg.ClientCursor(conn._conn).execute(spliced).fetchall()  # type: ignore[attr-defined]
         setting = conn.execute(SETTING).fetchone()[0]
-        follow_up = conn.execute(query, (WORD,)).fetchall()
+        follow_up = pairs(conn.execute(query, (WORD,)).fetchall())
     assert setting == OTHER.id, f"the payload did not run: the setting is {setting!r}"
     assert own(OTHER, lang)[0] in follow_up, follow_up
 
@@ -468,9 +470,9 @@ def test_forged_parameter_is_inert_when_bound(
 ) -> None:
     query = SEARCH[lang]
     with advisor_transaction(app_pool, verified(MINE)) as conn:
-        found = conn.execute(query, (payload,)).fetchall()
+        found = pairs(conn.execute(query, (payload,)).fetchall())
         setting = conn.execute(SETTING).fetchone()[0]
-        follow_up = conn.execute(query, (WORD,)).fetchall()
+        follow_up = pairs(conn.execute(query, (WORD,)).fetchall())
     leaked = [row for row in found + follow_up if row[0] != MINE.id]
     assert not leaked, f"{OTHER.name} rows visible under {MINE.name}: {leaked}"
     assert found == own(MINE, lang), f"bound payload returned {found}"

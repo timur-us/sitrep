@@ -23,6 +23,12 @@ built from strings. An AST scan of app/:
 app/db/migrate.py is excepted from the first two rules: it composes its own DDL with
 psycopg.sql from app/db/names.py, never from input.
 
+One call is excepted from the first rule (M1 PR 8): the advisor transaction's handle,
+AdvisorConnection in app/db/session.py, passes its caller's statement on in its
+execute(), so that one call takes the method's own parameter. The exception holds for
+that class, that method and that parameter only, and not if the method rebinds it; every
+call of the handle's execute() is a statement call like any other, and is checked.
+
 This is a lint against building SQL from strings by accident, not a proof. It reads
 names, not values: a statement reached through getattr(), a method taken from a class
 rather than an instance, or a module imported under the name `queries` that is not
@@ -65,6 +71,72 @@ def first_keyword(statement: str) -> str:
     rest = statement[LEADING.match(statement).end() :]
     word = re.match(r"[A-Za-z]+", rest)
     return word.group(0).upper() if word else rest[:1]
+
+
+HANDLERS = "app/harness/handlers.py"
+# The handle's delegation (M1 PR 8): class and method in app/db/session.py.
+DELEGATE = ("AdvisorConnection", "execute")
+
+
+def rebinds(method: ast.FunctionDef, parameter: str) -> bool:
+    """Whether anything in method can give parameter another value: an assignment or
+    deletion, a nested function, lambda or class (whose own parameters may shadow it),
+    `except ... as`, a match capture, or an import alias (security review sec-3)."""
+    for node in ast.walk(method):
+        if node is method:
+            continue
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef):
+            return True
+        if (
+            isinstance(node, ast.Name)
+            and node.id == parameter
+            and not isinstance(node.ctx, ast.Load)
+        ):
+            return True
+        if isinstance(node, ast.ExceptHandler) and node.name == parameter:
+            return True
+        if isinstance(node, ast.MatchAs | ast.MatchStar) and node.name == parameter:
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == parameter:
+            return True
+        if (
+            isinstance(node, ast.alias)
+            and (node.asname or node.name.partition(".")[0]) == parameter
+        ):
+            return True
+        if isinstance(node, ast.Global | ast.Nonlocal) and parameter in node.names:
+            return True
+    return False
+
+
+def delegations(tree: ast.Module) -> set[int]:
+    """The calls in session.py's AdvisorConnection.execute() that pass the method's own
+    statement parameter on as their statement, while the method never rebinds it."""
+    found: set[int] = set()
+    for node in tree.body:
+        if not (isinstance(node, ast.ClassDef) and node.name == DELEGATE[0]):
+            continue
+        for method in node.body:
+            if not (
+                isinstance(method, ast.FunctionDef)
+                and method.name == DELEGATE[1]
+                and len(method.args.args) >= 2
+            ):
+                continue
+            parameter = method.args.args[1].arg
+            if rebinds(method, parameter):
+                continue
+            found |= {
+                id(call)
+                for call in ast.walk(method)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "execute"
+                and call.args
+                and isinstance(call.args[0], ast.Name)
+                and call.args[0].id == parameter
+            }
+    return found
 
 
 def query_constants(source: str) -> tuple[set[str], list[str]]:
@@ -125,6 +197,7 @@ def scan(
 
     checked, problems = 0, []
     composes = rel != MIGRATE
+    delegated = delegations(tree) if rel == SESSION else set()
     for node in ast.walk(tree):
         where = f"{rel}:{getattr(node, 'lineno', '?')}"
         if composes and isinstance(node, ast.ImportFrom):
@@ -171,6 +244,8 @@ def scan(
             if statement is None:
                 continue  # list.copy() and the like: no statement
             checked += 1
+            if id(node) in delegated:
+                continue  # the handle's own delegation; its callers are checked
             if not allowed(statement):
                 kind = type(statement).__name__
                 problems.append(
@@ -259,9 +334,21 @@ def test_sql_hygiene() -> None:
     assert checked >= 2, f"only {checked} statement calls checked"
     assert "set_config" in sources[SESSION]
     constants, _ = query_constants(sources[QUERIES])
-    assert {"SEARCH_DOCUMENTS_ENGLISH", "SEARCH_DOCUMENTS_GERMAN"} <= constants, constants
+    assert {
+        "SEARCH_DOCUMENTS_ENGLISH",
+        "SEARCH_DOCUMENTS_GERMAN",
+        "SEARCH_SHEETS_ENGLISH",
+        "NEAREST_CHUNKS",
+        "MANDATE_VISIBLE",
+        "PORTFOLIO_REPORT",
+    } <= constants, constants
     loader_calls, _ = scan(sources[LOAD], LOAD, constants)
     assert loader_calls >= 11, f"only {loader_calls} statement calls checked in {LOAD}"
+    # M1 PR 8: the READ handlers run their statements through the scan, and the handle's
+    # delegation is the one exception, used once.
+    handler_calls, _ = scan(sources[HANDLERS], HANDLERS, constants)
+    assert handler_calls >= 10, f"only {handler_calls} statement calls checked in {HANDLERS}"
+    assert len(delegations(ast.parse(sources[SESSION]))) == 1
 
 
 def loader_statement_problems(statements: dict[str, str]) -> list[str]:
@@ -403,6 +490,100 @@ def test_a_queries_constant_that_is_not_dml_is_caught() -> None:
     # Control: the migration runner composes DDL, and may.
     _, problems = check({QUERIES: CLEAN_QUERIES, MIGRATE: "conn.execute('ALTER TABLE x')\n"})
     assert problems == [], problems
+
+
+HANDLE = (
+    "class AdvisorConnection:\n"
+    "    def execute(self, query, params=None):\n"
+    "        return self._live().execute(query, params)\n"
+)
+
+
+def test_the_handles_delegation_is_the_one_exception() -> None:
+    _, problems = check({QUERIES: CLEAN_QUERIES, SESSION: HANDLE})
+    assert problems == [], problems
+    assert len(delegations(ast.parse(HANDLE))) == 1
+
+
+@pytest.mark.parametrize(
+    ("rel", "source"),
+    [
+        ("app/db/x.py", HANDLE),
+        (SESSION, HANDLE.replace("AdvisorConnection", "OtherHandle")),
+        (SESSION, HANDLE.replace("def execute", "def run")),
+        (
+            SESSION,
+            HANDLE.replace("        return", "        query = f'SELECT {query}'\n        return"),
+        ),
+        (SESSION, HANDLE.replace("execute(query, params)", "execute(params, query)")),
+        # Security review sec-3: rebindings that are not a plain assignment.
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        run = lambda query: self._live().execute(query, params)\n"
+                "        return run(f'SELECT {params}')\n",
+            ),
+        ),
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        def run(query):\n"
+                "            return self._live().execute(query, params)\n"
+                "        return run(f'SELECT {params}')\n",
+            ),
+        ),
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        try:\n"
+                "            raise ValueError(f'SELECT {params}')\n"
+                "        except ValueError as query:\n"
+                "            return self._live().execute(query, params)\n",
+            ),
+        ),
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        match f'SELECT {params}':\n"
+                "            case str() as query:\n"
+                "                return self._live().execute(query, params)\n",
+            ),
+        ),
+        (
+            SESSION,
+            HANDLE.replace(
+                "        return self._live().execute(query, params)\n",
+                "        from os import sep as query\n"
+                "        return self._live().execute(query, params)\n",
+            ),
+        ),
+        # A caller of the handle: a name, not a literal or a queries.py constant.
+        (
+            "app/harness/x.py",
+            "with advisor_transaction(pool, a) as conn:\n    conn.execute(statement)\n",
+        ),
+    ],
+    ids=[
+        "another-file",
+        "another-class",
+        "another-method",
+        "rebound",
+        "another-argument",
+        "lambda",
+        "nested-def",
+        "except-as",
+        "case-as",
+        "import-as",
+        "caller",
+    ],
+)
+def test_the_handles_exception_reaches_nothing_else(rel: str, source: str) -> None:
+    _, problems = check({QUERIES: CLEAN_QUERIES, rel: source})
+    assert any("takes Name" in problem for problem in problems), problems
 
 
 def test_sql_hygiene_clean_code_passes() -> None:

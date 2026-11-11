@@ -3,9 +3,11 @@
 documents.lang is 'german' or 'english', never NULL; the generated tsv uses that
 language's configuration; each search statement in app/db/queries.py is one language's
 branch. German and English stemming both work, and the English branch does not return
-a German document even for a word both configurations stem alike. A scan keeps the
-one-argument text-search functions, which use the server's default configuration, out
-of app/ and db/: every call names 'german' or 'english' as its first argument.
+a German document even for a word both configurations stem alike. Since M1 PR 8 the
+same holds for the product sheets' statements and for the statements limited to one
+mandate, which also keep to that mandate. A scan keeps the one-argument text-search
+functions, which use the server's default configuration, out of app/ and db/: every
+call names 'german' or 'english' as its first argument.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from dbtools import SUPERUSER_URL, Connection
 from psycopg import sql
 from psycopg_pool import ConnectionPool
 from repo_files import ROOT
-from seed_rows import MINE, SEED, insert, rows_for
+from seed_rows import MINE, SEED, SHEET, SHEETS, insert, rows_for
 
 from app.auth.identity import issue
 from app.db import names, queries
@@ -66,6 +68,42 @@ def search(pool: ConnectionPool, query: str, text: str) -> list[str]:
         return [row[1] for row in conn.execute(query, (text,)).fetchall()]
 
 
+def sheet_id(lang: str) -> str:
+    return f"{SEED}-fts-sheet-{lang}"
+
+
+@pytest.fixture(scope="module")
+def language_sheets(seeded: None) -> Iterator[None]:
+    with connect(SUPERUSER_URL, autocommit=True) as conn:
+        for lang, body in TEXTS.items():
+            row = SHEET | {
+                "id": sheet_id(lang),
+                "url": SHEET["url"].replace(SHEET["id"], sheet_id(lang)),
+                "body": body,
+                "lang": lang,
+            }
+            insert(conn, SHEETS, row)
+        try:
+            yield
+        finally:
+            conn.execute(
+                sql.SQL("DELETE FROM {} WHERE id = ANY(%s)").format(
+                    sql.Identifier(names.SCHEMA, "product_sheets")
+                ),
+                ([sheet_id(lang) for lang in TEXTS],),
+            )
+
+
+def search_sheets(pool: ConnectionPool, query: str, text: str) -> list[str]:
+    with advisor_transaction(pool, issue(MINE.id)) as conn:
+        return [row[0] for row in conn.execute(query, (text,)).fetchall()]
+
+
+def search_mandate(pool: ConnectionPool, query: str, text: str, mandate: str) -> list[str]:
+    with advisor_transaction(pool, issue(MINE.id)) as conn:
+        return [row[1] for row in conn.execute(query, (text, mandate)).fetchall()]
+
+
 @pytest.mark.usefixtures("database", "language_documents")
 @pytest.mark.parametrize(
     ("query", "text", "lang"),
@@ -101,6 +139,51 @@ def test_fts_language_german_branch_skips_english_documents(app_pool: Connection
     german = search(app_pool, queries.SEARCH_DOCUMENTS_GERMAN, "Portfolio")
     assert document_id("german") in german
     assert english_report not in german, f"the German branch found {german}"
+
+
+@pytest.mark.usefixtures("database", "language_sheets")
+@pytest.mark.parametrize(
+    ("query", "text", "lang"),
+    [
+        (queries.SEARCH_SHEETS_GERMAN, "Anleihe", "german"),
+        (queries.SEARCH_SHEETS_ENGLISH, "investing", "english"),
+    ],
+    ids=["german", "english"],
+)
+def test_fts_language_sheets_stem(
+    app_pool: ConnectionPool, query: str, text: str, lang: str
+) -> None:
+    found = search_sheets(app_pool, query, text)
+    assert sheet_id(lang) in found, f"{text!r} did not find the {lang} sheet: {found}"
+
+
+@pytest.mark.usefixtures("database", "language_sheets")
+def test_fts_language_the_sheets_branches_keep_to_their_language(app_pool: ConnectionPool) -> None:
+    assert sheet_id("german") in search_sheets(app_pool, queries.SEARCH_SHEETS_GERMAN, "Portfolio")
+    english = search_sheets(app_pool, queries.SEARCH_SHEETS_ENGLISH, "Portfolio")
+    assert sheet_id("german") not in english, f"the English branch found {english}"
+    german = search_sheets(app_pool, queries.SEARCH_SHEETS_GERMAN, "investments")
+    assert sheet_id("english") not in german, f"the German branch found {german}"
+
+
+@pytest.mark.usefixtures("database", "language_documents")
+@pytest.mark.parametrize(
+    ("query", "text", "lang"),
+    [
+        (queries.SEARCH_MANDATE_DOCUMENTS_GERMAN, "Anleihe", "german"),
+        (queries.SEARCH_MANDATE_DOCUMENTS_ENGLISH, "investing", "english"),
+    ],
+    ids=["german", "english"],
+)
+def test_fts_language_one_mandate(
+    app_pool: ConnectionPool, query: str, text: str, lang: str
+) -> None:
+    mandate = rows_for(MINE.id, "fts")["documents"]["mandate_id"]
+    assert document_id(lang) in search_mandate(app_pool, query, text, mandate)
+    # Another mandate id, and one that exists nowhere: not this document.
+    assert search_mandate(app_pool, query, text, f"{SEED}-{MINE.id}-elsewhere-m") == []
+    other = "german" if lang == "english" else "english"
+    assert document_id(other) not in search_mandate(app_pool, query, text, mandate)
 
 
 @pytest.mark.usefixtures("database", "language_documents")

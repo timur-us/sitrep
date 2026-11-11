@@ -22,7 +22,8 @@ reads; a refusal names the expected ones, never the model's.
 Embedding follows the model card at REVISION: the prefixed text through the model's own
 tokenizer, the last hidden state averaged over the attention mask (mean pooling), then
 divided by its L2 norm. Nothing is truncated: an input over MAX_TOKENS tokens, prefix
-and special tokens included, is refused with TextTooLong; app/embeddings/chunking.py
+and special tokens included, is refused with TextTooLong (app/embeddings/base.py, so a
+caller need not import this module to catch it); app/embeddings/chunking.py
 keeps stored passages at CHUNK_TOKENS or fewer.
 """
 
@@ -38,7 +39,7 @@ import onnxruntime as ort
 import tokenizers
 
 from app.config.embedding import DIM, FILES, MAX_TOKENS, MODEL_ID, REVISION
-from app.embeddings.base import passage_list, query_input
+from app.embeddings.base import TextTooLong, passage_list, query_input
 from app.embeddings.model_files import ModelFileError, model_dir, read_verified
 from app.embeddings.onnx_graph import graph_problems
 
@@ -68,10 +69,6 @@ _EPS = 1e-12  # the model card's F.normalize: the norm is at least this
 
 class EmbedderError(Exception):
     """The model or tokenizer is not what this module was written for."""
-
-
-class TextTooLong(ValueError):
-    """An input over MAX_TOKENS tokens. The message carries counts, never the text."""
 
 
 class ModelTokenizer:

@@ -19,6 +19,13 @@ from typing import Protocol, runtime_checkable
 from app.config.embedding import PASSAGE_PREFIX, QUERY_PREFIX
 
 
+class TextTooLong(ValueError):
+    """An input over the model's limit, prefix and special tokens included. The message
+    carries counts, never the text. One class for every embedder with a limit, so a
+    caller catches it without importing the model runtime (M1 PR 8: the search handler
+    refuses such a query, app/harness/handlers.py)."""
+
+
 @runtime_checkable
 class Embedder(Protocol):
     model_id: str
@@ -26,7 +33,8 @@ class Embedder(Protocol):
     dim: int
 
     def embed_query(self, text: str) -> list[float]:
-        """One unit-length vector of dim floats for a search, the prefix added inside."""
+        """One unit-length vector of dim floats for a search, the prefix added inside;
+        TextTooLong if the text is over the model's limit."""
         ...
 
     def embed_passages(self, texts: Sequence[str]) -> list[list[float]]:

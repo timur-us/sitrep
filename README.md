@@ -14,7 +14,7 @@ Status: M0, the local foundation, closes with PR 9; its report, with what is sha
 
 ## Harness interfaces (M0)
 
-`app/harness/` holds what the M1 agent loop builds on: a tool registry that refuses a tool with an identity field (`advisor`, `user`, `berater`, `benutzer`, `mitarbeiter` and the other terms of the plan, in any spelling), an arguments model that is not frozen, an open schema, a read tool whose result is not marked untrusted, or a drafting or side-effect tool without approval; the four MVP tools, declared only; `Untrusted[T]`, a tool result that is not rendered by accident (`str`, `format`, `+` and `repr` all refuse to show it), with `wrap()` as the one sanctioned way to the text, inside a delimiter the text cannot close; and the approval, policy, model and token-budget interfaces. `app/embeddings/` has the embedder interface and a deterministic fake that cannot pass for the real model. Nothing calls a model yet. Details: `docs/runbooks/local-setup.md`, "The harness (M0)".
+`app/harness/` holds what the M1 agent loop builds on: a tool registry that refuses a tool with an identity field (`advisor`, `user`, `berater`, `benutzer`, `mitarbeiter` and the other terms of the plan, in any spelling), an arguments model that is not frozen, an open schema, a read tool whose result is not marked untrusted, or a drafting or side-effect tool without approval; the four MVP tools, the two READ tools with handlers since M1 PR 8 (below) and the other two declared only; `Untrusted[T]`, a tool result that is not rendered by accident (`str`, `format`, `+` and `repr` all refuse to show it), with `wrap()` as the one sanctioned way to the text, inside a delimiter the text cannot close; and the approval, policy, model and token-budget interfaces. `app/embeddings/` has the embedder interface and a deterministic fake that cannot pass for the real model. Nothing calls a model yet. Details: `docs/runbooks/local-setup.md`, "The harness (M0)".
 
 ## Synthetic corpus (M0)
 
@@ -27,6 +27,10 @@ Status: M0, the local foundation, closes with PR 9; its report, with what is sha
 ## Embedding model (M1)
 
 `make model` downloads the three pinned files of `intfloat/multilingual-e5-small` (about 490 MB) from Hugging Face into the git-ignored `models/` and checks each sha256; `make test` needs it, as it needs the database. The embedder runs on the CPU in onnxruntime and loads only bytes whose hash matches, after a check of the ONNX graph that refuses external data and non-standard operators; nothing downloads at runtime. Passages are cut with the model's own tokenizer to 400 tokens or fewer. ADR 0005; details in `docs/runbooks/local-setup.md`, "The embedding model (M1)".
+
+## Retrieval (M1)
+
+`search_client_docs` and `get_portfolio` have real handlers (`app/harness/handlers.py`), each in its own advisor transaction, so row-level security decides what they read. A search fuses full-text search in German and English with a vector search by reciprocal rank, over the advisor's own documents and the bank's product sheets; a mandate the model names is looked up inside the transaction, so another advisor's answers like one that does not exist. Every hit names its kind, mandate, trust and nearest passage, and comes back `Untrusted`; the portfolio comes from the portfolio system only. A query too long for the model is refused, never cut. No route calls them yet: `POST /api/ask` (PR 12) will. [ADR 0013](docs/decisions/0013-retrieval.md); details in `docs/runbooks/local-setup.md`, "Retrieval (M1)".
 
 ## The model client (M1)
 
