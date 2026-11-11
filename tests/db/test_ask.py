@@ -26,12 +26,15 @@ search returned. No socket but loopback, no key.
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
 from collections.abc import Iterator
+from contextlib import contextmanager
 from decimal import Decimal
 from typing import Any
 
+import anyio
 import psycopg
 import pytest
 from dbtools import SUPERUSER_URL
@@ -42,7 +45,7 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from psycopg import sql
 from psycopg_pool import PoolTimeout
-from scripted_model import USAGE, EchoModel, reply, text, tool_results
+from scripted_model import SEARCH, USAGE, EchoModel, reply, text, tool_results, tool_use
 
 from app.api import ask
 from app.auth import dev_shim
@@ -53,13 +56,15 @@ from app.db.connect import connect
 from app.db.session import GuardError
 from app.embeddings.onnx import OnnxEmbedder
 from app.harness import handlers as read_tools
-from app.harness.context import Untrusted
+from app.harness.context import Provenance, Untrusted
 from app.harness.model_client import ModelCallError, cost_usd
+from app.harness.mvp_tools import DocumentHit
 from app.main import create_app
 
 pytestmark = pytest.mark.usefixtures("database")
 
 PORT = 8000
+PORTFOLIO = read_tools.PORTFOLIO
 BASE = f"http://{LOOPBACK}:{PORT}"
 ORIGIN = {"Origin": BASE}
 JSON = {**ORIGIN, "Content-Type": "application/json"}
@@ -347,7 +352,123 @@ def test_control_just_before_the_deadline_the_call_runs(start: Any) -> None:
     assert body["stop"] == "end_turn" and len(model.calls) == 2
 
 
+def test_the_deadline_counts_from_the_requests_start(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review finding spec-7: time spent before the route function (here the first
+    # ask's model client build) counts against the deadline too.
+    clock = Clock()
+    model = EchoModel(DEMO.family)
+
+    def slow_build(settings: Settings) -> EchoModel:
+        clock.now += ask.DEADLINE_SECONDS
+        return model
+
+    monkeypatch.setattr(ask, "build_model_client", slow_build)
+    response = start(None, clock=clock).ask(MINE)
+    assert response.status_code == 200, response.text
+    assert (response.json()["stop"], response.json()["answer"]) == ("budget", "")
+    assert model.calls == [], "a model call started after the deadline"
+
+
+def test_the_slot_is_free_before_the_response_is_sent(start: Any) -> None:
+    # Review finding test-8: the in-flight slot is released when the route returns
+    # (scope "function"), before the response goes out; with the request scope a quick
+    # second ask would meet a 429. Driven over raw ASGI, so the send is observed.
+    app = start(EchoModel(DEMO.family))
+    app.login(MINE)
+    limit = app.app.state.ask.limit
+    body = json.dumps({"question": QUESTIONS["en"]}).encode()
+    headers = [
+        (b"host", f"{LOOPBACK}:{PORT}".encode()),
+        (b"origin", BASE.encode()),
+        (b"content-type", b"application/json"),
+        (b"cookie", f"{dev_shim.COOKIE}={app.cookies[MINE]}".encode()),
+    ]
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": ask.ROUTE,
+        "raw_path": ask.ROUTE.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": PEER,
+        "server": (LOOPBACK, PORT),
+    }
+    messages = [{"type": "http.request", "body": body, "more_body": False}]
+    seen: list[tuple[int, bool]] = []
+
+    async def receive() -> dict[str, Any]:
+        return messages.pop(0) if messages else {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        if message["type"] == "http.response.start":
+            seen.append((message["status"], MINE in limit._busy))
+
+    anyio.run(app.app, scope, receive, send)
+    assert seen == [(200, False)], seen
+
+
 # The handovers.
+
+
+def test_a_citation_of_a_record_no_tool_returned_is_not_listed(start: Any, tables: Tables) -> None:
+    # Review finding test-1: a model (an injected one, say) cites another advisor's
+    # record id that no tool returned in this request. It is counted as unknown and
+    # never looked up, so neither the id's title nor a citation reaches the answer.
+    own = start(EchoModel(DEMO.family)).ask(MINE).json()
+    record = next(
+        c["record_id"] for c in own["citations"] if tables.owner.get(c["record_id"]) == MINE
+    )
+    assert record in [c["record_id"] for c in own["citations"]], "control: listed for its owner"
+    search = tool_use("tu_1", SEARCH, {"query": DEMO.family})
+    forged = EchoModel(
+        DEMO.family,
+        script=[reply(search, stop="tool_use"), reply(text(f"See [source: {record}]."))],
+    )
+    response = start(forged).ask(OTHER)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["citations"] == []
+    assert body["grounding"]["unknown_citations"] == 1
+    assert tables.title[record] not in response.text
+    assert record not in str(forged.calls[1]["messages"]), "the search returned the record"
+
+
+def test_the_grounding_counts_are_the_reports(start: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Review finding test-2: distinct non-zero counts, so no field can stand in for
+    # another. One figure is in the source, one is not; three cited ids are unknown.
+    def search(advisor: object, arguments: object) -> Untrusted[Any]:
+        hit = DocumentHit(
+            kind="document",
+            document_id="doc-figures",
+            mandate_id=DEMO.id,
+            title="Report",
+            lang="english",
+            trust="internal",
+            excerpt="Total assets EUR 1,250,000.00.",
+        )
+        return Untrusted([hit], Provenance(tool=SEARCH, record_ids=("doc-figures",)))
+
+    monkeypatch.setattr(
+        ask, "read_handlers", lambda pool, embedder: {SEARCH: search, PORTFOLIO: search}
+    )
+    answer = (
+        "Assets EUR 1,250,000.00, equity 42.5%. "
+        "[source: doc-figures] [source: x-1] [source: x-2] [source: x-3]"
+    )
+    search_call = tool_use("tu_1", SEARCH, {"query": DEMO.family})
+    model = EchoModel(
+        DEMO.family, script=[reply(search_call, stop="tool_use"), reply(text(answer))]
+    )
+    body = start(model).ask(MINE).json()
+    assert body["grounding"] == {"figures": 2, "unmatched": 1, "unknown_citations": 3}
+    # doc-figures was returned by the tool but is no row of the database: left out.
+    assert body["citations"] == []
 
 
 def test_a_query_too_long_reaches_the_model_by_its_kind(start: Any) -> None:
@@ -405,16 +526,122 @@ LOOP_ERRORS = {
 }
 
 
-@pytest.mark.parametrize(("script", "status", "detail"), LOOP_ERRORS.values(), ids=LOOP_ERRORS)
+def unfiltered() -> tuple[TracerProvider, InMemorySpanExporter]:
+    """A provider that exports spans as they are: the route must put no text there."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return provider, exporter
+
+
+def ask_span(exporter: InMemorySpanExporter) -> dict[str, Any]:
+    [server] = [s for s in exporter.get_finished_spans() if s.name == f"POST {ask.ROUTE}"]
+    return dict(server.attributes or {})
+
+
+ERROR = f"{branding.SLUG}.loop.error"
+STOP = f"{branding.SLUG}.loop.stop"
+
+
+@pytest.mark.parametrize(
+    ("kind", "script", "status", "detail"),
+    [(kind, *case) for kind, case in LOOP_ERRORS.items()],
+    ids=LOOP_ERRORS,
+)
 def test_each_loop_error_has_its_status_and_one_fixed_body(
-    start: Any, script: list[object], status: int, detail: str
+    start: Any, kind: str, script: list[object], status: int, detail: str
 ) -> None:
-    response = start(EchoModel(DEMO.family, script=script)).ask(MINE)
+    provider, exporter = unfiltered()
+    model = EchoModel(DEMO.family, script=script)
+    response = start(model, tracer_provider=provider).ask(MINE, f"About {CANARY_TEXT}")
     assert response.status_code == status, response.text
     assert response.json() == {"detail": detail}
     assert_json_no_store(response)
     assert response.headers.get("x-trace-id"), "no trace id to report"
     assert CANARY_TEXT not in response.text
+    # Review finding sec-9: no text on the failure paths' spans either.
+    dumped = "\n".join(span.to_json() for span in exporter.get_finished_spans())
+    assert CANARY_TEXT not in dumped, "the canary reached a span"
+    assert CANARY_TEXT in model.seen(), "control: the question reached the model"
+    assert ask_span(exporter)[ERROR] == kind
+
+
+def test_a_handler_result_outside_the_contract_is_500(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review finding test-13: the "handler" kind through the route.
+    def plain(advisor: object, arguments: object) -> str:
+        return "EUR 5"
+
+    monkeypatch.setattr(
+        ask, "read_handlers", lambda pool, embedder: {SEARCH: plain, PORTFOLIO: plain}
+    )
+    response = start(EchoModel(DEMO.family)).ask(MINE)
+    assert (response.status_code, response.json()) == (500, {"detail": ask.FAILED})
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "detail", "kind"),
+    [
+        (GuardError("a row of another advisor reached a READ handler"), 500, ask.FAILED, "guard"),
+        (PoolTimeout("couldn't get a connection after 5.00 sec"), 503, ask.NO_DATABASE, "database"),
+    ],
+    ids=["guard", "database"],
+)
+def test_a_failure_looking_up_the_citations_ends_the_request(
+    start: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    status: int,
+    detail: str,
+    kind: str,
+) -> None:
+    # Review findings test-3 and sec-1: after the loop, the citations' lookup refuses a
+    # row of another advisor (a broken boundary) or loses the database; the request
+    # ends with the fixed body, and the span names the kind for M2's alarm.
+    def failing(pool: object, advisor: object, record_ids: object) -> Any:
+        raise error
+
+    monkeypatch.setattr(ask, "cited_records", failing)
+    provider, exporter = unfiltered()
+    model = EchoModel(DEMO.family)
+    response = start(model, tracer_provider=provider).ask(MINE)
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    assert_json_no_store(response)
+    assert len(model.calls) == 2, "control: the loop ran to its answer"
+    attributes = ask_span(exporter)
+    assert (attributes[STOP], attributes.get(ERROR)) == ("end_turn", kind)
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "detail", "kind"),
+    [
+        (GuardError("the connection is not idle"), 500, ask.FAILED, "guard"),
+        (PoolTimeout("couldn't get a connection after 5.00 sec"), 503, ask.NO_DATABASE, "database"),
+    ],
+    ids=["guard", "database"],
+)
+def test_a_failure_before_the_first_model_call_ends_the_request(
+    start: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    status: int,
+    detail: str,
+    kind: str,
+) -> None:
+    # Review findings test-3 and sec-1: the check before the first model call.
+    @contextmanager
+    def failing(pool: object, advisor: object) -> Iterator[Any]:
+        raise error
+        yield  # a generator, as the real one
+
+    monkeypatch.setattr(ask, "advisor_transaction", failing)
+    provider, exporter = unfiltered()
+    model = EchoModel(DEMO.family)
+    response = start(model, tracer_provider=provider).ask(MINE)
+    assert (response.status_code, response.json()) == (status, {"detail": detail})
+    assert model.calls == [], "the model was called before the check"
+    assert ask_span(exporter).get(ERROR) == kind
 
 
 def test_every_loop_error_kind_is_mapped() -> None:
