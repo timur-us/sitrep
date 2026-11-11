@@ -199,7 +199,11 @@ def test_grounding_wording() -> None:
 # code, or a member reached by a computed name. app.js uses none of them. Only whole-line
 # `//` comments are left out: a line that starts with them holds no code. Block comments
 # are refused rather than stripped, since a regex cannot tell `/*` in a string from one
-# that opens a comment (review sec-4).
+# that opens a comment (review sec-4). Known limits: the word rules also match inside
+# string literals (a message saying "a new question" trips `new`: loud, not silent); a
+# line of a multi-line template literal that starts with `//` is skipped (it is string
+# content, not code); element traversal (`closest`, `parentElement`) is not refused, so
+# the property rules carry that path.
 SINKS = {
     "innerHTML": r"\binnerHTML\b",
     "outerHTML": r"\bouterHTML\b",
@@ -211,10 +215,14 @@ SINKS = {
     "write": r"\bwrite(?:ln)?\b",
     "eval": r"\beval\b",
     "Function": r"\bFunction\b",
-    "timer": r"\bset(?:Timeout|Interval)\s*\(\s*(?!\(|function\b|async\b)",
+    "constructor": r"\bconstructor\b",
+    "timer": r"\bset(?:Timeout|Interval)\s*\(\s*(?!\([^()]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>|function\b)",
     "setAttribute": r"\bsetAttribute(?:NS)?\b",
     "attribute node": r"\b(?:createAttribute|setAttributeNode|attributes)\b",
-    "url property": r"\.(?:src|srcset|href|poster|ping|action|formAction|codebase)\b",
+    "url property": r"\.(?:src|srcset|href|poster|ping|action|formAction|background|codebase)\b",
+    "codeBase": r"\bcodeBase\b",
+    "navigation": r"\.(?:submit|click)\s*\(",
+    "object URL": r"\b(?:URL|Blob|createObjectURL)\b",
     "new": r"\bnew\b",
     "import": r"\bimport\b",
     "open": r"\bopen\s*\(",
@@ -238,7 +246,7 @@ SINKS = {
     "Reflect": r"\bReflect\b",
     "string key": r"\[\s*[\"'`]",
     "computed assignment": r"\]\s*(?:(?:[-+*/%&|^]|\?\?|\*\*|<<|>>>?|&&|\|\|)?=(?!=)|\+\+|--)",
-    "computed call": r"\]\s*(?:\?\.\s*)?\(",
+    "computed call": r"\]\s*(?:\?\.\s*)?(?:\(|\.\s*(?:call|apply|bind)\b)",
     "fetch alias": r"\bfetch\b(?!\s*\()",
     "createElement alias": r"\bcreateElement\b(?!\s*\()",
     "unicode escape": r"\\u",
@@ -289,8 +297,11 @@ PLANTED = [
     ("eval", "(0, eval)(x);"),
     ("eval", "eval?.(x);"),
     ("Function", "Function(x)();"),
+    ("constructor", "x.constructor.constructor(y)();"),
     ("timer", "setTimeout('go()', 1);"),
     ("timer", "setInterval(data.code, 1);"),
+    ("timer", 'setTimeout(("go()"), 1);'),
+    ("timer", "setTimeout(async () => go(), 1);"),
     ("setAttribute", "el.setAttribute('href', x);"),
     ("setAttribute", "el.setAttributeNS(null, 'src', x);"),
     ("attribute node", "el.setAttributeNode(attr);"),
@@ -302,6 +313,12 @@ PLANTED = [
     ("url property", "video.poster = x;"),
     ("url property", "form.action = x;"),
     ("url property", "button.formAction = x;"),
+    ("url property", "body.background = x;"),
+    ("codeBase", "applet.codeBase = x;"),
+    ("navigation", "form.submit();"),
+    ("navigation", "a.click();"),
+    ("object URL", "URL.createObjectURL(b);"),
+    ("object URL", "const b = Blob;"),
     ("new", "const i = new Image();"),
     ("new", "new Audio(x);"),
     ("new", "new Request(x);"),
@@ -340,6 +357,8 @@ PLANTED = [
     ("computed assignment", "el[name]++;"),
     ("computed call", "el[name](x);"),
     ("computed call", "el[name]?.(x);"),
+    ("computed call", "el[k].call(el, 'src', x);"),
+    ("computed call", "el[k].apply(el, args);"),
     ("fetch alias", "const f = fetch; f(x);"),
     ("fetch alias", "fetch.call(null, x);"),
     ("createElement alias", "const c = document.createElement.bind(document);"),
@@ -381,6 +400,9 @@ def test_every_rule_has_a_planted_shape() -> None:
         "if (a[0] === b) {}",
         "const label = KINDS[item.kind];",
         "setTimeout(() => go(), 1);",
+        "setTimeout((a) => go(a), 1);",
+        "setTimeout(function () {}, 1);",
+        "byId('ask').requestSubmit();",
         "Object.hasOwn(STOPS, x) && Object.freeze({});",
     ],
 )

