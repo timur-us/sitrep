@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import re
+from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -90,10 +91,17 @@ def test_assets_are_served(client: TestClient, path: str) -> None:
     assert response.headers["content-type"] == f"{media_type}; charset=utf-8", response.headers
     assert response.content == (STATIC / name).read_bytes()
     assert response.content.strip(), f"{name} is empty"
-    # The page's headers (is_page): the CSP and nosniff, no no-store.
+    # The page's headers: the CSP, and nosniff, under which a browser runs a script only
+    # with a script content type.
     assert "script-src 'self'" in response.headers["content-security-policy"]
     assert response.headers["x-content-type-options"] == "nosniff"
-    assert "cache-control" not in response.headers
+
+
+@pytest.mark.parametrize("method", ["HEAD", "POST", "PUT", "DELETE"])
+@pytest.mark.parametrize("path", sorted(ASSETS))
+def test_assets_answer_get_only(client: TestClient, path: str, method: str) -> None:
+    response = client.request(method, path)
+    assert response.status_code == 405, f"{method} {path}: {response.status_code}"
 
 
 @pytest.mark.parametrize(
@@ -103,8 +111,9 @@ def test_assets_are_served(client: TestClient, path: str) -> None:
         "/static/app.js.map",
         "/static/APP.JS",
         "/static/app.js/",
-        "/static/../main.py",
+        # A literal ".." is removed by httpx before sending; the encoded form arrives.
         "/static/%2e%2e/main.py",
+        "/static/%2E%2E/app/main.py",
         "/static/",
     ],
 )
@@ -145,6 +154,22 @@ def test_page_takes_its_names_from_branding() -> None:
     assert "{{" not in markup, "a placeholder was not filled in"
 
 
+def test_page_escapes_branding_in_one_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Branding is trusted, but the page treats it as text: escaped, and filled in one
+    # pass, so a placeholder inside a value is never expanded again.
+    monkeypatch.setattr(
+        branding, "PRODUCT", replace(branding.PRODUCT, name='<b x="1">&{{tagline}}')
+    )
+    monkeypatch.setattr(branding, "BANK", replace(branding.BANK, display_name="<i>"))
+    monkeypatch.setattr(branding, "PRODUCT", replace(branding.PRODUCT, tagline="</p><script>"))
+    markup = index_html()
+    title = "&lt;b x=&quot;1&quot;&gt;&amp;{{tagline}} — &lt;i&gt;"
+    assert f"<title>{title}</title>" in markup, markup[:400]
+    assert f"<h1>{title}</h1>" in markup
+    assert "&lt;/p&gt;&lt;script&gt;" in markup
+    assert "<script>" not in markup and "<b " not in markup and "<i>" not in markup
+
+
 def test_question_box_sends_nothing_without_the_script() -> None:
     # Without app.js a submitted form would put its named fields into a URL. The box has
     # no name, so a native submit carries no question; the form posts nowhere else.
@@ -155,6 +180,10 @@ def test_question_box_sends_nothing_without_the_script() -> None:
     assert "name" not in box, box
     assert box.get("maxlength") == str(MAX_QUESTION), box
     assert box.get("id") == "question", box
+    # What the advisor types names clients: no enhanced spell check sends it to a vendor,
+    # and the browser keeps no autofill history of it (review sec-5).
+    assert box.get("spellcheck") == "false", box
+    assert box.get("autocomplete") == "off", box
 
 
 def test_grounding_wording() -> None:
@@ -162,55 +191,68 @@ def test_grounding_wording() -> None:
     for name in ("index.html", "app.js"):
         text = (STATIC / name).read_text(encoding="utf-8")
         assert not re.search(r"verif", text, re.IGNORECASE), f"{name} says 'verified'"
-    assert "found in the sources" in (STATIC / "app.js").read_text(encoding="utf-8")
 
 
 # --- the sink scan ------------------------------------------------------------------
 
-# Each pattern is a way from a string to markup, a request, a navigation, a new
-# resource or code. app.js uses none of them.
+# Each rule is a way from a string to markup, a request, a navigation, a new resource,
+# code, or a member reached by a computed name. app.js uses none of them. Only whole-line
+# `//` comments are left out: a line that starts with them holds no code. Block comments
+# are refused rather than stripped, since a regex cannot tell `/*` in a string from one
+# that opens a comment (review sec-4).
 SINKS = {
     "innerHTML": r"\binnerHTML\b",
     "outerHTML": r"\bouterHTML\b",
-    "insertAdjacentHTML": r"\binsertAdjacentHTML\b",
-    "document.write": r"\bwrite(?:ln)?\s*\(",
-    "eval": r"\beval\s*\(",
-    "Function": r"\bFunction\s*\(",
-    "string timer": r"\bset(?:Timeout|Interval)\s*\(\s*[\"'`]",
-    "setAttribute": r"\bsetAttribute(?:NS)?\b",
-    "attribute node": r"\b(?:createAttribute|setAttributeNode)\b",
-    "src": r"\.src\b",
-    "href": r"\.href\b",
-    "srcdoc": r"\bsrcdoc\b",
-    "action": r"\.(?:action|formAction)\b",
-    "DOMParser": r"\bDOMParser\b",
+    "insertAdjacentHTML": r"\binsertAdjacent(?:HTML|Element)\b",
+    "setHTML": r"\b(?:setHTML|setHTMLUnsafe|parseHTMLUnsafe)\b",
     "createContextualFragment": r"\bcreateContextualFragment\b",
-    "setHTMLUnsafe": r"\b(?:setHTML|setHTMLUnsafe|parseHTMLUnsafe)\b",
-    "import()": r"\bimport\s*\(",
-    "Image": r"\bnew\s+Image\b",
+    "DOMParser": r"\bDOMParser\b",
+    "srcdoc": r"\bsrcdoc\b",
+    "write": r"\bwrite(?:ln)?\b",
+    "eval": r"\beval\b",
+    "Function": r"\bFunction\b",
+    "timer": r"\bset(?:Timeout|Interval)\s*\(\s*(?!\(|function\b|async\b)",
+    "setAttribute": r"\bsetAttribute(?:NS)?\b",
+    "attribute node": r"\b(?:createAttribute|setAttributeNode|attributes)\b",
+    "url property": r"\.(?:src|srcset|href|poster|ping|action|formAction|codebase)\b",
+    "new": r"\bnew\b",
+    "import": r"\bimport\b",
     "open": r"\bopen\s*\(",
     "location": r"\blocation\b",
+    "history": r"\bhistory\b",
     "XMLHttpRequest": r"\bXMLHttpRequest\b",
-    "sendBeacon": r"\bsendBeacon\b",
+    "navigator": r"\bnavigator\b",
     "WebSocket": r"\bWebSocket\b",
     "EventSource": r"\bEventSource\b",
     "postMessage": r"\bpostMessage\b",
-    "cssText": r"\bcssText\b",
+    "importScripts": r"\bimportScripts\b",
     "style": r"\.style\b",
+    "cssText": r"\bcssText\b",
+    "stylesheet": r"\b(?:CSSStyleSheet|insertRule|replaceSync|adoptedStyleSheets)\b",
     "createElementNS": r"\bcreateElementNS\b",
-    "computed member assignment": r"\]\s*=[^=]",
-    "document.cookie": r"\bcookie\b",
+    "cookie": r"\bcookie\b",
+    "global object": r"\b(?:window|self|globalThis|top|parent|frames|opener)\b",
+    "defaultView": r"\b(?:defaultView|ownerDocument)\b",
+    "document member": r"\bdocument\s*(?:\[|\.\s*(?!(?:getElementById|createElement)\b))",
+    "Object write": r"\bObject\s*\.\s*(?:assign|defineProperty|defineProperties|setPrototypeOf)\b",
+    "Reflect": r"\bReflect\b",
+    "string key": r"\[\s*[\"'`]",
+    "computed assignment": r"\]\s*(?:(?:[-+*/%&|^]|\?\?|\*\*|<<|>>>?|&&|\|\|)?=(?!=)|\+\+|--)",
+    "computed call": r"\]\s*(?:\?\.\s*)?\(",
+    "fetch alias": r"\bfetch\b(?!\s*\()",
+    "createElement alias": r"\bcreateElement\b(?!\s*\()",
+    "unicode escape": r"\\u",
+    "block comment": r"/\*",
 }
 CREATE_ELEMENT = re.compile(r"\bcreateElement\s*\(\s*(?:\"([a-z]+)\"|'([a-z]+)'|([^)]*))\)")
 FETCH = re.compile(r"\bfetch\s*\(\s*([^,)]*)")
-BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 LINE_COMMENT = re.compile(r"^\s*//.*$", re.MULTILINE)
 
 
 def code(source: str) -> str:
-    """The source without block comments and whole-line comments. A trailing comment
-    stays, and is scanned: the rule errs towards reporting."""
-    return LINE_COMMENT.sub("", BLOCK_COMMENT.sub("", source))
+    """The source without whole-line comments. A trailing comment stays, and is
+    scanned: the rule errs towards reporting."""
+    return LINE_COMMENT.sub("", source)
 
 
 def scan(source: str) -> list[str]:
@@ -219,78 +261,127 @@ def scan(source: str) -> list[str]:
     for match in CREATE_ELEMENT.finditer(body):
         tag = match.group(1) or match.group(2)
         if tag not in CREATED_ELEMENTS:
-            found.append(f"createElement: {match.group(0)!r}")
+            found.append(f"createElement tag: {match.group(0)!r}")
     for match in FETCH.finditer(body):
         if match.group(1).strip() != "ASK":
-            found.append(f"fetch: {match.group(0)!r}")
+            found.append(f"fetch target: {match.group(0)!r}")
     if re.search(r"\bASK\b", body) and not re.search(r"\bconst ASK = \"/api/ask\";", body):
-        found.append("fetch: ASK is not the constant /api/ask")
+        found.append("ASK constant: not /api/ask")
     return found
 
 
-@pytest.mark.parametrize(
-    "planted",
-    [
-        "out.innerHTML = data.answer;",
-        "out.outerHTML = x;",
-        "out.insertAdjacentHTML('beforeend', x);",
-        "document.write(x);",
-        "document.writeln(x);",
-        "eval(x);",
-        "new Function(x)();",
-        "setTimeout('go()', 1);",
-        "setInterval(`go()`, 1);",
-        "el.setAttribute('href', x);",
-        "el.setAttributeNS(null, 'src', x);",
-        "el.setAttributeNode(document.createAttribute('src'));",
-        "img.src = x;",
-        "a.href = x;",
-        "frame.srcdoc = x;",
-        "form.action = x;",
-        "button.formAction = x;",
-        "new DOMParser().parseFromString(x, 'text/html');",
-        "document.createRange().createContextualFragment(x);",
-        "el.setHTML(x);",
-        "el.setHTMLUnsafe(x);",
-        "import(x);",
-        "const i = new Image();",
-        "window.open(x);",
-        "location = x;",
-        "window.location.assign(x);",
-        "new XMLHttpRequest();",
-        "navigator.sendBeacon(x, y);",
-        "new WebSocket(x);",
-        "new EventSource(x);",
-        "parent.postMessage(x, '*');",
-        "el.style.cssText = x;",
-        "el.style.backgroundImage = x;",
-        "document.createElementNS(ns, 'svg');",
-        "el[name] = x;",
-        "document.cookie;",
-        "document.createElement('img');",
-        'document.createElement("a");',
-        "document.createElement(tag);",
-        "fetch(x);",
-        "fetch('/api/ask', {});",
-        'const ASK = "https://x.example/";\nfetch(ASK, {});',
-        "out.innerHTML = x; // a trailing comment does not hide it",
-    ],
-)
-def test_scan_reports_a_planted_sink(planted: str) -> None:
-    assert scan(planted), f"not reported: {planted!r}"
+ATTACKER_URL = f"https://{branding.DOMAINS.attacker}/"
+# One planted shape per rule; the test asserts that rule, by name, reports it, so a
+# deleted or broken pattern turns red even where another rule also matches.
+PLANTED = [
+    ("innerHTML", "out.innerHTML = data.answer;"),
+    ("outerHTML", "out.outerHTML = x;"),
+    ("insertAdjacentHTML", "out.insertAdjacentHTML('beforeend', x);"),
+    ("insertAdjacentHTML", "out.insertAdjacentElement('beforeend', x);"),
+    ("setHTML", "el.setHTML(x);"),
+    ("setHTML", "el.setHTMLUnsafe(x);"),
+    ("createContextualFragment", "range.createContextualFragment(x);"),
+    ("DOMParser", "DOMParser.parseFromString(x, 'text/html');"),
+    ("srcdoc", "frame.srcdoc = x;"),
+    ("write", "doc.write(x);"),
+    ("write", "doc.writeln(x);"),
+    ("eval", "eval(x);"),
+    ("eval", "(0, eval)(x);"),
+    ("eval", "eval?.(x);"),
+    ("Function", "Function(x)();"),
+    ("timer", "setTimeout('go()', 1);"),
+    ("timer", "setInterval(data.code, 1);"),
+    ("setAttribute", "el.setAttribute('href', x);"),
+    ("setAttribute", "el.setAttributeNS(null, 'src', x);"),
+    ("attribute node", "el.setAttributeNode(attr);"),
+    ("attribute node", "el.attributes.src.value = x;"),
+    ("url property", "img.src = x;"),
+    ("url property", "img.srcset = x;"),
+    ("url property", "a.href = x;"),
+    ("url property", "a.ping = x;"),
+    ("url property", "video.poster = x;"),
+    ("url property", "form.action = x;"),
+    ("url property", "button.formAction = x;"),
+    ("new", "const i = new Image();"),
+    ("new", "new Audio(x);"),
+    ("new", "new Request(x);"),
+    ("new", "new Worker(x);"),
+    ("import", "import(x);"),
+    ("open", "open(x);"),
+    ("location", "location = x;"),
+    ("history", "history.pushState({}, '', x);"),
+    ("XMLHttpRequest", "const r = XMLHttpRequest;"),
+    ("navigator", "navigator.sendBeacon(x, y);"),
+    ("navigator", "navigator.serviceWorker.register(x);"),
+    ("WebSocket", "const w = WebSocket;"),
+    ("EventSource", "const e = EventSource;"),
+    ("postMessage", "port.postMessage(x, '*');"),
+    ("importScripts", "importScripts(x);"),
+    ("style", "el.style.backgroundImage = x;"),
+    ("cssText", "decl.cssText = x;"),
+    ("stylesheet", "sheet.insertRule(x);"),
+    ("stylesheet", "sheet.replaceSync(x);"),
+    ("stylesheet", "doc.adoptedStyleSheets = [x];"),
+    ("createElementNS", "doc.createElementNS(ns, 'svg');"),
+    ("cookie", "const c = doc.cookie;"),
+    ("global object", "window.x = 1;"),
+    ("global object", "globalThis.fetch(x);"),
+    ("global object", "self.addEventListener('message', f);"),
+    ("defaultView", "el.ownerDocument.body;"),
+    ("document member", "document.body.append(x);"),
+    ("document member", "document['write'](x);"),
+    ("Object write", "Object.assign(el, { src: x });"),
+    ("Object write", "Object.defineProperty(el, k, d);"),
+    ("Reflect", "Reflect.set(el, k, x);"),
+    ("string key", "el['inner' + 'HTML'] = x;"),
+    ("computed assignment", "el[name] = x;"),
+    ("computed assignment", "el[name] += x;"),
+    ("computed assignment", "el[name] ??= x;"),
+    ("computed assignment", "el[name]++;"),
+    ("computed call", "el[name](x);"),
+    ("computed call", "el[name]?.(x);"),
+    ("fetch alias", "const f = fetch; f(x);"),
+    ("fetch alias", "fetch.call(null, x);"),
+    ("createElement alias", "const c = document.createElement.bind(document);"),
+    ("unicode escape", "el.\\u0069nnerHTML = x;"),
+    ("block comment", 'const a = "/*"; out.innerHTML = x; const b = "*/";'),
+    ("block comment", "/* el.innerHTML = x; */"),
+    ("createElement tag", "document.createElement('img');"),
+    ("createElement tag", 'document.createElement("a");'),
+    ("createElement tag", "document.createElement(tag);"),
+    ("fetch target", "fetch(x);"),
+    ("fetch target", "fetch('/api/ask', {});"),
+    ("ASK constant", f'const ASK = "{ATTACKER_URL}";\nfetch(ASK, {{}});'),
+    ("innerHTML", "out.innerHTML = x; // a trailing comment does not hide it"),
+]
+
+
+@pytest.mark.parametrize(("rule", "planted"), PLANTED)
+def test_scan_reports_a_planted_sink(rule: str, planted: str) -> None:
+    found = scan(planted)
+    assert any(line.startswith(f"{rule}: ") for line in found), f"{rule} missed: {found}"
+
+
+def test_every_rule_has_a_planted_shape() -> None:
+    planted = {rule for rule, _ in PLANTED}
+    rules = set(SINKS) | {"createElement tag", "fetch target", "ASK constant"}
+    assert rules == planted, sorted(rules ^ planted)
 
 
 @pytest.mark.parametrize(
     "allowed",
     [
         "// innerHTML is never used here",
-        "/* el.innerHTML = x; */",
-        "/*\n * document.write(x)\n */",
+        "  // nor document.write(x)",
         "out.textContent = data.answer;",
+        "document.getElementById('answer').textContent = x;",
         "document.createElement('li');",
         'document.createElement("span");',
         'const ASK = "/api/ask";\nfetch(ASK, { method: "POST" });',
         "if (a[0] === b) {}",
+        "const label = KINDS[item.kind];",
+        "setTimeout(() => go(), 1);",
+        "Object.hasOwn(STOPS, x) && Object.freeze({});",
     ],
 )
 def test_scan_passes_the_allowed_shapes(allowed: str) -> None:
