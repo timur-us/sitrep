@@ -38,7 +38,7 @@ Status: M0, the local foundation, closes with PR 9; its report, with what is sha
 
 ## Advisor page (M1)
 
-`/` is the advisor page: one question to `POST /api/ask` (the route arrives in M1 PR 12), and the answer with its sources, the grounding counts ("2 of 3 figures found in the sources", never "verified": the number guard shows where a figure was found, not that it is right), the stop reason, the trace id, the cost and the tokens. The answer is model output and a source title can come from an e-mail, so the page shows both as text only: no HTML or Markdown is parsed, and no link, image or request is built from a response. It loads one script and one stylesheet from its own origin, under the strict CSP, with no inline script or style. Details: `docs/runbooks/local-setup.md`, "The advisor page (M1)".
+`/` is the advisor page: one question to `POST /api/ask` (M1 PR 12's route), and the answer, in a box labelled as model output, with its sources, the grounding counts ("2 of 3 figures found in the sources", never "verified": the number guard shows where a figure was found, not that it is right), the stop reason, the trace id, the cost and the tokens. The answer is model output and a source title can come from an e-mail, so the page shows both as text only: no HTML or Markdown is parsed, and no link, image or request is built from a response. It loads one script and one stylesheet from its own origin, under the strict CSP, with no inline script or style. Details: `docs/runbooks/local-setup.md`, "The advisor page (M1)".
 
 ## Dev login (M0)
 

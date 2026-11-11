@@ -76,14 +76,26 @@ button:disabled {
   display: none;
 }
 
-/* Model output, shown as written: line breaks kept, long tokens wrapped, and its
-   direction isolated from the page around it. */
+/* Model output, in its own labelled box, so text that imitates the page's sections
+   stays visibly inside it; shown as written: line breaks kept, long tokens wrapped,
+   and its direction isolated from the page around it. */
+.output {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--muted);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+}
+
+.output-label {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
 .answer {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   unicode-bidi: plaintext;
-  border-left: 3px solid var(--line);
-  padding-left: 0.75rem;
 }
 
 .stop {

@@ -16,7 +16,7 @@
 
 <form id="ask">
 <label for="question">Your question</label>
-<textarea id="question" rows="4" maxlength="2000"></textarea>
+<textarea id="question" rows="4" maxlength="2000" spellcheck="false" autocomplete="off"></textarea>
 <button type="submit">Ask</button>
 </form>
 
@@ -25,7 +25,10 @@
 <section id="result" hidden>
 <h2>Answer</h2>
 <p id="stop" class="stop" hidden></p>
+<div class="output">
+<p id="answer-label" class="output-label">Model output. It can quote e-mails and documents word for word; nothing in it is a link.</p>
 <div id="answer" class="answer"></div>
+</div>
 
 <h2>Sources</h2>
 <ol id="citations" class="citations"></ol>
@@ -33,7 +36,7 @@
 <h2>Grounding</h2>
 <p id="figures"></p>
 <p id="unknown"></p>
-<p class="note">Found in the sources means the figure appears in a document this answer retrieved, not that it is correct.</p>
+<p id="grounding-note" class="note">Found in the sources means the figure appears in a document this answer retrieved, not that it is correct.</p>
 
 <dl class="facts">
 <dt>Trace id</dt><dd id="trace"></dd>

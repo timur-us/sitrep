@@ -217,7 +217,8 @@ def test_hostile_answer_is_shown_as_text(
 
     after = page.evaluate(STRUCTURE)
     assert set(after["tags"]) <= PAGE_ELEMENTS, after["tags"]
-    assert set(after["tags"]) - set(before["tags"]) == {"li"}, (before["tags"], after["tags"])
+    # The script's own list items and spans; the static page has neither.
+    assert set(after["tags"]) - set(before["tags"]) == {"li", "span"}, after["tags"]
     assert (after["scripts"], after["links"]) == (before["scripts"], before["links"]) == (1, 1)
     assert after["answer"] == [3], after["answer"]  # one text node
     assert after["items"] == [["span:3", "span:3", "span:3"]] * 2, after["items"]

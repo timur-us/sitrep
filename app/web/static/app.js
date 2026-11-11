@@ -28,7 +28,7 @@
     403: "The request was refused.",
     422: "The question was not accepted: it needs 1 to 2000 characters.",
     429: "Too many questions in a short time. Wait a moment, then ask again.",
-    503: "The service is unavailable: no model key or no database.",
+    503: "The service is unavailable.",
   });
 
   const byId = (id) => document.getElementById(id);

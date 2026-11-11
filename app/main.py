@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,18 +29,20 @@ from app.observability.logs import asyncio_exception_handler, tag_trace_id
 
 STATIC = Path(__file__).parent / "web" / "static"
 INDEX = STATIC / "index.html"
-TITLE = "{{title}}"
-TAGLINE = "{{tagline}}"
+PLACEHOLDER = re.compile(r"\{\{(title|tagline)\}\}")
 # The page's script and stylesheet (M1 PR 11): two exact routes, no directory mount, so
 # nothing else in the package is served.
 ASSETS = {"app.js": "text/javascript", "app.css": "text/css"}
 
 
 def index_html() -> str:
-    """The advisor page, its title and tagline filled in from branding."""
-    title = html.escape(f"{branding.PRODUCT.name} — {branding.BANK.display_name}")
-    tagline = html.escape(branding.PRODUCT.tagline)
-    return INDEX.read_text(encoding="utf-8").replace(TITLE, title).replace(TAGLINE, tagline)
+    """The advisor page, its title and tagline filled in from branding: escaped, and in
+    one pass, so a placeholder inside a value is not expanded again."""
+    values = {
+        "title": html.escape(f"{branding.PRODUCT.name} — {branding.BANK.display_name}"),
+        "tagline": html.escape(branding.PRODUCT.tagline),
+    }
+    return PLACEHOLDER.sub(lambda m: values[m.group(1)], INDEX.read_text(encoding="utf-8"))
 
 
 def _asset(body: bytes, media_type: str) -> Callable[[], Awaitable[Response]]:
