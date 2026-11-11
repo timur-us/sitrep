@@ -30,7 +30,11 @@ Timur's decisions after Fable's security review of PR 6:
 - **Identity words.** An argument name is refused when, after NFKC, case folding and removing separators, it contains one of the plan's terms. That is stricter than the plan's camelCase split, which lets `advisorid` pass; the cost is refusing names such as `username`.
 - **`Proposal`** is the result of every DRAFT and SIDE_EFFECT tool: the id of a pending approval, nothing that approves it.
 - **Error locations stay** in `CallError`, so the model sees which key was refused; traces record error types only (an M1 test).
-- **Approval tokens** are designed in M1's ADR, leaning to opaque random tokens stored as a hash, which need no signing key.
+- **Approval tokens:** ADR 0011.
+
+### Amendment (PR 10, 2026-11-10)
+
+- `app/harness/loop.py`: READ tools only; a block allowlist; 6 turns, 8 calls per turn, 24 per request, 150,000 tokens. `max_tokens` stops as "budget"; `pause_turn` fails. One retry, not for timeouts. No refusal fallback (ADR 0003).
 
 ## Consequences
 
@@ -51,3 +55,4 @@ Timur's decisions after Fable's security review of PR 6:
 - Anthropic, "Handle tool calls", https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls (accessed 2026-10-29).
 - Anthropic, "Define tools" (forced `tool_choice` by model), https://platform.claude.com/docs/en/agents-and-tools/tool-use/define-tools (accessed 2026-10-29).
 - `docs/plans/m0-foundation.md`, "ADR 0003" research notes (2026-10-28).
+- M1 PR 10, the loop: stop reasons mapped to the API contract's four stops (`max_tokens` and `model_context_window_exceeded` to "budget", `pause_turn` refused since no server tool is offered); one retry for transient failures; the message-block allowlist that PR 6 made a merge gate; assistant turns passed back unchanged, as preserved thinking requires. `docs/plans/m1-mvp-core.md`, PR 10, and the Anthropic API reference bundled with Claude Code (read 2026-11-10).

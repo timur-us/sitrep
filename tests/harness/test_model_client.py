@@ -559,6 +559,10 @@ def test_an_unreadable_answer_is_typed(keyed: Settings, content_type: str, body:
             ask(build_model_client(keyed, transport=recorder.transport()))
     error = failed.value
     assert (error.kind, error.status_code) == ("response", None)
+    # PR 6 review sec-r7, built in PR 10: the type name of what was swallowed, for the
+    # loop's trace; a type name, never the body.
+    assert error.cause is not None and error.cause.isidentifier(), error.cause
+    assert marker not in error.cause
     assert marker not in str(error) and marker not in "".join(traceback.format_exception(error))
     assert not [w for w in caught if marker in str(w.message)], "a warning carries the body"
     assert error.__cause__ is None and error.__context__ is None

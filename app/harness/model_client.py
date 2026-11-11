@@ -111,13 +111,18 @@ class ModelClientRefused(ValueError):
 class ModelCallError(Exception):
     """A model call that failed: "timeout", "connection", "status" (with the HTTP status)
     or "response" (a body the SDK could not read). Carries nothing from the request or
-    the response, so it is safe in a log line or a span."""
+    the response, so it is safe in a log line or a span. cause is the type name of the
+    exception a "response" swallowed, or "unreadable" (PR 6 review sec-r7, built in
+    M1 PR 10): a class name, never its message."""
 
-    def __init__(self, kind: str, status_code: int | None = None) -> None:
+    def __init__(
+        self, kind: str, status_code: int | None = None, *, cause: str | None = None
+    ) -> None:
         status = f" (HTTP {status_code})" if status_code is not None else ""
         super().__init__(f"the model call failed: {kind}{status}")
         self.kind = kind
         self.status_code = status_code
+        self.cause = cause
 
 
 class RequestRefused(ValueError):
@@ -194,12 +199,12 @@ class AnthropicModelClient:
             # and go to stderr past the log redaction (review finding sec-r1).
             answer = _readable(message)
             if not answer:
-                failure = ModelCallError("response")
+                failure = ModelCallError("response", cause="unreadable")
             del message
         except anthropic.APIError as error:
             failure = _call_error(error)
-        except Exception:  # noqa: BLE001 - a body the SDK cannot parse, e.g. invalid JSON
-            failure = ModelCallError("response")
+        except Exception as error:  # noqa: BLE001 - a body the SDK cannot parse, e.g. invalid JSON
+            failure = ModelCallError("response", cause=type(error).__name__)
         # Raised outside the except block, so the SDK's exception is neither the cause nor
         # the context: it holds the request (the key's header) and the response body.
         if failure is not None:
@@ -253,7 +258,7 @@ def _call_error(error: anthropic.APIError) -> ModelCallError:
         return ModelCallError("connection")
     if isinstance(error, anthropic.APIStatusError):
         return ModelCallError("status", error.status_code)
-    return ModelCallError("response")
+    return ModelCallError("response", cause=type(error).__name__)
 
 
 def build_model_client(
