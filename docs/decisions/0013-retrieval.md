@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted in outline (Timur, 2026-11-08: the M1 plan, PR 8, default 13). Its departures from the plan (no GIN index, no report date) await his yes, the text Fable's review.
+Accepted (Timur, 2026-11-08: the M1 plan, PR 8, default 13; 2026-11-11: its two departures, no GIN index and no report date, now a plan amendment). Fable's security review: merge-ready (2026-11-11).
 
 ## Date
 
@@ -23,7 +23,7 @@ SITREP (situation report) answers from an advisor's documents and the product sh
 - **`strict_order`:** exact order, less recall (pgvector); `relaxed_order` and a re-sort instead.
 - **GIN indexes, as planned:** a write cost, unusable by any app query. LEAKPROOF needs a superuser, which Azure's Flexible Server lacks.
 - **A rule, no handle:** unenforced.
-- **Cutting a long query:** silent; refused, as PR 4 does.
+- **Cutting a long query:** silent.
 
 ## Decision
 

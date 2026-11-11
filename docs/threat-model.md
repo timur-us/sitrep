@@ -1,6 +1,6 @@
 # SITREP — threat model
 
-Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database), 2026-10-31 (M0 PR 5b: row-level security), 2026-11-03 (M0 PR 6: tool registry), 2026-11-04 (M0 PR 7: dev login), 2026-11-08 (M0 PR 9: status at the end of M0, Timur's answers to the PR 7 questions), 2026-11-09 (M1 PR 7: the loader; M1 PR 5: the Host check without the shim, plaintext refused with header capture) and 2026-11-10 (M1 PR 9: the number guard reports, path 7) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
+Date: 2026-10-27, updated 2026-10-30 (M0 PR 5a: local database), 2026-10-31 (M0 PR 5b: row-level security), 2026-11-03 (M0 PR 6: tool registry), 2026-11-04 (M0 PR 7: dev login), 2026-11-08 (M0 PR 9: status at the end of M0, Timur's answers to the PR 7 questions), 2026-11-09 (M1 PR 7: the loader; M1 PR 5: the Host check without the shim, plaintext refused with header capture) and 2026-11-10 (M1 PR 9: the number guard reports, path 7; M1 PR 8: retrieval and the READ handlers, path 2) · Status: v1, to be revised at every milestone · Owner: Timur · Reviewer: Fable (security)
 Scope of testing: `redteam/SCOPE.md`. Principle: security does not depend on the system prompt staying secret (Kerckhoffs).
 
 ## Assets
