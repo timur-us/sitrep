@@ -16,6 +16,7 @@ so nothing here opens a socket or needs a key. The loop:
 from __future__ import annotations
 
 import copy
+import datetime
 import hashlib
 import json
 import logging
@@ -43,6 +44,8 @@ from app.harness.mvp_tools import DocumentHit, Portfolio
 from app.observability import tracing
 
 MODEL = "claude-sonnet-5-5"
+# The date the loop is called with (the route passes the server's, M1 PR 16).
+TODAY = datetime.date(2026, 11, 13)
 assert MODEL in PRICES
 
 
@@ -150,6 +153,7 @@ def run(client: ScriptedClient, handlers: Handlers | None = None, **kwargs: Any)
         client=client,
         handlers=handlers.mapping(),
         model=MODEL,
+        today=TODAY,
     )
 
 
@@ -304,7 +308,8 @@ def test_a_request_carries_exactly_the_contract_fields() -> None:
     run(client)
     [call] = client.calls
     assert set(call) == {"system", "messages", "tools", "max_tokens"}  # no tool_choice
-    assert call["system"] == prompt.SYSTEM_PROMPT
+    assert call["system"] == prompt.system_prompt(TODAY)
+    assert "Today's date is 2026-11-13." in call["system"]
     assert call["max_tokens"] == loop.MAX_TOKENS
 
 
@@ -346,6 +351,7 @@ def test_a_failing_handler_gives_an_error_result_and_the_turn_goes_on() -> None:
         client=client,
         handlers={"search_client_docs": broken, "get_portfolio": Handlers().portfolio},
         model=MODEL,
+        today=TODAY,
     )
     [block] = tool_results(client.calls[1])
     assert block["is_error"] is True and "tool_failed" in block["content"]
@@ -366,6 +372,7 @@ def test_a_handler_must_return_untrusted() -> None:
             client=client,
             handlers={"search_client_docs": plain, "get_portfolio": Handlers().portfolio},
             model=MODEL,
+            today=TODAY,
         )
     assert failed.value.kind == "handler"
 
@@ -378,6 +385,7 @@ def test_the_handlers_must_be_the_registrys() -> None:
             client=ScriptedClient(),
             handlers={"search_client_docs": Handlers().search},
             model=MODEL,
+            today=TODAY,
         )
 
 
@@ -585,20 +593,69 @@ def test_the_answer_joins_the_text_blocks() -> None:
 
 
 def test_the_prompt_is_versioned_and_built_from_branding() -> None:
-    assert prompt.PROMPT_VERSION == "v1"
+    assert prompt.PROMPT_VERSION == "v2"
+    template = prompt.SYSTEM_PROMPT_TEMPLATE
     for needle in (branding.PRODUCT.name, branding.BANK.display_name, CITATION_FORM):
-        assert needle in prompt.SYSTEM_PROMPT, needle
-    assert "untrusted" in prompt.SYSTEM_PROMPT
-    assert "investment advice" in prompt.SYSTEM_PROMPT
-    assert prompt.PROMPT_SHA256 == hashlib.sha256(prompt.SYSTEM_PROMPT.encode()).hexdigest()
+        assert needle in template, needle
+    assert "untrusted" in template
+    assert "investment advice" in template
+    # The hash is the template's, so it does not change with the date (ADR 0014).
+    assert prompt.PROMPT_SHA256 == hashlib.sha256(template.encode()).hexdigest()
+
+
+def test_v2_names_the_date_once_and_asks_for_no_markdown() -> None:
+    # Timur, 2026-11-13: the server's current date, and "no Markdown formatting".
+    template = prompt.SYSTEM_PROMPT_TEMPLATE
+    assert template.count(prompt.TODAY) == 1
+    rendered = prompt.system_prompt(TODAY)
+    assert prompt.TODAY not in rendered and "{" not in rendered
+    assert rendered == template.replace(prompt.TODAY, "2026-11-13")
+    assert "Today's date is 2026-11-13." in rendered
+    assert "no Markdown formatting" in rendered
+    assert "past" in rendered and "gap" in rendered
+    # Another day, another prompt text; the same template hash.
+    assert prompt.system_prompt(TODAY + datetime.timedelta(days=1)) != rendered
+
+
+@pytest.mark.parametrize(
+    "today", [datetime.datetime(2026, 11, 13, 9, 30), "2026-11-13", None, 20261113]
+)
+def test_the_prompt_takes_a_date_and_nothing_else(today: object) -> None:
+    # A datetime would carry the time of day (and is a date subclass): refused too.
+    with pytest.raises(TypeError, match="datetime.date"):
+        prompt.system_prompt(today)  # type: ignore[arg-type]
+
+
+def test_the_loop_needs_the_date() -> None:
+    client = ScriptedClient(response(text("ok")))
+    with pytest.raises(TypeError):
+        loop.run(  # type: ignore[call-arg]
+            issue(ADVISOR), "q", client=client, handlers=Handlers().mapping(), model=MODEL
+        )
+    with pytest.raises(TypeError, match="datetime.date"):
+        loop.run(
+            issue(ADVISOR),
+            "q",
+            client=client,
+            handlers=Handlers().mapping(),
+            model=MODEL,
+            today=datetime.datetime(2026, 11, 13),
+        )
+    assert client.calls == []
+
+
+def test_the_tool_definitions_are_what_the_model_is_sent() -> None:
+    client = ScriptedClient(response(text("ok")))
+    run(client)
+    assert client.calls[0]["tools"] == loop.tool_definitions()
 
 
 def test_the_prompt_names_no_cast_member_or_literal_domain() -> None:
     # Nothing depends on it staying secret, and it carries no client data.
     for person in branding.CAST:
-        assert person.name not in prompt.SYSTEM_PROMPT
+        assert person.name not in prompt.SYSTEM_PROMPT_TEMPLATE
     for domain in (branding.DOMAINS.staff, branding.DOMAINS.attacker, branding.DOMAINS.canary):
-        assert domain not in prompt.SYSTEM_PROMPT
+        assert domain not in prompt.SYSTEM_PROMPT_TEMPLATE
 
 
 # --- Traces --------------------------------------------------------------------------
@@ -609,7 +666,7 @@ def test_the_span_carries_the_approved_attributes(traced: Traced) -> None:
     client = ScriptedClient(response(SEARCH, stop="tool_use"), response(text(answer)))
     attributes = traced(lambda: run(client))
     assert set(attributes) <= tracing.LOOP_KEYS
-    assert attributes[key("prompt.version")] == "v1"
+    assert attributes[key("prompt.version")] == "v2"
     assert attributes[key("prompt.sha256")] == prompt.PROMPT_SHA256
     assert attributes["gen_ai.request.model"] == MODEL
     assert attributes["gen_ai.usage.input_tokens"] == 2_000
@@ -870,6 +927,7 @@ def test_a_handler_result_must_name_its_tool() -> None:
             client=client,
             handlers={"search_client_docs": wrong, "get_portfolio": Handlers().portfolio},
             model=MODEL,
+            today=TODAY,
         )
     assert failed.value.kind == "handler"
 
@@ -885,6 +943,7 @@ def test_a_failing_handler_is_traced_by_class(traced: Traced) -> None:
             client=ScriptedClient(response(SEARCH, stop="tool_use"), response(text("ok"))),
             handlers={"search_client_docs": broken, "get_portfolio": Handlers().portfolio},
             model=MODEL,
+            today=TODAY,
         )
 
     assert "LookupError" in traced(body)[key("loop.tool_errors")]
@@ -981,13 +1040,15 @@ def test_the_prompt_names_no_cast_member_as_a_word() -> None:
     import re
 
     for person in branding.CAST:
-        assert not re.search(rf"\b{re.escape(person.name)}\b", prompt.SYSTEM_PROMPT), person.name
+        assert not re.search(rf"\b{re.escape(person.name)}\b", prompt.SYSTEM_PROMPT_TEMPLATE), (
+            person.name
+        )
 
 
 def test_the_prompt_names_the_read_tools_from_the_registry() -> None:
     # spec-12.
     for name in loop.read_registry().names():
-        assert name in prompt.SYSTEM_PROMPT
+        assert name in prompt.SYSTEM_PROMPT_TEMPLATE
 
 
 def test_the_real_client_s_reply_passes_through_the_loop(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1011,7 +1072,12 @@ def test_the_real_client_s_reply_passes_through_the_loop(monkeypatch: pytest.Mon
 
     client = build_model_client(Settings(_env_file=None), transport=httpx2.MockTransport(answer))
     result = loop.run(
-        issue(ADVISOR), "q", client=client, handlers=Handlers().mapping(), model=client.model
+        issue(ADVISOR),
+        "q",
+        client=client,
+        handlers=Handlers().mapping(),
+        model=client.model,
+        today=TODAY,
     )
     assert (result.stop, result.citations) == ("end_turn", ("doc-1",))
     assert "tool_choice" not in sent[0]
@@ -1022,13 +1088,14 @@ def test_the_real_client_s_reply_passes_through_the_loop(monkeypatch: pytest.Mon
 
 
 # Review finding test-14: any edit to the prompt's text changes this hash and fails here,
-# so it comes with a new PROMPT_VERSION (and new recordings, M1 PR 16), never silently.
-PROMPT_V1_SHA256 = "6aef4295bb959585a20e556962e477798ce8987d0be2e0b702cd47e9291faf9a"
+# so it comes with a new PROMPT_VERSION and new recordings (ADR 0014), never silently.
+# v1 was 6aef4295bb959585a20e556962e477798ce8987d0be2e0b702cd47e9291faf9a (M1 PR 10).
+PROMPT_V2_SHA256 = "b036a58340b35a989300a79c4d039b269bad219239afacac5bba94bca27f2c5f"
 
 
-def test_the_v1_prompt_is_pinned() -> None:
-    assert prompt.PROMPT_VERSION == "v1"
-    assert prompt.PROMPT_SHA256 == PROMPT_V1_SHA256
+def test_the_v2_prompt_is_pinned() -> None:
+    assert prompt.PROMPT_VERSION == "v2"
+    assert prompt.PROMPT_SHA256 == PROMPT_V2_SHA256
 
 
 # --- Handler failures (M1 PR 12, the handovers of #32 and #33) ------------------------
@@ -1059,6 +1126,7 @@ def test_a_refused_call_gives_the_model_its_kind(traced: Traced) -> None:
                 client=client,
                 handlers=with_search(raising(handlers.ToolFailed(handlers.QUERY_TOO_LONG))),
                 model=MODEL,
+                today=TODAY,
             )
         )
 
@@ -1088,6 +1156,7 @@ def test_an_unreviewed_kind_is_a_plain_failure(traced: Traced) -> None:
             client=client,
             handlers=with_search(raising(handlers.ToolFailed(unreviewed))),
             model=MODEL,
+            today=TODAY,
         )
 
     attributes = traced(body)
@@ -1127,6 +1196,7 @@ def test_a_guard_or_database_failure_ends_the_request(
                 client=client,
                 handlers={"search_client_docs": raising(error), "get_portfolio": later.portfolio},
                 model=MODEL,
+                today=TODAY,
             )
         caught.append(failed.value)
 
@@ -1150,6 +1220,7 @@ def test_a_data_error_still_lets_the_turn_go_on() -> None:
         client=client,
         handlers=with_search(raising(psycopg.DataError("NUL"))),
         model=MODEL,
+        today=TODAY,
     )
     [block] = tool_results(client.calls[1])
     assert '"type":"tool_failed"' in block["content"]

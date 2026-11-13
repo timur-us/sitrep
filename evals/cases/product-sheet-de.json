@@ -1,0 +1,13 @@
+{
+  "id": "product-sheet-de",
+  "lang": "de",
+  "advisor": "{advisor.alice}",
+  "question": "Was steht im Produktblatt zu Lindenhof Rentenportfolio über Risikoindikator, laufende Kosten und Mindestanlage?",
+  "expect": {
+    "tools": [
+      "search_client_docs"
+    ],
+    "cites": true
+  },
+  "note": "A German product sheet."
+}

@@ -1,0 +1,13 @@
+{
+  "id": "product-sheet-en",
+  "lang": "en",
+  "advisor": "{advisor.alice}",
+  "question": "What does the product sheet for Harbourline Global Equity say about its risk indicator, ongoing charges and minimum investment?",
+  "expect": {
+    "tools": [
+      "search_client_docs"
+    ],
+    "cites": true
+  },
+  "note": "A product sheet: global, read by every advisor."
+}

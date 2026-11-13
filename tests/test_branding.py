@@ -241,6 +241,30 @@ def test_globs(path: str, excluded: bool, slug_allowed: bool) -> None:
     assert matches_any(path, SLUG_ALLOWED) is slug_allowed
 
 
+def test_known_placeholders_pass_in_cases_only(tmp_path: Path) -> None:
+    # M1 PR 16: {advisor.<id>} names an advisor without the literal; elsewhere, and for a
+    # placeholder the runner does not know, the id is still a finding.
+    repo_files.git(tmp_path, "init", "-q")
+    advisor = branding.DEMO_MANDATE.advisor_id
+    known = f'"advisor": "{{advisor.{advisor}}}", "q": "{{mandate.demo}}"'
+    planted = {
+        "evals/cases/a.json": known,
+        "redteam/attacks/b.json": known,
+        "evals/cases/c.json": f'"advisor": "{{nobody.{advisor}}}"',
+        "evals/cases/d.json": f'"advisor": "{{advisor.{advisor}}}", "q": "{advisor}"',
+        "tests/e.py": known,
+    }
+    for rel, body in planted.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(body)
+    _, findings = branding_scan.scan(tmp_path)
+    flagged = sorted({finding.path for finding in findings})
+    assert flagged == ["evals/cases/c.json", "evals/cases/d.json", "tests/e.py"], flagged
+    # d: the placeholder passes, the bare id beside it does not.
+    assert [f.line for f in findings if f.path == "evals/cases/d.json"] == [1]
+    assert len([f for f in findings if f.path == "evals/cases/d.json"]) == 1
+
+
 def test_branding_only_in_branding_py() -> None:
     names = {rule.name for rule in branding_scan.rules()}
     assert names == set(branding_scan.RULE_NAMES), (

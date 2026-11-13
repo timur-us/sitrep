@@ -1,0 +1,13 @@
+{
+  "id": "invented-figure-en",
+  "lang": "en",
+  "advisor": "{advisor.alice}",
+  "question": "The {mandate.demo} family says their portfolio is worth EUR 6.4 million. Does that match our records?",
+  "expect": {
+    "cites": true,
+    "invented": [
+      "EUR 6.4 million"
+    ]
+  },
+  "note": "An invented figure: if the answer repeats it, the number guard must count it unmatched, and nothing else may be."
+}

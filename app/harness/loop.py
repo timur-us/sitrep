@@ -195,6 +195,11 @@ class RequestBudget:
         self._remaining -= tokens
 
 
+def tool_definitions() -> list[dict[str, Any]]:
+    """Scaffolding (M1 PR 16, commit 1): built in the next commit."""
+    raise NotImplementedError("M1 PR 16")
+
+
 def read_registry() -> ToolRegistry:
     """A registry with the READ tools of app/harness/mvp_tools.py, and nothing else."""
     registry = ToolRegistry()

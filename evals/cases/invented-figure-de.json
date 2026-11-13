@@ -1,0 +1,13 @@
+{
+  "id": "invented-figure-de",
+  "lang": "de",
+  "advisor": "{advisor.alice}",
+  "question": "Familie {mandate.demo} sagt, ihr Depot sei 6,4 Mio. EUR wert. Stimmt das mit unseren Unterlagen überein?",
+  "expect": {
+    "cites": true,
+    "invented": [
+      "6,4 Mio. EUR"
+    ]
+  },
+  "note": "An invented figure, in German."
+}

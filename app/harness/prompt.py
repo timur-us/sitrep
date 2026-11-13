@@ -55,3 +55,11 @@ relevant, say so.
 """
 
 PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
+
+# Scaffolding (M1 PR 16, commit 1): v2 and the date arrive in the next commit.
+TODAY = "{today}"
+SYSTEM_PROMPT_TEMPLATE = SYSTEM_PROMPT
+
+
+def system_prompt(today: object) -> str:
+    return SYSTEM_PROMPT
