@@ -30,24 +30,44 @@ names the model sent, so traces record error types only (M1). Keys that match th
 identity pattern get an `identity_argument` error of their own; any other unknown key
 is refused as `extra_forbidden`, since every model forbids extra keys.
 
+- the argument models are a closed world (M1 PR 13; plan default 11, an allowlist rather
+  than a list of refused features). A field's type is one of str, int, bool,
+  datetime.date, a Literal of str, int or bool, a tuple of reviewed types (tuple[X, ...]
+  or fixed), X | None, or a nested frozen model held to the same rules. Its metadata
+  holds Field constraints only (min and max length, ge, gt, le, lt, multiple_of,
+  pattern, strict). Its Field sets nothing but a default of a reviewed type, a
+  description, title, examples and aliases. The model's config sets extra and frozen
+  only, and its class body holds fields, model_config and a docstring: no method, no
+  property, no validator, serializer or computed field. So a model cannot rewrite its
+  input (a before, after, wrap or plain validator, on a field or the model, or a
+  method such as model_validate) or show another schema than it validates
+  (WithJsonSchema, SkipJsonSchema, json_schema_extra, a RootModel, a schema hook).
+
+validate_call() caps the raw arguments before pydantic sees them (M1 PR 13; PR 6
+sec-11, PR 8 sec-9): nested deeper than MAX_DEPTH containers (`too_deep`), larger than
+MAX_ARGUMENT_BYTES as compact UTF-8 JSON (`too_large`), or a key or a text holding a
+control character (`control_character`: C0, DEL and C1, except tab, LF and CR, which an
+e-mail body needs; CR and LF in recipients are M2's). Identity keys are still named
+beside a cap.
+
 What this does not see: a handler that ignores its validated arguments; a field with a
-harmless name and a harmful meaning; a model that rewrites its input in a before, wrap
-or plain validator, or that shows another schema than it validates (WithJsonSchema,
-SkipJsonSchema, json_schema_extra, a RootModel). The MVP models use none of these; M1
-decides whether the registry refuses them. Row-level security is the boundary; the
-registry keeps identity out of the model's reach.
+harmless name and a harmful meaning. Row-level security is the boundary; the registry
+keeps identity out of the model's reach.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
+import types
 import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, get_args, get_origin
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
-from pydantic import AliasChoices, AliasPath, BaseModel, ValidationError
+from pydantic import AliasChoices, AliasPath, BaseModel, RootModel, Strict, ValidationError
+from pydantic.fields import FieldInfo
 
 from app.harness.context import Untrusted
 
@@ -130,6 +150,47 @@ SAFE_MESSAGES = frozenset(
     }
 )
 FIXED_MESSAGE = "the value does not fit the schema"
+
+# The caps on raw arguments (M1 PR 13), and their fixed messages.
+MAX_DEPTH = 4  # containers on the deepest path; the arguments object is the first
+MAX_ARGUMENT_BYTES = 32 * 1024  # compact JSON, UTF-8
+TOO_DEEP = f"the arguments nest deeper than {MAX_DEPTH} levels"
+TOO_LARGE = f"the arguments are larger than {MAX_ARGUMENT_BYTES // 1024} KiB as JSON"
+CONTROL_CHARACTER = "a key or a text holds a control character"
+TEXT_CONTROLS = frozenset("\t\n\r")  # the control characters a text may hold
+
+# The closed world of argument models (M1 PR 13).
+REVIEWED_SCALARS = (str, int, bool, datetime.date)
+REVIEWED_LITERALS = (str, int, bool)
+# pydantic keeps Field's bounds as annotated_types objects (a dependency of pydantic, not
+# of ours, so named here rather than imported), and strict as pydantic's Strict.
+REVIEWED_BOUNDS = frozenset({"MinLen", "MaxLen", "Ge", "Gt", "Le", "Lt", "MultipleOf"})
+# pydantic keeps Field(pattern=...) in a general metadata object; only this key.
+REVIEWED_GENERAL_METADATA = frozenset({"pattern"})
+# What a Field may set (FieldInfo._attributes_set; constraints go to its metadata).
+REVIEWED_FIELD_ATTRIBUTES = frozenset(
+    {
+        "annotation",
+        "default",
+        "description",
+        "title",
+        "examples",
+        "alias",
+        "validation_alias",
+        "serialization_alias",
+        "alias_priority",
+    }
+)
+REVIEWED_CONFIG = frozenset({"extra", "frozen"})
+_DECORATOR_KINDS = (
+    "validators",
+    "field_validators",
+    "root_validators",
+    "model_validators",
+    "field_serializers",
+    "model_serializers",
+    "computed_fields",
+)
 
 
 def identity_term(name: str) -> str | None:
@@ -257,9 +318,127 @@ def _nested_models(annotation: object) -> list[type[BaseModel]]:
     return found
 
 
+def _is_bound(item: object) -> bool:
+    kind = type(item)
+    return kind.__module__ == "annotated_types" and kind.__qualname__ in REVIEWED_BOUNDS
+
+
+def _is_general_metadata(item: object) -> bool:
+    kind = type(item)
+    return kind.__module__ == "pydantic._internal._fields" and kind.__qualname__.endswith(
+        "_PydanticGeneralMetadata"
+    )
+
+
+def _field_info_problems(info: FieldInfo, where: str) -> list[str]:
+    """What a Field sets beyond the reviewed attributes, and its metadata."""
+    chosen = getattr(info, "_attributes_set", None)
+    if not isinstance(chosen, dict):
+        return [f"{where}: a Field this pydantic cannot show for review"]
+    problems = [
+        f"{where}: Field({name}=...) is not reviewed"
+        for name in sorted(set(chosen) - REVIEWED_FIELD_ATTRIBUTES)
+    ]
+    if info.json_schema_extra is not None and "json_schema_extra" not in chosen:
+        problems.append(f"{where}: Field(json_schema_extra=...) is not reviewed")
+    if "default" in chosen and not _reviewed_default(info.default):
+        problems.append(f"{where}: a default of type {type(info.default).__name__} is not reviewed")
+    return problems + _metadata_problems(info.metadata, where)
+
+
+def _metadata_problems(metadata: list[Any] | tuple[Any, ...], where: str) -> list[str]:
+    problems = []
+    for item in metadata:
+        if isinstance(item, FieldInfo):
+            problems += _field_info_problems(item, where)
+        elif (
+            _is_bound(item)
+            or type(item) is Strict
+            or (_is_general_metadata(item) and set(vars(item)) <= REVIEWED_GENERAL_METADATA)
+        ):
+            continue
+        else:
+            problems.append(f"{where}: {type(item).__name__} is not a reviewed constraint")
+    return problems
+
+
+def _reviewed_default(value: object) -> bool:
+    if type(value) is tuple:
+        return all(_reviewed_default(item) for item in value)
+    return value is None or type(value) in REVIEWED_SCALARS
+
+
+def _type_problems(annotation: object, where: str) -> list[str]:
+    """Where annotation leaves the reviewed types (nested models are checked as models)."""
+    problems: list[str] = []
+    stack = [annotation]
+    while stack:
+        item = stack.pop()
+        origin, args = get_origin(item), get_args(item)
+        if any(item is scalar for scalar in REVIEWED_SCALARS):
+            continue
+        if origin is Annotated:
+            stack.append(args[0])
+            problems += _metadata_problems(args[1:], where)
+        elif origin is Literal and all(type(value) in REVIEWED_LITERALS for value in args):
+            continue
+        elif origin in (Union, types.UnionType) and len(args) == 2 and type(None) in args:
+            stack += [arg for arg in args if arg is not type(None)]
+        elif origin is tuple and len(args) == 2 and args[1] is Ellipsis:
+            stack.append(args[0])
+        elif origin is tuple and args and Ellipsis not in args:
+            stack += list(args)
+        elif isinstance(item, type) and issubclass(item, BaseModel) and origin is None:
+            continue  # a nested model: model_problems() checks it as a model
+        else:
+            problems.append(f"{where}: {item!r} is not a reviewed type")
+    return problems
+
+
+def _own_methods(model: type[BaseModel]) -> list[str]:
+    """Names the model's own classes define as functions, methods or descriptors."""
+    found = []
+    for cls in model.__mro__:
+        if cls in (BaseModel, RootModel, object) or not issubclass(cls, BaseModel):
+            continue
+        for name, value in vars(cls).items():
+            made_by_pydantic = getattr(value, "__module__", "") or ""
+            if name == "__hash__" and made_by_pydantic.startswith("pydantic."):
+                continue  # the hash pydantic writes for a frozen model
+            descriptor = isinstance(value, classmethod | staticmethod | property)
+            # A validator or serializer sits in the class body behind pydantic's proxy.
+            proxy = type(value).__name__ == "PydanticDescriptorProxy"
+            if descriptor or proxy or (callable(value) and not isinstance(value, type)):
+                found.append(name)
+    return sorted(set(found))
+
+
+def _closed_world_problems(model: type[BaseModel]) -> list[str]:
+    """Where one model leaves the closed world (M1 PR 13)."""
+    name = model.__name__
+    problems = []
+    if issubclass(model, RootModel):
+        problems.append(f"{name}: a RootModel is refused (it shows its root's schema)")
+    decorators = model.__pydantic_decorators__
+    kinds = [kind for kind in _DECORATOR_KINDS if getattr(decorators, kind)]
+    if kinds:
+        problems.append(
+            f"{name}: a custom validator, serializer or computed field is refused ({', '.join(kinds)})"
+        )
+    unreviewed = sorted(set(model.model_config) - REVIEWED_CONFIG)
+    if unreviewed:
+        problems.append(f"{name}: model_config {unreviewed} is not reviewed (extra, frozen only)")
+    problems += [f"{name}: defines {method}, only fields may" for method in _own_methods(model)]
+    for field_name, field in model.model_fields.items():
+        where = f"{name}.{field_name}"
+        problems += _field_info_problems(field, where)
+        problems += _type_problems(field.annotation, where)
+    return problems
+
+
 def model_problems(model: type[BaseModel]) -> list[str]:
-    """Identity or non-ASCII names that model, or a model nested in it, accepts, and any
-    of those models that is not frozen."""
+    """Identity or non-ASCII names that model, or a model nested in it, accepts; any of
+    those models that is not frozen; and where any of them leaves the closed world."""
     problems: list[str] = []
     seen: set[type[BaseModel]] = set()
     stack = [model]
@@ -270,6 +449,7 @@ def model_problems(model: type[BaseModel]) -> list[str]:
         seen.add(current)
         if current.model_config.get("frozen") is not True:
             problems.append(f"{current.__name__}: not frozen (frozen=True)")
+        problems += _closed_world_problems(current)
         for field_name, field in current.model_fields.items():
             names = [field_name, *_alias_names(field.alias), *_alias_names(field.validation_alias)]
             for name in dict.fromkeys(names):
@@ -292,6 +472,39 @@ def _identity_keys(arguments: object) -> list[tuple[str | int, ...]]:
         elif isinstance(node, list | tuple):
             stack += [((*loc, index), value) for index, value in enumerate(node)]
     return sorted(found, key=repr)
+
+
+def _cap_errors(arguments: object) -> list[CallError]:
+    """The caps on raw arguments, in order: depth, then size, then control characters.
+    Iterative, and it stops below MAX_DEPTH, so any depth is safe to inspect."""
+    stack: list[tuple[tuple[str | int, ...], object, int]] = [((), arguments, 1)]
+    texts: list[tuple[tuple[str | int, ...], str]] = []
+    while stack:
+        loc, node, depth = stack.pop(0)
+        if isinstance(node, dict | list | tuple):
+            if depth > MAX_DEPTH:
+                return [CallError("too_deep", loc, TOO_DEEP)]
+            items = node.items() if isinstance(node, dict) else enumerate(node)
+            for key, value in items:
+                if isinstance(node, dict) and isinstance(key, str):
+                    texts.append(((*loc, key), key))
+                stack.append(((*loc, key), value, depth + 1))
+        elif isinstance(node, str):
+            texts.append((loc, node))
+    try:
+        sent = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        sent = ""  # not JSON (a set, bytes): pydantic refuses it by type
+    if len(sent.encode("utf-8", "surrogatepass")) > MAX_ARGUMENT_BYTES:
+        return [CallError("too_large", (), TOO_LARGE)]
+    found = {loc for loc, text in texts if _has_control(text)}
+    return [
+        CallError("control_character", loc, CONTROL_CHARACTER) for loc in sorted(found, key=repr)
+    ]
+
+
+def _has_control(text: str) -> bool:
+    return any(unicodedata.category(char) == "Cc" and char not in TEXT_CONTROLS for char in text)
 
 
 class ToolRegistry:
@@ -367,6 +580,10 @@ class ToolRegistry:
             CallError("identity_argument", loc, "arguments carry no identity; the login does")
             for loc in _identity_keys(arguments)
         ]
+        capped = _cap_errors(arguments)
+        if capped:
+            # Before pydantic sees them (M1 PR 13).
+            return RejectedCall(spec.name, tuple(errors + capped))
         try:
             parsed = spec.arguments.model_validate(arguments)
         except ValidationError as invalid:

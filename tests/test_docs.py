@@ -1322,7 +1322,7 @@ def test_adr_0001_records_the_registry_caps() -> None:
 
     text = (DECISIONS / "0001-own-agent-loop.md").read_text(encoding="utf-8")
     body = text.partition("## Consequences")[0]
-    line = next((row for row in body.splitlines() if "PR 13" in row), "")
+    line = next((row for row in body.splitlines() if row.startswith("- PR 13")), "")
     assert line, "no PR 13 amendment in ADR 0001"
     for needle in (
         "allowlist",

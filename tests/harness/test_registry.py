@@ -271,7 +271,8 @@ def test_open_schemas_are_refused(arguments: type[BaseModel], needle: str) -> No
 
 
 def test_nested_models_with_forbid_register() -> None:
-    nested = model("Nested", filters=(InnerForbid, ...), more=(list[InnerForbid], []))
+    # A tuple since M1 PR 13: a list is not a reviewed type.
+    nested = model("Nested", filters=(InnerForbid, ...), more=(tuple[InnerForbid, ...], ()))
     ToolRegistry().register(clean_spec(arguments=nested))
 
 
@@ -588,9 +589,13 @@ class Tagged(BaseModel):
     ids=["validator", "union-tag"],
 )
 def test_messages_that_would_echo_the_input_are_replaced(
-    arguments: type[BaseModel], call: dict[str, Any], kind: str
+    arguments: type[BaseModel], call: dict[str, Any], kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # sec-3 / test-6: pydantic writes the input into these messages.
+    # sec-3 / test-6: pydantic writes the input into these messages. Since M1 PR 13 the
+    # registry refuses both models (a validator, a discriminated union); the replacement
+    # stays as the second line, tested with the closed world switched off.
+    assert problems_of(clean_spec(arguments=arguments)), "control: the closed world refuses it"
+    monkeypatch.setattr(tools, "_closed_world_problems", lambda model: [])
     registry = ToolRegistry()
     registry.register(clean_spec(arguments=arguments))
     outcome = rejected(registry.validate_call("probe_tool", call))
