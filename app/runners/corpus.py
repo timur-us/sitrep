@@ -1,18 +1,29 @@
 """Shared runner for the eval and red-team gates, offline.
 
-A suite directory holds `gate.toml` (`min_cases`), the case directory (`cases/` or
-`attacks/`, one `<name>.json` per case) and `recorded/<version>/<case id>.json`. M0
-checks structure and scores nothing:
+A suite directory holds `gate.toml`, the case directory (`cases/` or `attacks/`, one
+`<name>.json` per case) and `recorded/<version>/<case id>.json`. Both suites check
+structure:
 
-- an empty corpus passes when `min_cases` is 0; any case at all fails closed, because
-  nothing scores it before M1;
+- an empty corpus passes when `min_cases` is 0. The red team scores nothing until M1
+  PR 17, so any attack fails closed there;
 - a stray file, a symlink, invalid JSON, a duplicate key or id, an orphan recording,
   or a recording that carries a credential header (as a key or a value) fails;
 - case text is read as NFKC, with ideographic dots as "." and without invisible format
   characters. It names the cast, the bank, the product and the domains only through
   placeholders (`{advisor.<id>}`, `{domain.attacker}`, `{mandate.demo}` ...), resolved
   from branding. After resolution every host must end in the label `example`;
-- `--live` needs `--yes`, and live runs are not available in M0.
+- `--live` needs `--yes`.
+
+The eval suite scores (M1 PR 16, ADR 0014). Its gate.toml holds `min_cases`, `samples`
+and `min_pass_rate`; each case is parsed and checked (app/runners/scoring.py), its
+recording at the current prompt version must exist, be well formed and not stale
+(app/runners/transcript.py), and every sample is scored. One line per case says how
+many samples pass and which scorers failed, by name; the gate passes when no hard
+scorer failed and the share of passing samples is at least `min_pass_rate`. Recordings
+of other prompt versions stay as evidence: checked for structure, not scored.
+`--estimate` prints a live run's cost (app/runners/estimate.py), and `--live --yes`
+records (app/runners/live.py), both offline but for the model calls of the latter;
+`--case <id>` limits either to some cases.
 
 Files are read with `json` and `tomllib` only. Errors name the file (escaped unless
 it is a plain name), the JSON path and the rule, never the text: corpus text is untrusted (CLAUDE.md rule 9) and recordings
@@ -31,6 +42,7 @@ import unicodedata
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from app.config import branding
 
@@ -40,6 +52,10 @@ CASE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 VERSION = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 IGNORED = frozenset({".gitkeep", ".DS_Store"})
 GATE_KEYS = frozenset({"min_cases"})
+# A scored suite's gate (ADR 0014): recorded samples per case, and the share of samples
+# that must pass every scorer of their case.
+SCORED_GATE_KEYS = frozenset({"min_cases", "samples", "min_pass_rate"})
+MAX_SAMPLES = 10
 # Never in a recording, request or response, at any depth.
 # As a key, or as a value (HAR-style {"name": ..., "value": ...} and [name, value] pairs).
 CREDENTIAL_HEADERS = frozenset(
@@ -64,6 +80,14 @@ FIELD = re.compile(r"[a-z_][a-z0-9_]{0,31}")
 class Suite:
     name: str  # also the directory under the repository root
     case_dir: str
+    scored: bool = False  # the evals since M1 PR 16; the red team from PR 17
+
+
+@dataclass(frozen=True)
+class Gate:
+    min_cases: int
+    samples: int = 1
+    min_pass_rate: float = 1.0
 
 
 def placeholders() -> dict[str, str]:
@@ -252,7 +276,7 @@ def _entries(directory: Path) -> list[Path]:
     return sorted(path for path in directory.iterdir() if path.name not in IGNORED)
 
 
-def _load_gate(directory: Path, problems: list[str]) -> int | None:
+def _load_gate(suite: Suite, directory: Path, problems: list[str]) -> Gate | None:
     path = directory / "gate.toml"
     if not path.is_file() or path.is_symlink():
         problems.append("gate.toml is missing")
@@ -262,22 +286,33 @@ def _load_gate(directory: Path, problems: list[str]) -> int | None:
     except (tomllib.TOMLDecodeError, UnicodeDecodeError):
         problems.append("gate.toml is not valid TOML")
         return None
-    unknown = set(gate) - GATE_KEYS
+    keys = SCORED_GATE_KEYS if suite.scored else GATE_KEYS
+    unknown = set(gate) - keys
     if unknown:
         problems.append(f"gate.toml: unknown keys {sorted(unknown)}")
     min_cases = gate.get("min_cases")
     if type(min_cases) is not int or min_cases < 0:
         problems.append("gate.toml: min_cases must be an integer >= 0")
         return None
-    return min_cases
+    if not suite.scored:
+        return Gate(min_cases=min_cases)
+    samples, rate = gate.get("samples"), gate.get("min_pass_rate")
+    if type(samples) is not int or not 1 <= samples <= MAX_SAMPLES:
+        problems.append(f"gate.toml: samples must be an integer from 1 to {MAX_SAMPLES}")
+        return None
+    if type(rate) is not float or not 0.0 <= rate <= 1.0:
+        problems.append("gate.toml: min_pass_rate must be a float from 0.0 to 1.0")
+        return None
+    return Gate(min_cases=min_cases, samples=samples, min_pass_rate=rate)
 
 
-def _load_cases(suite: Suite, directory: Path, problems: list[str]) -> set[str]:
+def _load_cases(suite: Suite, directory: Path, problems: list[str]) -> dict[str, dict[str, Any]]:
+    """Every valid case by id; problems for the rest."""
     base = directory / suite.case_dir
     if not base.is_dir() or base.is_symlink():
         problems.append(f"{suite.case_dir}/ is missing")
-        return set()
-    ids: set[str] = set()
+        return {}
+    ids: dict[str, dict[str, Any]] = {}
     for path in _entries(base):
         rel = f"{suite.case_dir}/{_shown(path.name)}"
         if path.is_symlink():
@@ -298,7 +333,7 @@ def _load_cases(suite: Suite, directory: Path, problems: list[str]) -> set[str]:
         elif case_id in ids:
             problems.append(f"{rel}: duplicate id")
         else:
-            ids.add(case_id)
+            ids[case_id] = case
         for where, text in _strings(case, "$"):
             problems += [f"{rel}: {where}: {problem}" for problem in text_problems(text)]
     return ids
@@ -339,40 +374,151 @@ def _check_recordings(directory: Path, case_ids: set[str], problems: list[str]) 
                 problems.append(f"{rel}: carries a credential header")
 
 
+def _report(suite: Suite, problems: list[str]) -> int:
+    for problem in problems:
+        print(f"{suite.name}: {problem}", file=sys.stderr)
+    return 1
+
+
+def _cases(
+    suite: Suite, directory: Path, problems: list[str]
+) -> tuple[Gate | None, dict[str, Any]]:
+    """The gate and the cases, parsed for scoring where the suite scores."""
+    gate = _load_gate(suite, directory, problems)
+    raw = _load_cases(suite, directory, problems)
+    if not suite.scored:
+        return gate, raw
+    from app.runners import scoring
+
+    parsed: dict[str, Any] = {}
+    for case_id, case in raw.items():
+        found, case_problems = scoring.parse_case(case, PLACEHOLDERS)
+        problems += [f"{suite.case_dir}/{case_id}.json: {problem}" for problem in case_problems]
+        if found is not None:
+            parsed[case_id] = found
+    return gate, parsed
+
+
 def check(suite: Suite, directory: Path) -> int:
     problems: list[str] = []
-    min_cases = _load_gate(directory, problems)
-    case_ids = _load_cases(suite, directory, problems)
-    _check_recordings(directory, case_ids, problems)
-    if min_cases is not None and len(case_ids) < min_cases:
-        problems.append(f"{len(case_ids)} cases, min_cases={min_cases}: below the gate")
-    if problems:
-        for problem in problems:
-            print(f"{suite.name}: {problem}", file=sys.stderr)
-        return 1
-    if not case_ids:
-        print(f"{suite.name}: no cases (min_cases={min_cases})")
+    gate, cases = _cases(suite, directory, problems)
+    _check_recordings(directory, set(cases), problems)
+    if gate is not None and len(cases) < gate.min_cases:
+        problems.append(f"{len(cases)} cases, min_cases={gate.min_cases}: below the gate")
+    if problems or gate is None:
+        return _report(suite, problems)
+    if not cases:
+        print(f"{suite.name}: no cases (min_cases={gate.min_cases})")
         return 0
+    if not suite.scored:
+        print(
+            f"{suite.name}: cases={len(cases)} (min_cases={gate.min_cases}); "
+            "scoring arrives in M1, so the gate fails closed"
+        )
+        return 1
+    return _score(suite, directory, gate, cases)
+
+
+def _score(suite: Suite, directory: Path, gate: Gate, cases: dict[str, Any]) -> int:
+    """Score every case's recording at the current prompt version; see the module."""
+    from app.harness.prompt import PROMPT_VERSION
+    from app.runners import scoring, transcript
+
+    problems: list[str] = []
+    scores: dict[str, list[scoring.Score]] = {}
+    for case_id, case in sorted(cases.items()):
+        rel = f"recorded/{PROMPT_VERSION}/{case_id}.json"
+        path = directory / rel
+        if not path.is_file() or path.is_symlink():
+            problems.append(f"{rel}: missing (record it: --live --yes, by hand)")
+            continue
+        recording = _load_json(path, rel, problems)
+        if recording is None:
+            continue
+        found = transcript.check(recording, case_id, gate.samples)
+        if not found:
+            for index, sample in enumerate(recording["samples"]):
+                found += [f"$.samples[{index}]{p}" for p in scoring.integrity(sample)]
+        if found:
+            problems += [f"{rel}: {problem}" for problem in found]
+            continue
+        scores[case_id] = [scoring.score(case, sample) for sample in recording["samples"]]
+    if problems:
+        return _report(suite, problems)
+    total = passed = hard = 0
+    for case_id, results in scores.items():
+        good = sum(result.passed for result in results)
+        failed = [
+            f"sample {index + 1}: {', '.join(result.failed)}"
+            for index, result in enumerate(results)
+            if not result.passed
+        ]
+        detail = f"; failed: {'; '.join(failed)}" if failed else ""
+        print(f"{suite.name}: {case_id}: {good}/{len(results)} samples pass{detail}")
+        total += len(results)
+        passed += good
+        hard += sum(result.hard for result in results)
+    rate = passed / total
+    ok = hard == 0 and rate >= gate.min_pass_rate
     print(
-        f"{suite.name}: cases={len(case_ids)} (min_cases={min_cases}); "
-        "scoring arrives in M1, so the gate fails closed"
+        f"{suite.name}: prompt {PROMPT_VERSION}: {len(scores)} cases, {passed} of {total}"
+        f" samples pass ({rate:.1%}), min_pass_rate {gate.min_pass_rate};"
+        f" hard failures {hard}: {'the gate passes' if ok else 'the gate fails'}"
     )
-    return 1
+    return 0 if ok else 1
+
+
+def _selected(
+    suite: Suite, directory: Path, only: Sequence[str]
+) -> tuple[Gate | None, list[Any], list[str]]:
+    """The gate and the cases a live run or an estimate covers: all, or those named."""
+    problems: list[str] = []
+    gate, cases = _cases(suite, directory, problems)
+    unknown = sorted(set(only) - set(cases))
+    if unknown:
+        problems.append(f"--case names no valid case: {', '.join(map(_shown, unknown))}")
+    chosen = [case for case_id, case in sorted(cases.items()) if not only or case_id in only]
+    return gate, chosen, problems
 
 
 def main(suite: Suite, argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog=f"python -P -m app.runners.{suite.name}")
     parser.add_argument("--dir", type=Path, default=ROOT / suite.name, help="suite directory")
-    parser.add_argument("--live", action="store_true", help="record new runs (not in M0)")
+    parser.add_argument("--live", action="store_true", help="record new runs (by hand)")
     parser.add_argument("--yes", action="store_true", help="confirm a live run's cost")
+    parser.add_argument("--estimate", action="store_true", help="a live run's cost, offline")
+    parser.add_argument("--case", action="append", default=[], help="only this case (repeat)")
     args = parser.parse_args(argv)
     if args.live and not args.yes:
         print(f"{suite.name}: --live needs --yes, after a cost estimate", file=sys.stderr)
         return 2
-    if args.live:
-        print(f"{suite.name}: live runs are not available in M0", file=sys.stderr)
-        return 2
-    if args.yes:
+    if args.yes and not args.live:
         print(f"{suite.name}: --yes only goes with --live", file=sys.stderr)
         return 2
-    return check(suite, args.dir)
+    if args.live and args.estimate:
+        print(f"{suite.name}: --estimate comes before --live, not with it", file=sys.stderr)
+        return 2
+    if args.case and not (args.live or args.estimate):
+        print(f"{suite.name}: --case goes with --live or --estimate", file=sys.stderr)
+        return 2
+    if not (args.live or args.estimate):
+        return check(suite, args.dir)
+    if not suite.scored:
+        print(f"{suite.name}: live runs and estimates arrive with M1 PR 17", file=sys.stderr)
+        return 2
+    gate, cases, problems = _selected(suite, args.dir, args.case)
+    if problems or gate is None:
+        return _report(suite, problems)
+    if args.estimate:
+        from app.runners import estimate
+
+        result = estimate.estimate(args.dir, [case.id for case in cases], gate.samples)
+        for line in estimate.lines(result, len(cases), gate.samples):
+            print(line)
+        return 0
+    if not cases:
+        print(f"{suite.name}: no case to record", file=sys.stderr)
+        return 2
+    from app.runners import live
+
+    return live.main(args.dir, cases, gate.samples)

@@ -1,14 +1,18 @@
 """The agent loop (ADR 0001; M1 plan, PR 10): one advisor question, one answer.
 
-run(advisor, question, mandate_id) calls the model, runs the READ tools it asks for, and
-returns the answer with its citations, grounding, usage, cost, stop and trace id. Every
-control sits here, between the model and the tools, where tests reach it:
+run(advisor, question, mandate_id, today=…) calls the model, runs the READ tools it asks
+for, and returns the answer with its citations, grounding, usage, cost, stop and trace id.
+Every control sits here, between the model and the tools, where tests reach it:
 
+- **Prompt.** The system prompt of app/harness/prompt.py, filled in with today, the date
+  the caller passes (the route the server's, the live runner its own; M1 PR 16). The loop
+  reads no clock.
 - **Tools.** The registry holds search_client_docs and get_portfolio only (read_registry),
-  until M1 PR 14 adds the proposal path. The model sees exactly the registry's schemas,
-  and no tool_choice (Sonnet 5.5 refuses a forced one). A call is validated by the
-  registry; a RejectedCall goes back to the model as error types, locations and the
-  registry's fixed messages, and its handler never runs. The advisor comes from the
+  until M1 PR 14 adds the proposal path. The model sees exactly the registry's schemas
+  (tool_definitions(), which recordings hash, ADR 0014), and no tool_choice (Sonnet 5.5
+  refuses a forced one). A call is validated by the registry; a RejectedCall goes back
+  to the model as error types, locations and the registry's fixed messages, and its
+  handler never runs. The advisor comes from the
   login (CLAUDE.md rule 8), never from an argument.
 - **Results.** Every tool result enters the context through wrap(), errors included, so
   each tool_result is inside `<untrusted …>` (CLAUDE.md rule 9). The tool_result blocks
@@ -59,6 +63,7 @@ request; it reports and does not block (plan default 14).
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -79,7 +84,7 @@ from app.harness.handlers import TOOL_FAILURES, ToolFailed
 from app.harness.model import ModelClient
 from app.harness.model_client import ModelCallError, PriceUnknown, cost_usd
 from app.harness.mvp_tools import TOOLS
-from app.harness.prompt import PROMPT_SHA256, PROMPT_VERSION, SYSTEM_PROMPT
+from app.harness.prompt import PROMPT_SHA256, PROMPT_VERSION, system_prompt
 from app.harness.tools import Effect, RejectedCall, ToolRegistry
 from app.observability import tracing
 
@@ -92,6 +97,7 @@ __all__ = [
     "Usage",
     "read_registry",
     "run",
+    "tool_definitions",
 ]
 
 MAX_TURNS = 6
@@ -195,11 +201,6 @@ class RequestBudget:
         self._remaining -= tokens
 
 
-def tool_definitions() -> list[dict[str, Any]]:
-    """Scaffolding (M1 PR 16, commit 1): built in the next commit."""
-    raise NotImplementedError("M1 PR 16")
-
-
 def read_registry() -> ToolRegistry:
     """A registry with the READ tools of app/harness/mvp_tools.py, and nothing else."""
     registry = ToolRegistry()
@@ -207,6 +208,20 @@ def read_registry() -> ToolRegistry:
         if spec.effect is Effect.READ:
             registry.register(spec)
     return registry
+
+
+def tool_definitions() -> list[dict[str, Any]]:
+    """The tools as the model is sent them: name, description and the registry's schema,
+    in the registry's order."""
+    registry = read_registry()
+    return [
+        {
+            "name": name,
+            "description": registry.spec(name).description,
+            "input_schema": registry.schema(name),
+        }
+        for name in registry.names()
+    ]
 
 
 # --- The block allowlist -------------------------------------------------------------
@@ -445,20 +460,15 @@ def run(
     client: ModelClient,
     handlers: Mapping[str, Handler],
     model: str,
+    today: datetime.date,
 ) -> LoopResult:
-    """One advisor question through the loop; see the module docstring."""
+    """One advisor question through the loop on today; see the module docstring."""
     _check_inputs(question, mandate_id)
+    system = system_prompt(today)  # TypeError for anything but a date
     registry = read_registry()
     if set(handlers) != set(registry.names()):
         raise ValueError("the handlers must be exactly the registry's tools")
-    tools = [
-        {
-            "name": name,
-            "description": registry.spec(name).description,
-            "input_schema": registry.schema(name),
-        }
-        for name in registry.names()
-    ]
+    tools = tool_definitions()
     budget = RequestBudget(REQUEST_BUDGET)
     messages: list[dict[str, Any]] = [
         {"role": "user", "content": _first_message(question, mandate_id)}
@@ -470,7 +480,7 @@ def run(
     try:
         while True:
             request = {
-                "system": SYSTEM_PROMPT,
+                "system": system,
                 "messages": messages,
                 "tools": tools,
                 "max_tokens": MAX_TOKENS,

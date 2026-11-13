@@ -8,6 +8,7 @@ global tracer provider is never set.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import html
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -71,6 +72,7 @@ def create_app(
     model_client: ModelClient | None = None,
     embedder: Embedder | None = None,
     clock: Callable[[], float] | None = None,
+    today: Callable[[], datetime.date] | None = None,
 ) -> FastAPI:
     """bind_host is the address the entry point binds; None when it is not known.
 
@@ -119,7 +121,7 @@ def create_app(
 
     # Always mounted: without a login (the shim off, Entra ID not before M3) it answers 401.
     mandates.mount(app)
-    ask.mount(app, settings, model_client=model_client, embedder=embedder, clock=clock)
+    ask.mount(app, settings, model_client=model_client, embedder=embedder, clock=clock, today=today)
 
     # The dev login (ADR 0009): only for exactly "1", and only when the entry point binds
     # exactly 127.0.0.1 (it has refused every other host by then). Imported here, not at
