@@ -1313,3 +1313,21 @@ def test_planted_adr_0013_blocks() -> None:
     assert adr_0013_problems(good.replace("rrf_k: 60", "rrf_k: 60\nrrf_k: 60"), expected) == [
         "the yaml block repeats a key: duplicate key 'rrf_k'"
     ]
+
+
+def test_adr_0001_records_the_registry_caps() -> None:
+    # M1 PR 13: ADR 0001's one-line amendment names the closed world and the caps the
+    # registry enforces, with the values in app/harness/tools.py.
+    from app.harness import tools
+
+    text = (DECISIONS / "0001-own-agent-loop.md").read_text(encoding="utf-8")
+    body = text.partition("## Consequences")[0]
+    line = next((row for row in body.splitlines() if row.startswith("- PR 13")), "")
+    assert line, "no PR 13 amendment in ADR 0001"
+    for needle in (
+        "allowlist",
+        f"depth {tools.MAX_DEPTH}",
+        f"{tools.MAX_ARGUMENT_BYTES // 1024} KiB",
+        "control characters",
+    ):
+        assert needle in line, needle

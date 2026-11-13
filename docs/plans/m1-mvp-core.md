@@ -1,6 +1,6 @@
 # M1 — MVP core, local: plan
 
-Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date; PR 12: the API contract's details) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
+Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date; PR 12: the API contract's details), 2026-11-13 (PR 13: control characters, the closed world's additions) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
 
 ## Context
 
@@ -549,6 +549,15 @@ New for two sessions:
 
 **Handover rows.** PR 6 sec-2 and sec-11. **Hours** 2.0.
 
+Amended (2026-11-13, M1 PR 13, #37): derived by the agent from #32's sec-9 handover and #37's review, and proposed for Timur to confirm. His merge of #37 confirms it, and his answers on #37 override it.
+- **Control characters.** `validate_call()` also refuses a key or a text with a C0, DEL or C1 control character (`control_character`), before pydantic. Tab, LF and CR pass, since an e-mail body has lines. Arguments that are not JSON (a set, bytes, NaN) are `not_json`. The caps run in order: depth, then JSON and size, then control characters.
+- **The closed world** also refuses:
+  - a base class that is not a pydantic model, a foreign metaclass, and anything in a model's own namespace beyond what Python and pydantic write there (a method, a descriptor, a class attribute);
+  - a default that its own field would refuse;
+  - an alias that is not a plain name (`AliasPath`, `AliasChoices`).
+- **Files** also: `tests/harness/test_loop.py` (no handler runs) and `tests/test_docs.py` (ADR 0001's line).
+- **Not refused here:** CR and LF in recipients, the subject and a follow-up's title; bidi, zero-width and tag characters; U+2028 and U+2029; private-use characters. They are M2's (below). A schema-valid `draft_email` body of many multi-byte characters can exceed 32 KiB, and then the cap wins; PR 14 decides whether the body's bound changes.
+
 ## PR 14 — The approval gate and the two proposal tools
 
 **Purpose.** ADR 0011 built, with the first writes the app role may do, and `draft_email` and `create_followup` in the loop.
@@ -672,6 +681,7 @@ New for two sessions:
 | PR 5b GIN index | PR 8 | decided against, with EXPLAIN evidence (amendment, Timur, 2026-11-11) |
 | PR 6 sec-2 | PR 13 | type allowlist (default 11); below the cut line |
 | PR 6 sec-11 | PR 13 | below the cut line |
+| #32 sec-9 (M1 PR 8) | PR 13 | control characters refused in arguments (amendment of 2026-11-13) |
 | PR 6 test-14 | PR 8 (READ), PR 14 (DRAFT, SIDE_EFFECT) | |
 | PR 6 forged-argument handler | PR 8 | |
 | PR 6 approval tokens | PR 2 (ADR), PR 14 | |
@@ -750,7 +760,7 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
 
 - **M2:**
   - the output policy: exact-URL links and per-mandate recipients enforced (question 1), plus the canary scan and alarm;
-  - provenance hardening: a delimiter nonce and Unicode tag, bidi and zero-width characters (PR 6 sec-9), the `_value` read-scan, pickle and slots (sec-7), a record-id pattern (sec-8), and CR and LF in recipients;
+  - provenance hardening: a delimiter nonce and Unicode tag, bidi and zero-width characters (PR 6 sec-9), the `_value` read-scan, pickle and slots (sec-7), a record-id pattern (sec-8), CR and LF in recipients, the subject and a follow-up's title, U+2028, U+2029 and private-use characters;
   - the CSP-off rate, and the regression gate against a baseline (the brief's "eval gate in CI");
   - 15–20 automated variants, and the Haiku guard layer;
   - granite-r2 against e5 (default 15);

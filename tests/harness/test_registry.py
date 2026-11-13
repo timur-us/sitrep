@@ -17,24 +17,43 @@ Every planted case pairs with the clean spec, which registers.
 
 from __future__ import annotations
 
+import datetime
+import decimal
+import functools
+import hashlib
+import json
+import time
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, Optional
 
 import pytest
 from pydantic import (
+    AfterValidator,
     AliasChoices,
     AliasPath,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Discriminator,
     Field,
     Json,
+    PlainValidator,
+    RootModel,
+    WithJsonSchema,
+    WrapValidator,
+    computed_field,
     create_model,
+    field_serializer,
     field_validator,
+    model_validator,
 )
+from pydantic.json_schema import SkipJsonSchema
+from pydantic_core import PydanticUndefined, core_schema
 
+from app.harness import tools
 from app.harness.context import Untrusted
+from app.harness.mvp_tools import build_registry
 from app.harness.tools import (
     IDENTITY_TERMS,
     CallError,
@@ -254,7 +273,8 @@ def test_open_schemas_are_refused(arguments: type[BaseModel], needle: str) -> No
 
 
 def test_nested_models_with_forbid_register() -> None:
-    nested = model("Nested", filters=(InnerForbid, ...), more=(list[InnerForbid], []))
+    # A tuple since M1 PR 13: a list is not a reviewed type.
+    nested = model("Nested", filters=(InnerForbid, ...), more=(tuple[InnerForbid, ...], ()))
     ToolRegistry().register(clean_spec(arguments=nested))
 
 
@@ -571,9 +591,14 @@ class Tagged(BaseModel):
     ids=["validator", "union-tag"],
 )
 def test_messages_that_would_echo_the_input_are_replaced(
-    arguments: type[BaseModel], call: dict[str, Any], kind: str
+    arguments: type[BaseModel], call: dict[str, Any], kind: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # sec-3 / test-6: pydantic writes the input into these messages.
+    # sec-3 / test-6: pydantic writes the input into these messages. Since M1 PR 13 the
+    # registry refuses both models (a validator, a discriminated union); the replacement
+    # stays as the second line, tested with the closed world switched off.
+    refused = " ".join(problems_of(clean_spec(arguments=arguments)))
+    assert "custom validator" in refused or "not a reviewed type" in refused, refused
+    monkeypatch.setattr(tools, "_closed_world_problems", lambda model: [])
     registry = ToolRegistry()
     registry.register(clean_spec(arguments=arguments))
     outcome = rejected(registry.validate_call("probe_tool", call))
@@ -652,4 +677,725 @@ def test_the_stored_schema_is_the_checked_one() -> None:
         return  # refusing a model that shows two schemas is as good
     assert registry.schema("probe_tool")["additionalProperties"] is False, (
         f"stored a schema that was not checked ({len(Shifting.calls)} calls)"
+    )
+
+
+# M1 PR 13 (PR 6 sec-2 and sec-11; PR 8 sec-9): a closed world for argument models, and
+# caps on the raw arguments before pydantic sees them. Each feature below registered
+# before this PR (measured in PR 6); each is now refused, beside a clean control.
+
+
+def planted(**namespace: Any) -> type[BaseModel]:
+    """A frozen, extra-forbidding model with the given class body."""
+    body: dict[str, Any] = {"model_config": FORBID, "__module__": __name__}
+    body.update(namespace)
+    return type("Planted", (BaseModel,), body)
+
+
+def with_annotation(annotation: Any, default: Any = PydanticUndefined) -> type[BaseModel]:
+    if default is PydanticUndefined:
+        return planted(__annotations__={"value": annotation})
+    return planted(__annotations__={"value": annotation}, value=default)
+
+
+class Colour(StrEnum):
+    RED = "red"
+
+
+class Text(str):
+    """A custom type with its own core schema hook: it can rewrite what it is given."""
+
+    @classmethod
+    def __get_pydantic_core_schema__(cls, source: Any, handler: Any) -> Any:
+        return core_schema.no_info_after_validator_function(cls, handler(str))
+
+
+UNREVIEWED_TYPES = {
+    "float": float,
+    "list": list[str],
+    "dict": dict[str, str],
+    "set": frozenset[str],
+    "bytes": bytes,
+    "datetime": datetime.datetime,
+    "time": datetime.time,
+    "decimal": decimal.Decimal,
+    "enum": Colour,
+    "str subclass": Text,
+    "union": int | str,
+    "tuple of floats": tuple[float, ...],
+    "optional list": list[str] | None,
+    "literal of a float": Literal[1.5],
+    "annotated float": Annotated[float, Field(ge=0)],
+    "nested dict in a tuple": tuple[dict[str, str], ...],
+    "list of models": list[Clean],
+    "mixed literal": Literal["a", 1.5],
+    "literal of an enum member": Literal[Colour.RED],
+    "literal of None": Literal[None],  # noqa: PYI061 - planted on purpose
+    "union of three": int | str | None,
+    "optional float": float | None,
+    "fixed tuple with a float": tuple[int, float],
+    "fixed tuple with a list": tuple[str, list[str]],
+    "empty tuple": tuple[()],
+    "bare tuple": tuple,
+}
+
+
+@pytest.mark.parametrize("annotation", list(UNREVIEWED_TYPES.values()), ids=list(UNREVIEWED_TYPES))
+def test_an_unreviewed_argument_type_is_refused(annotation: Any) -> None:
+    problems = problems_of(clean_spec(arguments=with_annotation(annotation)))
+    assert any("Planted.value" in p and "not a reviewed type" in p for p in problems), problems
+
+
+REVIEWED_TYPES = {
+    "str": str,
+    "int": int,
+    "bool": bool,
+    "date": datetime.date,
+    "literal of words": Literal["a", "b"],
+    "literal of numbers": Literal[1, 2],
+    "literal of a bool": Literal[True],
+    "tuple of words": tuple[str, ...],
+    "fixed tuple": tuple[int, str],
+    "optional str": str | None,
+    "optional tuple": tuple[str, ...] | None,
+    "bounded str": Annotated[str, Field(min_length=1, max_length=5, pattern="^[a-z]+$")],
+    "bounded int": Annotated[int, Field(ge=0, le=9, multiple_of=3)],
+    "open bounds": Annotated[int, Field(gt=0, lt=9)],
+    "strict": Annotated[int, Field(strict=True)],
+    "nested model": Clean,
+    "tuple of models": tuple[Clean, ...],
+    "mixed literal": Literal["a", 1],
+    "Optional": Optional[str],  # noqa: UP045 - the typing spelling, on purpose
+    "None first": None | str,
+    "bounded inside a tuple": tuple[Annotated[str, Field(max_length=5)], ...],
+}
+
+
+@pytest.mark.parametrize("annotation", list(REVIEWED_TYPES.values()), ids=list(REVIEWED_TYPES))
+def test_a_reviewed_argument_type_registers(annotation: Any) -> None:
+    ToolRegistry().register(clean_spec(arguments=with_annotation(annotation)))
+
+
+def _before(cls: Any, value: Any) -> Any:
+    return value
+
+
+def _one(self: Any) -> int:
+    return 1
+
+
+REFUSED_FEATURES = {
+    "field validator, before": (
+        {"check": field_validator("query", mode="before")(classmethod(_before))},
+        "custom validator",
+    ),
+    "field validator, after": (
+        {"check": field_validator("query", mode="after")(classmethod(_before))},
+        "custom validator",
+    ),
+    "field validator, wrap": (
+        {
+            "check": field_validator("query", mode="wrap")(
+                classmethod(lambda cls, value, handler: handler(value))
+            )
+        },
+        "custom validator",
+    ),
+    "field validator, plain": (
+        {"check": field_validator("query", mode="plain")(classmethod(_before))},
+        "custom validator",
+    ),
+    "model validator, before": (
+        {"check": model_validator(mode="before")(classmethod(_before))},
+        "custom validator",
+    ),
+    "model validator, after": (
+        {"check": model_validator(mode="after")(lambda self: self)},
+        "custom validator",
+    ),
+    "model validator, wrap": (
+        {
+            "check": model_validator(mode="wrap")(
+                classmethod(lambda cls, value, handler: handler(value))
+            )
+        },
+        "custom validator",
+    ),
+    "a serializer": (
+        {"show": field_serializer("query")(lambda self, value: value)},
+        "custom validator",
+    ),
+    "a computed field": (
+        {"shown": computed_field(property(_one))},
+        "custom validator",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("namespace", "needle"), list(REFUSED_FEATURES.values()), ids=list(REFUSED_FEATURES)
+)
+def test_a_custom_validator_is_refused(namespace: dict[str, Any], needle: str) -> None:
+    arguments = planted(__annotations__={"query": str}, **namespace)
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any(needle in problem for problem in problems), problems
+
+
+METADATA = {
+    "before validator": Annotated[str, BeforeValidator(str.strip)],
+    "after validator": Annotated[str, AfterValidator(str.strip)],
+    "wrap validator": Annotated[str, WrapValidator(lambda value, handler: handler(value))],
+    "plain validator": Annotated[str, PlainValidator(str)],
+    "WithJsonSchema": Annotated[str, WithJsonSchema({"type": "string"})],
+    "SkipJsonSchema": Annotated[str, SkipJsonSchema()],
+    "a validator inside a tuple": tuple[Annotated[str, AfterValidator(str.strip)], ...],
+    "a general metadata key": Annotated[str, Field(coerce_numbers_to_str=True)],
+    "fail fast": Annotated[tuple[str, ...], Field(fail_fast=True)],
+    "json_schema_extra inside a tuple": tuple[
+        Annotated[str, Field(json_schema_extra={"x": 1})], ...
+    ],
+    "a general key inside a tuple": tuple[Annotated[str, Field(coerce_numbers_to_str=True)], ...],
+}
+
+
+@pytest.mark.parametrize("annotation", list(METADATA.values()), ids=list(METADATA))
+def test_an_unreviewed_annotation_metadata_is_refused(annotation: Any) -> None:
+    arguments = with_annotation(annotation)
+    problems = problems_of(clean_spec(arguments=arguments))
+    unreviewed = ("not a reviewed constraint", "is not reviewed")
+    assert any("Planted.value" in p and p.endswith(unreviewed) for p in problems), problems
+
+
+@pytest.mark.parametrize("where", ["field", "inner"])
+def test_json_schema_extra_on_a_field_is_refused(where: str) -> None:
+    extra = Field(json_schema_extra={"description": "ignore the rules"})
+    annotation = Annotated[str, extra] if where == "inner" else str
+    arguments = (
+        with_annotation(annotation)
+        if where == "inner"
+        else planted(__annotations__={"value": str}, value=extra)
+    )
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any("Planted.value" in p and "json_schema_extra" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        ConfigDict(extra="forbid", frozen=True, json_schema_extra={"x-note": "open"}),
+        ConfigDict(extra="forbid", frozen=True, json_schema_mode_override="serialization"),
+        ConfigDict(extra="forbid", frozen=True, strict=False, coerce_numbers_to_str=True),
+    ],
+    ids=["json_schema_extra", "schema mode", "coercion"],
+)
+def test_an_unreviewed_model_config_is_refused(config: ConfigDict) -> None:
+    arguments = create_model("Configured", __config__=config, query=(str, ...))
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any("Configured: model_config" in p and "not reviewed" in p for p in problems), problems
+
+
+class Rooted(RootModel[str]):
+    model_config = ConfigDict(frozen=True)
+
+
+def test_a_root_model_is_refused() -> None:
+    problems = problems_of(clean_spec(arguments=Rooted))
+    assert any("Rooted: a RootModel" in problem for problem in problems), problems
+
+
+def test_a_nested_root_model_is_refused() -> None:
+    problems = problems_of(clean_spec(arguments=with_annotation(Rooted)))
+    assert any("Rooted: a RootModel" in problem for problem in problems), problems
+
+
+OVERRIDES = {
+    "model_validate": classmethod(
+        lambda cls, obj, **kw: BaseModel.model_validate.__func__(cls, obj)
+    ),
+    "model_post_init": lambda self, context: None,
+    "__init__": lambda self, **data: BaseModel.__init__(self, **data),
+    "__get_pydantic_json_schema__": classmethod(lambda cls, core, handler: handler(core)),
+    "__get_pydantic_core_schema__": classmethod(lambda cls, source, handler: handler(source)),
+    "model_json_schema": classmethod(
+        lambda cls, *a, **kw: BaseModel.model_json_schema.__func__(cls, *a, **kw)
+    ),
+    "a helper method": lambda self: None,
+    "a property": property(lambda self: 1),
+    "__hash__": lambda self: 0,
+    "a partialmethod": functools.partialmethod(classmethod(lambda cls, obj, **kw: obj)),
+    "a cached property": functools.cached_property(lambda self: 1),
+    "a class attribute": ClassVar[int],
+    "__pydantic_init_subclass__": classmethod(lambda cls, **kwargs: None),
+}
+
+
+@pytest.mark.parametrize("name", list(OVERRIDES), ids=list(OVERRIDES))
+def test_a_model_with_its_own_methods_is_refused(name: str) -> None:
+    # A method can rewrite the input or show another schema; the class body holds fields,
+    # model_config and a docstring only.
+    keys = {
+        "a helper method": "helper",
+        "a property": "shown",
+        "a partialmethod": "model_validate",
+        "a cached property": "cached",
+    }
+    key = keys.get(name, name)
+    if name == "a class attribute":
+        arguments = planted(__annotations__={"query": str, "counter": ClassVar[int]}, counter=0)
+        key = "counter"
+    else:
+        arguments = planted(__annotations__={"query": str}, **{key: OVERRIDES[name]})
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any(f"Planted: defines {key}" in problem for problem in problems), problems
+
+
+def test_a_default_factory_is_refused() -> None:
+    arguments = planted(
+        __annotations__={"tags": tuple[str, ...]}, tags=Field(default_factory=tuple)
+    )
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any("Planted.tags" in p and "default_factory" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "default", [[], {}, 1.5, object()], ids=["list", "dict", "float", "object"]
+)
+def test_a_default_of_an_unreviewed_type_is_refused(default: Any) -> None:
+    # pydantic does not validate defaults: a default is a value the model never sent.
+    arguments = with_annotation(tuple[str, ...], default)
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any("Planted.value" in p and "default" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "default", [None, "", 3, True, datetime.date(2026, 1, 2), ("a", "b")], ids=repr
+)
+def test_a_default_of_a_reviewed_type_registers(default: Any) -> None:
+    annotation = (
+        tuple[str, ...] | None if isinstance(default, tuple) or default is None else type(default)
+    )
+    ToolRegistry().register(clean_spec(arguments=with_annotation(annotation, default)))
+
+
+class InnerWithValidator(BaseModel):
+    model_config = FORBID
+    term: str
+
+    @field_validator("term")
+    @classmethod
+    def strip(cls, value: str) -> str:
+        return value.strip()
+
+
+def test_a_nested_model_is_held_to_the_same_rules() -> None:
+    arguments = with_annotation(InnerWithValidator | None, None)
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any("InnerWithValidator" in p and "custom validator" in p for p in problems), problems
+
+
+def test_the_four_mvp_tools_still_register_with_the_same_schemas() -> None:
+    # The amendment of 2026-11-10: PR 13 must leave registry.schema() unchanged, or the
+    # recordings go stale. The hashes are main's before this PR.
+    registry = build_registry()
+    hashes = {
+        name: hashlib.sha256(json.dumps(registry.schema(name), sort_keys=True).encode()).hexdigest()
+        for name in registry.names()
+    }
+    assert hashes == MVP_SCHEMA_SHA256, (
+        "a tool schema changed: the recordings go stale (or pydantic was bumped)"
+    )
+
+
+MVP_SCHEMA_SHA256 = {
+    "search_client_docs": "09d10a690951cd8c52b12c23391b7ff83fa1460b6fe9a5ce06c1c0c892f70888",
+    "get_portfolio": "33f15ca6075ea09aab07003d87fdd9974056e4b94e7a1e200b98b63e6741c136",
+    "draft_email": "8312a71890b4aec45441c5d463cf1e0b8057d6d56c7c0dfb6387bb38656f487b",
+    "create_followup": "d2a163f2019e7dcb166d4648adc66f4d43090e52513d316689ad090cf874ee6b",
+}
+
+
+# The caps on raw arguments: depth, size, control characters. Before pydantic.
+
+
+class Leaf(BaseModel):
+    model_config = FORBID
+    tags: tuple[tuple[str, ...], ...] = ()
+
+
+class Middle(BaseModel):
+    model_config = FORBID
+    leaf: Leaf
+
+
+class Deep(BaseModel):
+    model_config = FORBID
+    middle: Middle | None = None
+    text: str = Field(default="", max_length=40_000)
+
+
+@pytest.fixture
+def capped() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(clean_spec(arguments=Deep))
+    return registry
+
+
+def test_the_caps_are_the_plans() -> None:
+    assert (tools.MAX_DEPTH, tools.MAX_ARGUMENT_BYTES) == (4, 32 * 1024)
+
+
+def test_four_levels_pass_and_five_are_too_deep(capped: ToolRegistry) -> None:
+    # The arguments object is level 1; middle 2, leaf 3, tags 4, a tag tuple 5.
+    four = {"middle": {"leaf": {"tags": []}}}
+    assert isinstance(capped.validate_call("probe_tool", four), ValidCall)
+    five = {"middle": {"leaf": {"tags": [["a"]]}}}
+    outcome = rejected(capped.validate_call("probe_tool", five))
+    assert [(e.type, e.loc) for e in outcome.errors] == [
+        ("too_deep", ("middle", "leaf", "tags", 0))
+    ]
+    assert outcome.errors[0].msg == tools.TOO_DEEP
+
+
+def size(arguments: object) -> int:
+    return len(json.dumps(arguments, ensure_ascii=False, separators=(",", ":")).encode())
+
+
+@pytest.mark.parametrize("letter", ["a", "ü", "€", "\U0001f600"], ids=["1 byte", "2", "3", "4"])
+def test_the_size_cap_is_32_kib_of_json(capped: ToolRegistry, letter: str) -> None:
+    width = len(letter.encode())
+    base = size({"text": ""})
+    fits = {"text": letter * ((tools.MAX_ARGUMENT_BYTES - base) // width)}
+    assert size(fits) <= tools.MAX_ARGUMENT_BYTES
+    assert isinstance(capped.validate_call("probe_tool", fits), ValidCall)
+    over = {"text": fits["text"] + letter}
+    assert size(over) > tools.MAX_ARGUMENT_BYTES
+    refused = rejected(capped.validate_call("probe_tool", over))
+    assert [(e.type, e.loc, e.msg) for e in refused.errors] == [("too_large", (), tools.TOO_LARGE)]
+
+
+def test_exactly_32_kib_passes_the_cap(capped: ToolRegistry) -> None:
+    exact = {"text": "a" * (tools.MAX_ARGUMENT_BYTES - size({"text": ""}))}
+    assert size(exact) == tools.MAX_ARGUMENT_BYTES
+    assert isinstance(capped.validate_call("probe_tool", exact), ValidCall)
+
+
+def test_escapes_count_as_sent(capped: ToolRegistry) -> None:
+    # A quote is two bytes of JSON: the cap is on the arguments as JSON, not on the text.
+    half = (tools.MAX_ARGUMENT_BYTES - size({"text": ""})) // 2 + 1
+    refused = rejected(capped.validate_call("probe_tool", {"text": '"' * half}))
+    assert [e.type for e in refused.errors] == ["too_large"]
+
+
+CONTROLS = ["\x00", "\x01", "\x07", "\x08", "\x0b", "\x0c", "\x1b", "\x1f", "\x7f", "\x85", "\x9b"]
+
+
+@pytest.mark.parametrize("char", CONTROLS, ids=[f"U+{ord(c):04X}" for c in CONTROLS])
+def test_a_control_character_in_a_value_is_refused(registry: ToolRegistry, char: str) -> None:
+    outcome = rejected(registry.validate_call("probe_tool", {"query": f"{CANARY}{char}x"}))
+    assert [(e.type, e.loc, e.msg) for e in outcome.errors] == [
+        ("control_character", ("query",), tools.CONTROL_CHARACTER)
+    ]
+    assert CANARY not in repr(outcome.errors)
+
+
+def test_a_control_character_in_a_key_or_a_nested_value_is_refused(capped: ToolRegistry) -> None:
+    outcome = rejected(capped.validate_call("probe_tool", {"text": "x", "ke\x00y": "v"}))
+    assert ("control_character", ("ke\x00y",)) in [(e.type, e.loc) for e in outcome.errors]
+    nested = {"middle": {"leaf": {"tags": [], "x": "a\x1bb"}}, "text": "ok"}
+    outcome = rejected(capped.validate_call("probe_tool", nested))
+    assert ("control_character", ("middle", "leaf", "x")) in [
+        (e.type, e.loc) for e in outcome.errors
+    ]
+
+
+@pytest.mark.parametrize("char", ["\t", "\n", "\r"], ids=["tab", "LF", "CR"])
+def test_tab_and_line_breaks_pass(registry: ToolRegistry, char: str) -> None:
+    # An e-mail body has lines. CR and LF in recipients are M2's (the plan, "Left out").
+    assert isinstance(registry.validate_call("probe_tool", {"query": f"a{char}b"}), ValidCall)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"middle": {"leaf": {"tags": [["a"]]}}},
+        {"text": "a" * 40_000},
+        {"text": "a\x00b"},
+    ],
+    ids=["too deep", "too large", "control character"],
+)
+def test_a_capped_call_never_reaches_pydantic(
+    capped: ToolRegistry, monkeypatch: pytest.MonkeyPatch, arguments: dict[str, Any]
+) -> None:
+    seen: list[object] = []
+    original = Deep.model_validate.__func__  # type: ignore[attr-defined]
+
+    def spy(cls: type[BaseModel], obj: object, **kwargs: Any) -> BaseModel:
+        seen.append(obj)
+        return original(cls, obj, **kwargs)
+
+    monkeypatch.setattr(Deep, "model_validate", classmethod(spy))
+    rejected(capped.validate_call("probe_tool", arguments))
+    assert seen == []
+    # Control: a call within the caps does reach it.
+    capped.validate_call("probe_tool", {"text": "fine"})
+    assert seen == [{"text": "fine"}]
+
+
+def test_identity_keys_are_still_named_beside_a_cap(registry: ToolRegistry) -> None:
+    deep: dict[str, Any] = {"advisor_id": CANARY}
+    for _ in range(10):
+        deep = {"x": deep}
+    outcome = rejected(registry.validate_call("probe_tool", {"query": "x", "filters": deep}))
+    types = [error.type for error in outcome.errors]
+    assert "identity_argument" in types and "too_deep" in types, types
+    assert CANARY not in repr(outcome.errors)
+
+
+# The review round of PR 13 (spec, test and security reviewers; one cross-check).
+
+
+def _rewrite(cls: Any, obj: Any, **kwargs: Any) -> Any:
+    return BaseModel.model_validate.__func__(cls, {**obj, "query": "rewritten"}, **kwargs)  # type: ignore[attr-defined]
+
+
+class RewritingMixin:
+    """Not a pydantic model: placed before BaseModel, its method wins."""
+
+    @classmethod
+    def model_validate(cls, obj: Any, **kwargs: Any) -> Any:
+        return _rewrite(cls, obj, **kwargs)
+
+
+class Mixed(RewritingMixin, BaseModel):
+    model_config = FORBID
+    query: str = Field(max_length=50)
+
+
+class SchemaMixin:
+    @classmethod
+    def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"type": "object", "properties": {}, "additionalProperties": False}
+
+
+class ShowsAnother(SchemaMixin, BaseModel):
+    model_config = FORBID
+    query: str = Field(max_length=50)
+
+
+class Partial(BaseModel):
+    model_config = FORBID
+    query: str = Field(max_length=50)
+    model_validate = functools.partialmethod(classmethod(_rewrite))  # type: ignore[assignment]
+
+
+@pytest.mark.parametrize("arguments", [Mixed, ShowsAnother, Partial], ids=lambda m: m.__name__)
+def test_a_rewrite_through_a_mixin_or_a_descriptor_is_refused(arguments: type[BaseModel]) -> None:
+    # sec-1, sec-2 (measured: each registered and rewrote the input before this round).
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any(arguments.__name__ in p for p in problems), problems
+
+
+class OtherMeta(type(BaseModel)):  # type: ignore[misc]
+    pass
+
+
+class Metaclassed(BaseModel, metaclass=OtherMeta):
+    model_config = FORBID
+    query: str
+
+
+def test_a_metaclass_other_than_pydantics_is_refused() -> None:
+    problems = problems_of(clean_spec(arguments=Metaclassed))
+    assert any("Metaclassed: a metaclass" in p for p in problems), problems
+
+
+def test_a_class_config_is_refused() -> None:
+    arguments = planted(
+        __annotations__={"query": str},
+        model_config=ConfigDict(extra="forbid", frozen=True, json_schema_extra={"x": 1}),
+    )
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any("model_config" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    ("annotation", "default"),
+    [
+        (Literal["note"], "send"),
+        (Annotated[int, Field(le=20)], 10_000),
+        (Annotated[str, Field(pattern="^[a-z]+$")], "NOT"),
+        (Annotated[str, Field(max_length=2)], "long"),
+        (tuple[str, ...], ("a", 1)),
+        (str, Colour.RED),
+        (int, True),
+    ],
+    ids=["literal", "bound", "pattern", "length", "tuple item", "enum member", "bool for int"],
+)
+def test_a_default_that_breaks_its_field_is_refused(annotation: Any, default: Any) -> None:
+    # sec-3 (measured: Literal["note"] = "send" registered and was handed on).
+    problems = problems_of(clean_spec(arguments=with_annotation(annotation, default)))
+    assert any("Planted.value" in p and "default" in p for p in problems), problems
+    assert not any(repr(default) in p for p in problems), "a problem names the value"
+
+
+@pytest.mark.parametrize(
+    "alias",
+    [
+        {"validation_alias": AliasPath("a", "b")},
+        {"validation_alias": AliasChoices("q", "alt")},
+    ],
+    ids=["AliasPath", "AliasChoices"],
+)
+def test_an_alias_other_than_a_plain_name_is_refused(alias: dict[str, Any]) -> None:
+    # sec-4 (measured: AliasPath("a", "b") read a.b and ignored a's other keys).
+    arguments = planted(__annotations__={"value": str}, value=Field(**alias))
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any("Planted.value" in p and "alias" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        Field(description="d", title="T", examples=["x"]),
+        Field(alias="other_name"),
+        Field(validation_alias="other_name"),
+    ],
+    ids=["description, title, examples", "alias", "validation alias"],
+)
+def test_the_reviewed_field_attributes_register(field: Any) -> None:
+    ToolRegistry().register(
+        clean_spec(arguments=planted(__annotations__={"value": str}, value=field))
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        Field(validate_default=True),
+        Field(exclude=True),
+        Field(frozen=True),
+        Field(deprecated="old"),
+        Field(repr=False),
+    ],
+    ids=["validate_default", "exclude", "frozen", "deprecated", "repr"],
+)
+def test_an_unreviewed_field_attribute_is_refused(field: Any) -> None:
+    arguments = planted(__annotations__={"value": str}, value=field)
+    problems = problems_of(clean_spec(arguments=arguments))
+    assert any("Planted.value" in p and "is not reviewed" in p for p in problems), problems
+
+
+# The caps: order, surrogates, non-JSON, the walk's cost, the boundary of "control".
+
+
+def test_depth_is_checked_before_size_and_size_before_control(capped: ToolRegistry) -> None:
+    deep_and_large = {"middle": {"leaf": {"tags": [["a"]]}}, "text": "a" * 40_000}
+    assert [
+        e.type for e in rejected(capped.validate_call("probe_tool", deep_and_large)).errors
+    ] == ["too_deep"]
+    large_and_control = {"text": "\x00" + "a" * 40_000}
+    assert [
+        e.type for e in rejected(capped.validate_call("probe_tool", large_and_control)).errors
+    ] == ["too_large"]
+    deep_and_control = {"middle": {"leaf": {"tags": [["\x00"]]}}}
+    assert [
+        e.type for e in rejected(capped.validate_call("probe_tool", deep_and_control)).errors
+    ] == ["too_deep"]
+
+
+def test_an_empty_container_at_the_fifth_level_is_too_deep(capped: ToolRegistry) -> None:
+    outcome = rejected(capped.validate_call("probe_tool", {"middle": {"leaf": {"tags": [[]]}}}))
+    assert [(e.type, e.loc) for e in outcome.errors] == [
+        ("too_deep", ("middle", "leaf", "tags", 0))
+    ]
+
+
+def test_a_tuple_counts_as_a_level(capped: ToolRegistry) -> None:
+    outcome = rejected(
+        capped.validate_call("probe_tool", {"middle": {"leaf": {"tags": (("a",),)}}})
+    )
+    assert [e.type for e in outcome.errors] == ["too_deep"]
+
+
+@pytest.mark.parametrize(
+    "text", ["a\ud800", "\udfff", "\ud800" * 20_000], ids=["high", "low", "many"]
+)
+def test_a_lone_surrogate_is_refused_without_a_crash(capped: ToolRegistry, text: str) -> None:
+    # test-2, sec-8: the size is counted with surrogatepass, so it cannot raise; pydantic
+    # refuses the text (string_unicode), and a long one is refused by size first.
+    outcome = rejected(capped.validate_call("probe_tool", {"text": text}))
+    assert [e.type for e in outcome.errors] in (["string_unicode"], ["too_large"]), outcome.errors
+    assert CANARY not in repr(outcome.errors)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{"text": b"a\x00b"}, {"text": {"a", "b"}}, {"text": object()}, {"text": float("nan")}],
+    ids=["bytes", "set", "object", "NaN"],
+)
+def test_arguments_that_are_not_json_are_refused(capped: ToolRegistry, arguments: Any) -> None:
+    # sec-7 (measured: bytes holding a NUL validated as a str). The loop sends JSON only.
+    outcome = rejected(capped.validate_call("probe_tool", arguments))
+    assert [(e.type, e.loc, e.msg) for e in outcome.errors] == [("not_json", (), tools.NOT_JSON)]
+
+
+def test_a_wide_argument_is_walked_in_linear_time(capped: ToolRegistry) -> None:
+    # spec-7, sec-5, test-11 (measured: 160,000 items took 2 s with list.pop(0)).
+    wide = {"text": "x", "middle": {"leaf": {"tags": [["a"]] * 0}}, "many": ["a"] * 400_000}
+    started = time.perf_counter()
+    outcome = rejected(capped.validate_call("probe_tool", wide))
+    assert time.perf_counter() - started < 2.0
+    assert [e.type for e in outcome.errors] == ["too_large"]
+
+
+MORE_CONTROLS = ["\x0e", "\x1c", "\x1d", "\x1e", "\x80", "\x9f"]
+
+
+@pytest.mark.parametrize("char", MORE_CONTROLS, ids=[f"U+{ord(c):04X}" for c in MORE_CONTROLS])
+def test_the_rest_of_c0_and_c1_is_refused(registry: ToolRegistry, char: str) -> None:
+    outcome = rejected(registry.validate_call("probe_tool", {"query": f"a{char}b"}))
+    assert [e.type for e in outcome.errors] == ["control_character"]
+
+
+PASSING = {
+    "no-break space": "\u00a0",
+    "soft hyphen": "\u00ad",
+    "zero-width space": "\u200b",
+    "zero-width joiner": "\u200d",
+    "line separator": "\u2028",
+    "byte order mark": "\ufeff",
+    "umlaut": "ä",
+    "emoji sequence": "\U0001f469\u200d\U0001f4bb",
+}
+
+
+@pytest.mark.parametrize("text", list(PASSING.values()), ids=list(PASSING))
+def test_text_that_is_not_a_control_character_passes(registry: ToolRegistry, text: str) -> None:
+    # Only Cc is refused here; bidi, zero-width and tag characters are M2's (the plan).
+    assert isinstance(registry.validate_call("probe_tool", {"query": f"a{text}b"}), ValidCall)
+
+
+def test_a_control_character_in_a_list_is_located(capped: ToolRegistry) -> None:
+    outcome = rejected(
+        capped.validate_call(
+            "probe_tool", {"middle": {"leaf": {"tags": []}}, "x": ["ok", "b\x1bd"]}
+        )
+    )
+    assert [(e.type, e.loc) for e in outcome.errors] == [("control_character", ("x", 1))]
+
+
+def test_the_largest_mvp_call_fits_the_size_cap() -> None:
+    # spec-6: every field of draft_email at its schema's maximum, in ASCII: 22,945 bytes.
+    largest = {
+        "mandate_id": "m" * 128,
+        "to": ["a" * 254] * 10,
+        "subject": "s" * 200,
+        "body": "b" * 20_000,
+    }
+    assert size(largest) < tools.MAX_ARGUMENT_BYTES
+    assert not isinstance(
+        build_registry().validate_call("draft_email", largest), RejectedCall
+    ) or all(
+        e.type not in ("too_large", "too_deep", "control_character")
+        for e in build_registry().validate_call("draft_email", largest).errors  # type: ignore[union-attr]
     )
