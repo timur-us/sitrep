@@ -335,6 +335,30 @@ def test_a_rejected_call_names_the_error_types_and_locations() -> None:
         assert needle in block["content"], needle
 
 
+@pytest.mark.parametrize(
+    ("arguments", "kind"),
+    [
+        ({"query": "x", "mandate_id": [[[[["m"]]]]]}, "too_deep"),
+        ({"query": "x" * (33 * 1024)}, "too_large"),
+        ({"query": "x\x00y"}, "control_character"),
+    ],
+    ids=["5 deep", "33 KiB", "NUL"],
+)
+def test_a_capped_call_runs_no_handler(arguments: dict[str, Any], kind: str) -> None:
+    # M1 PR 13: the registry refuses these before pydantic, and the model is told why.
+    handlers = Handlers()
+    client = ScriptedClient(
+        response(tool_use("tu_1", "search_client_docs", arguments), stop="tool_use"),
+        response(text("ok")),
+    )
+    result = run(client, handlers)
+    assert handlers.calls == []
+    [block] = tool_results(client.calls[1])
+    assert block["is_error"] is True
+    assert f'"type":"{kind}"' in block["content"], block["content"][:300]
+    assert result.stop == "end_turn"
+
+
 def test_a_failing_handler_gives_an_error_result_and_the_turn_goes_on() -> None:
     def broken(advisor: VerifiedAdvisor, arguments: BaseModel) -> Untrusted[Any]:
         raise RuntimeError(CANARY)
