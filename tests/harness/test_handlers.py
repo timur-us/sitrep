@@ -25,6 +25,7 @@ from types import MappingProxyType
 from typing import Any
 
 import pytest
+from repo_files import ROOT
 
 from app.auth.identity import issue
 from app.config import branding
@@ -411,8 +412,17 @@ def test_a_citations_trust_is_its_rows_never_its_kinds(trust: str) -> None:
     ]
 
 
-def test_the_trust_levels_are_adr_0010s() -> None:
-    assert handlers.TRUST == frozenset({"internal", "untrusted"})
+def test_the_trust_levels_are_the_generated_columns() -> None:
+    # Review finding test-4: TRUST is exactly the set of words the migration's generated
+    # trust columns can produce (ADR 0010), read from the migration itself.
+    migration = (ROOT / "db" / "migrations" / "0003_loader.sql").read_text(encoding="utf-8")
+    columns = re.findall(
+        r"trust text GENERATED ALWAYS AS \(\s*CASE WHEN origin IN \([^)]*\)\s*"
+        r"THEN '([a-z]+)' ELSE '([a-z]+)' END\s*\) STORED",
+        migration,
+    )
+    assert len(columns) == 2, columns  # documents and product_sheets
+    assert {word for column in columns for word in column} == handlers.TRUST
 
 
 @pytest.mark.parametrize("statement", ["documents", "sheets"])

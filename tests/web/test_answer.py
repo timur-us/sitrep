@@ -261,7 +261,7 @@ def test_hostile_answer_is_shown_as_text(
     assert first.locator(".title").text_content() == HOSTILE_TITLE
     assert first.locator(".record").text_content() == HOSTILE_RECORD
     assert first.locator(".kind").text_content() == HOSTILE_KIND
-    assert first.locator(".trust").text_content() == "untrusted"
+    assert page.locator("#citations li .trust").all_text_contents() == ["untrusted", "internal"]
 
     after = page.evaluate(STRUCTURE)
     assert set(after["tags"]) <= PAGE_ELEMENTS, after["tags"]
@@ -443,7 +443,8 @@ def test_each_source_shows_its_trust_next_to_its_kind(
         [["title", "KYC"], ["kind", "document"], ["trust", "internal"], ["record", "kyc-1"]],
         [["title", "Fund"], ["kind", "product sheet"], ["trust", "internal"], ["record", "fund"]],
     ], rows
-    assert page.locator("#citations li .trust").first.is_visible()
+    trust = page.locator("#citations li .trust")
+    assert [trust.nth(i).is_visible() for i in range(trust.count())] == [True] * 3
 
 
 def test_grounding_counts_never_say_verified(context: BrowserContext, app_url: str) -> None:

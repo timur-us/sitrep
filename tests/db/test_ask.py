@@ -53,7 +53,7 @@ from app.api import ask
 from app.auth import dev_shim
 from app.config import branding
 from app.config.settings import DEFAULT_MODEL, LOOPBACK, Settings, env_name
-from app.db import load
+from app.db import load, queries
 from app.db.connect import connect
 from app.db.session import GuardError
 from app.embeddings.onnx import OnnxEmbedder
@@ -603,6 +603,45 @@ def test_a_handler_result_outside_the_contract_is_500(
     )
     response = start(EchoModel(DEMO.family)).ask(MINE)
     assert (response.status_code, response.json()) == (500, {"detail": ask.FAILED})
+
+
+def test_an_unknown_trust_ends_the_request_through_the_real_lookup(
+    start: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review finding test-2: the real route and the real cited(), with the statement
+    # planted to read a trust the schema cannot hold. The request ends with the fixed
+    # 500, and the span names the broken boundary; nothing of the value is sent.
+    monkeypatch.setattr(
+        queries,
+        "CITED_DOCUMENTS",
+        "SELECT d.advisor_id, d.id, d.title, 'trusted' FROM documents d WHERE d.id = ANY(%s)",
+    )
+    provider, exporter = unfiltered()
+    model = EchoModel(DEMO.family)
+    response = start(model, tracer_provider=provider).ask(MINE)
+    assert (response.status_code, response.json()) == (500, {"detail": ask.FAILED})
+    assert len(model.calls) == 2, "control: the loop ran to its answer"
+    assert ask_span(exporter).get(ERROR) == "guard"
+    assert "trusted" not in response.text
+
+
+def test_the_chromium_servers_search_cites_every_e_mail_of_the_demo_mandate(
+    start: Any, corpus: load.Corpus
+) -> None:
+    # Review finding test-1: tests/web/test_ask.py expects the demo family's e-mails among
+    # the sources of tests/web/ask_server.py's unscoped search. The same search here, in
+    # lint-test: every e-mail of the demo mandate is cited, as untrusted.
+    model = EchoModel(DEMO.family, cite=20, arguments={"limit": 20})
+    body = start(model).ask(MINE).json()
+    trust = {item["record_id"]: item["trust"] for item in body["citations"]}
+    mail = {
+        document.id
+        for document in corpus.documents
+        if document.mandate_id == DEMO.id and document.origin == "mailbox"
+    }
+    assert mail, "control: the demo mandate has no e-mail"
+    cited_mail = {record: trust.get(record) for record in mail}
+    assert cited_mail == dict.fromkeys(mail, "untrusted"), sorted(trust)
 
 
 @pytest.mark.parametrize(
