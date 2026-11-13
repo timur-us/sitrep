@@ -28,6 +28,9 @@ What it adds, all in this file:
   Sessions do not expire by time, and the store has no size limit (ADR 0009, Watch).
 - POST /dev/logout: ends the session and clears the cookie.
 
+The page after a login links to the advisor page at / (its ask box), to /api/mandates and
+back to the login, all relative, on the same origin.
+
 No redirects: the login answers with a page. The app sends Referrer-Policy:
 no-referrer, under which a browser sends `Origin: null` even on a same-origin POST; the
 login page sets its own referrer policy to same-origin with a meta element, so the form
@@ -190,7 +193,8 @@ def login_page() -> str:
 def signed_in_page(name: str) -> str:
     return _page(
         f"<p>Signed in as {html.escape(name)}.</p>\n"
-        '<p><a href="/api/mandates">Your mandates</a> · <a href="/dev/login">Dev login</a></p>\n'
+        '<p><a href="/">Ask a question</a> · <a href="/api/mandates">Your mandates</a>'
+        ' · <a href="/dev/login">Dev login</a></p>\n'
     )
 
 

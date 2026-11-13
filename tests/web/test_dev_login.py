@@ -49,6 +49,23 @@ def test_dev_login_in_the_browser(context: BrowserContext, dev_app_url: str) -> 
     assert listed is not None and listed.status in (200, 503), f"signed in: {listed.status}"
 
 
+def test_the_signed_in_page_leads_to_the_ask_box(context: BrowserContext, dev_app_url: str) -> None:
+    # The page after the login links to the advisor page; following it is a GET of /
+    # on the same origin, which shows the ask box.
+    page = context.new_page()
+    page.goto(dev_app_url + "/dev/login")
+    with page.expect_response(dev_app_url + "/dev/login") as posted:
+        page.click(f'button[value="{ADVISOR.id}"]')
+    assert posted.value.status == 200, posted.value.status
+    with page.expect_response(dev_app_url + "/") as opened:
+        page.click("text=Ask a question")
+    assert opened.value.request.method == "GET"
+    assert opened.value.status == 200, opened.value.status
+    assert page.url == dev_app_url + "/"
+    assert page.locator("#question").is_visible()
+    assert page.locator("#ask button[type=submit]").is_visible()
+
+
 def test_no_referrer_page_sends_origin_null(context: BrowserContext, dev_app_url: str) -> None:
     # Control: the same page without the meta element; the browser sends Origin: null.
     def without_meta(route: Route) -> None:

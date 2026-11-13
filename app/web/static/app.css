@@ -112,9 +112,17 @@ button:disabled {
 }
 
 .citations .kind,
+.citations .trust,
 .citations .record {
   margin-left: 0.5rem;
   font-size: 0.9rem;
+}
+
+/* The trust as a word in a frame, one style for both words: the word is the signal. */
+.citations .trust {
+  padding: 0 0.3rem;
+  border: 1px solid currentColor;
+  border-radius: 0.2rem;
 }
 
 .citations .record {

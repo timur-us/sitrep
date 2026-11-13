@@ -5,7 +5,8 @@ sources and grounding counts, rendered as text.
 interception with the JSON the plan fixes ("The API contract"), so the page is tested
 before its route exists. Everything in that JSON is untrusted: the answer is model
 output, and a citation's title, kind and id can come from an attacker's e-mail (threat
-model, path 1). A hostile answer and a hostile citation carry an image, inline and
+model, path 1). A citation's trust is one of two words or the response renders nothing,
+and the page shows it as text next to the kind (Timur's answer 2 on #35). A hostile answer and a hostile citation carry an image, inline and
 reference-style links, a script, inline handlers and a stylesheet, each aimed at the
 canary domain. The page must show them as text and create no element from them. It
 must send nothing off its origin and trip no CSP violation, both under the CSP and with
@@ -121,8 +122,18 @@ def answer(**changes: object) -> dict[str, object]:
     body: dict[str, object] = {
         "answer": f"{FAMILY}: two figures, one of them unmatched [source: doc-kyc-0001].",
         "citations": [
-            {"record_id": "doc-kyc-0001", "title": "KYC profile", "kind": "document"},
-            {"record_id": "product-fund", "title": "Fund sheet", "kind": "product_sheet"},
+            {
+                "record_id": "doc-kyc-0001",
+                "title": "KYC profile",
+                "kind": "document",
+                "trust": "internal",
+            },
+            {
+                "record_id": "product-fund",
+                "title": "Fund sheet",
+                "kind": "product_sheet",
+                "trust": "internal",
+            },
         ],
         "grounding": {"figures": 3, "unmatched": 1, "unknown_citations": 0},
         "proposals": [],
@@ -225,8 +236,18 @@ def test_hostile_answer_is_shown_as_text(
     api.body = answer(
         answer=HOSTILE_ANSWER,
         citations=[
-            {"record_id": HOSTILE_RECORD, "title": HOSTILE_TITLE, "kind": HOSTILE_KIND},
-            {"record_id": "doc-kyc-0001", "title": "KYC profile", "kind": "document"},
+            {
+                "record_id": HOSTILE_RECORD,
+                "title": HOSTILE_TITLE,
+                "kind": HOSTILE_KIND,
+                "trust": "untrusted",
+            },
+            {
+                "record_id": "doc-kyc-0001",
+                "title": "KYC profile",
+                "kind": "document",
+                "trust": "internal",
+            },
         ],
     )
     page = context.new_page()
@@ -240,6 +261,7 @@ def test_hostile_answer_is_shown_as_text(
     assert first.locator(".title").text_content() == HOSTILE_TITLE
     assert first.locator(".record").text_content() == HOSTILE_RECORD
     assert first.locator(".kind").text_content() == HOSTILE_KIND
+    assert page.locator("#citations li .trust").all_text_contents() == ["untrusted", "internal"]
 
     after = page.evaluate(STRUCTURE)
     assert set(after["tags"]) <= PAGE_ELEMENTS, after["tags"]
@@ -247,7 +269,7 @@ def test_hostile_answer_is_shown_as_text(
     assert set(after["tags"]) - set(before["tags"]) == {"li", "span"}, after["tags"]
     assert (after["scripts"], after["links"]) == (before["scripts"], before["links"]) == (1, 1)
     assert after["answer"] == [3], after["answer"]  # one text node
-    assert after["items"] == [["span:3", "span:3", "span:3"]] * 2, after["items"]
+    assert after["items"] == [["span:3"] * 4] * 2, after["items"]
 
     assert page.evaluate("window.pwned") is None
     settle(page)
@@ -267,7 +289,9 @@ def test_an_unknown_kind_is_shown_as_written(
 ) -> None:
     # The kind table is read only for its own keys, never for inherited ones.
     api = Api(context, app_url)
-    api.body = answer(citations=[{"record_id": "doc-1", "title": "A", "kind": kind}])
+    api.body = answer(
+        citations=[{"record_id": "doc-1", "title": "A", "kind": kind, "trust": "internal"}]
+    )
     page = context.new_page()
     opened(page, app_url)
     ask(page)
@@ -391,6 +415,36 @@ def test_citations_show_their_titles(context: BrowserContext, app_url: str) -> N
     first, second = items.nth(0).text_content() or "", items.nth(1).text_content() or ""
     assert "KYC profile" in first and "doc-kyc-0001" in first, first
     assert "Fund sheet" in second and "product sheet" in second, second
+
+
+def test_each_source_shows_its_trust_next_to_its_kind(
+    context: BrowserContext, app_url: str
+) -> None:
+    # Timur's answer 2 on #35: an e-mail is a document like a KYC record, and its title
+    # is the sender's subject line; the trust, as the route sends it, tells them apart.
+    api = Api(context, app_url)
+    api.body = answer(
+        citations=[
+            {"record_id": "mail-1", "title": "Re: KYC", "kind": "document", "trust": "untrusted"},
+            {"record_id": "kyc-1", "title": "KYC", "kind": "document", "trust": "internal"},
+            {"record_id": "fund", "title": "Fund", "kind": "product_sheet", "trust": "internal"},
+        ]
+    )
+    page = context.new_page()
+    opened(page, app_url)
+    ask(page)
+    shown(page)
+    rows = page.evaluate(
+        """() => [...document.querySelectorAll("#citations li")].map((li) =>
+          [...li.children].map((span) => [span.className, span.textContent]))"""
+    )
+    assert rows == [
+        [["title", "Re: KYC"], ["kind", "document"], ["trust", "untrusted"], ["record", "mail-1"]],
+        [["title", "KYC"], ["kind", "document"], ["trust", "internal"], ["record", "kyc-1"]],
+        [["title", "Fund"], ["kind", "product sheet"], ["trust", "internal"], ["record", "fund"]],
+    ], rows
+    trust = page.locator("#citations li .trust")
+    assert [trust.nth(i).is_visible() for i in range(trust.count())] == [True] * 3
 
 
 def test_grounding_counts_never_say_verified(context: BrowserContext, app_url: str) -> None:
@@ -565,7 +619,12 @@ def nested(field: str, key: str, value: object) -> str:
 
 
 def citation(key: str, value: object) -> str:
-    item: dict[str, object] = {"record_id": "doc-1", "title": "A", "kind": "document"}
+    item: dict[str, object] = {
+        "record_id": "doc-1",
+        "title": "A",
+        "kind": "document",
+        "trust": "internal",
+    }
     item[key] = value
     return broken(citations=[item])
 
@@ -589,6 +648,15 @@ MALFORMED = [
     pytest.param(citation("record_id", 1), id="record_id not a string"),
     pytest.param(citation("title", 1), id="title not a string"),
     pytest.param(citation("kind", None), id="kind not a string"),
+    pytest.param(
+        broken(citations=[{"record_id": "d", "title": "A", "kind": "document"}]), id="trust missing"
+    ),
+    pytest.param(citation("trust", None), id="trust not a string"),
+    pytest.param(citation("trust", "trusted"), id="trust unknown"),
+    pytest.param(citation("trust", "UNTRUSTED"), id="trust upper case"),
+    pytest.param(citation("trust", "untrusted "), id="trust with trailing space"),
+    pytest.param(citation("trust", "__proto__"), id="trust inherited"),
+    pytest.param(citation("trust", "toString"), id="trust inherited method"),
     pytest.param(broken(grounding=None), id="grounding null"),
     pytest.param(broken(grounding=[1, 0, 0]), id="grounding an array"),
     pytest.param(nested("grounding", "figures", -1), id="figures negative"),
