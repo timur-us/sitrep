@@ -12,7 +12,9 @@ tests/db/test_retrieval.py runs them on the corpus; this file pins what needs no
 - a row of another advisor, which row-level security should never let through, makes
   the handler refuse instead of returning it (a second line, behind the policies);
 - the statements: each list keeps to CANDIDATES rows, the vector ones compare vectors of
-  the query's model only, and the portfolio comes from the portfolio system only.
+  the query's model only, and the portfolio comes from the portfolio system only;
+- the citations: in the cited order, with title, kind and trust, each from its own row
+  (trust never from the kind), a trust outside ADR 0010's two refused.
 """
 
 from __future__ import annotations
@@ -367,30 +369,76 @@ def test_the_portfolio_comes_from_the_portfolio_system() -> None:
     assert "d.origin = 'portfolio_system'" in queries.PORTFOLIO_REPORT
 
 
-# The citations' titles and kinds (M1 PR 12; the PR 9 handover): looked up after the loop,
-# in the advisor's own transaction, for the cited ids a tool returned.
+# The citations' titles, kinds and trust (M1 PR 12; the PR 9 handover; trust: Timur's
+# answer 2 on #35): looked up after the loop, in the advisor's own transaction, for the
+# cited ids a tool returned. Trust is each row's own column, never inferred from kind.
 
 
-def test_citations_keep_the_cited_order_with_title_and_kind() -> None:
+def test_citations_keep_the_cited_order_with_title_kind_and_trust() -> None:
     conn = FakeConnection(
         {
-            queries.CITED_DOCUMENTS: [(MINE, "doc-b", "Call notes"), (MINE, "doc-a", "Report")],
-            queries.CITED_SHEETS: [("sheet-1", "Fund sheet")],
+            queries.CITED_DOCUMENTS: [
+                (MINE, "doc-b", "Re: your statement", "untrusted"),
+                (MINE, "doc-a", "Report", "internal"),
+            ],
+            queries.CITED_SHEETS: [("sheet-1", "Fund sheet", "internal")],
         }
     )
     found = handlers.cited(conn, MINE, ["doc-a", "sheet-1", "doc-b"])
     assert found == [
-        handlers.Cited("doc-a", "Report", handlers.DOCUMENT),
-        handlers.Cited("sheet-1", "Fund sheet", handlers.PRODUCT_SHEET),
-        handlers.Cited("doc-b", "Call notes", handlers.DOCUMENT),
+        handlers.Cited("doc-a", "Report", handlers.DOCUMENT, "internal"),
+        handlers.Cited("sheet-1", "Fund sheet", handlers.PRODUCT_SHEET, "internal"),
+        handlers.Cited("doc-b", "Re: your statement", handlers.DOCUMENT, "untrusted"),
     ]
     assert conn.ran == [queries.CITED_DOCUMENTS, queries.CITED_SHEETS]
 
 
+@pytest.mark.parametrize("trust", ["internal", "untrusted"])
+def test_a_citations_trust_is_its_rows_never_its_kinds(trust: str) -> None:
+    # Planted rows the corpus does not hold (an internal mailbox-like document beside an
+    # untrusted sheet, and the reverse): the trust is the row's, whatever the kind.
+    other = "untrusted" if trust == "internal" else "internal"
+    conn = FakeConnection(
+        {
+            queries.CITED_DOCUMENTS: [(MINE, "doc-a", "A", trust)],
+            queries.CITED_SHEETS: [("sheet-1", "S", other)],
+        }
+    )
+    found = handlers.cited(conn, MINE, ["doc-a", "sheet-1"])
+    assert [(item.kind, item.trust) for item in found] == [
+        (handlers.DOCUMENT, trust),
+        (handlers.PRODUCT_SHEET, other),
+    ]
+
+
+def test_the_trust_levels_are_adr_0010s() -> None:
+    assert handlers.TRUST == frozenset({"internal", "untrusted"})
+
+
+@pytest.mark.parametrize("statement", ["documents", "sheets"])
+@pytest.mark.parametrize("trust", [None, "", "trusted", "Untrusted", "internal "])
+def test_a_trust_outside_the_two_levels_is_refused(statement: str, trust: object) -> None:
+    # The column is generated from origin (ADR 0010) and holds one of the two; anything
+    # else means the schema changed under the route: refused, never passed on or guessed.
+    rows: dict[str, list[tuple[Any, ...]]] = {
+        queries.CITED_DOCUMENTS: [(MINE, "doc-a", "A", "internal")],
+        queries.CITED_SHEETS: [("sheet-1", "S", "internal")],
+    }
+    if statement == "documents":
+        rows[queries.CITED_DOCUMENTS] = [(MINE, "doc-a", "A", trust)]
+    else:
+        rows[queries.CITED_SHEETS] = [("sheet-1", "S", trust)]
+    with pytest.raises(GuardError) as refused:
+        handlers.cited(FakeConnection(rows), MINE, ["doc-a", "sheet-1"])
+    # One fixed message, which names no value it was given.
+    assert str(refused.value) == handlers.UNKNOWN_TRUST
+    assert "trust" in handlers.UNKNOWN_TRUST
+
+
 def test_a_cited_record_gone_since_is_left_out() -> None:
-    conn = FakeConnection({queries.CITED_DOCUMENTS: [(MINE, "doc-a", "Report")]})
+    conn = FakeConnection({queries.CITED_DOCUMENTS: [(MINE, "doc-a", "Report", "internal")]})
     assert handlers.cited(conn, MINE, ["gone", "doc-a"]) == [
-        handlers.Cited("doc-a", "Report", handlers.DOCUMENT)
+        handlers.Cited("doc-a", "Report", handlers.DOCUMENT, "internal")
     ]
 
 
@@ -401,7 +449,7 @@ def test_no_citation_runs_no_statement() -> None:
 
 
 def test_the_citations_refuse_a_row_of_another_advisor() -> None:
-    conn = FakeConnection({queries.CITED_DOCUMENTS: [(OTHER, "doc-a", "Their report")]})
+    conn = FakeConnection({queries.CITED_DOCUMENTS: [(OTHER, "doc-a", "Their report", "internal")]})
     with pytest.raises(GuardError, match="another advisor"):
         handlers.cited(conn, MINE, ["doc-a"])
 
@@ -409,5 +457,8 @@ def test_the_citations_refuse_a_row_of_another_advisor() -> None:
 def test_the_citation_statements_take_the_ids_bound() -> None:
     for statement in (queries.CITED_DOCUMENTS, queries.CITED_SHEETS):
         assert "= ANY(%s)" in statement and "%s" in statement.partition("ANY(")[2], statement
-    assert queries.CITED_DOCUMENTS.startswith("SELECT d.advisor_id, d.id, d.title FROM documents d")
-    assert queries.CITED_SHEETS.startswith("SELECT s.id, s.title FROM product_sheets s")
+    # Title and trust in one statement per table, so one snapshot (as in the search).
+    assert queries.CITED_DOCUMENTS.startswith(
+        "SELECT d.advisor_id, d.id, d.title, d.trust FROM documents d"
+    )
+    assert queries.CITED_SHEETS.startswith("SELECT s.id, s.title, s.trust FROM product_sheets s")

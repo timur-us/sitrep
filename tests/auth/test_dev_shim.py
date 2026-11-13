@@ -16,6 +16,7 @@ The responses of real sessions against the database are in tests/db/test_dev_log
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 
 import anyio
@@ -137,6 +138,24 @@ def test_login_sets_a_strict_session_cookie(shim: TestClient) -> None:
     assert {"httponly", "samesite=strict", "path=/"} <= set(attributes), attributes
     assert not any(a.startswith(("domain", "max-age", "expires")) for a in attributes), attributes
     assert response.headers.get("location") is None, "the login redirects"
+
+
+def test_the_signed_in_page_links_to_the_ask_box(shim: TestClient) -> None:
+    # The advisor page (/, M1 PR 11) is where an advisor asks; the page after the login
+    # links there, same origin and relative, beside the mandates and the login.
+    response = shim.post("/dev/login", content=f"advisor={MINE.id}", headers=FORM)
+    assert response.status_code == 200, response.status_code
+    assert f"Signed in as {MINE.name}." in response.text
+    links = re.findall(r'<a href="([^"]*)">([^<]*)</a>', response.text)
+    assert links == [
+        ("/", "Ask a question"),
+        ("/api/mandates", "Your mandates"),
+        ("/dev/login", "Dev login"),
+    ], links
+    assert response.text.count("<a ") == len(links) == 3
+    # The page the link opens is the ask box.
+    page = shim.get("/")
+    assert page.status_code == 200 and 'id="question"' in page.text and 'id="ask"' in page.text
 
 
 # Identity from the session only.

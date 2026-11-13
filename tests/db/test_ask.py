@@ -6,8 +6,10 @@ scripted model client (tests/scripted_model.py), which searches and then cites w
 search returned. No socket but loopback, no key.
 
 - The slice: the demo advisor asks about the demo family and gets an answer that cites
-  their own documents, with title and kind from the database, grounding counts, no
-  proposals, the usage, the cost as an exact decimal string, the stop and the trace id.
+  their own documents, with title, kind and trust from the database, grounding counts,
+  no proposals, the usage, the cost as an exact decimal string, the stop and the trace
+  id. Every e-mail of the demo mandate is cited as untrusted, every other record of it
+  as internal (Timur's answer 2 on #35).
 - The boundary (PR 7's cross-advisor handover, at the API level): the other advisors,
   asking about the demo family, get no record id of the demo advisor's, neither in the
   response nor in anything the model was sent.
@@ -77,6 +79,7 @@ QUESTIONS = {
     "en": f"What do I need to know before the call with {DEMO.family}?",
     "de": f"Was muss ich vor dem Gespräch mit Familie {DEMO.family} wissen?",
 }
+CITATION = {"record_id", "title", "kind", "trust"}
 CONTRACT = {
     "answer",
     "citations",
@@ -194,13 +197,14 @@ def test_the_demo_advisor_gets_a_cited_answer_from_own_documents(
     assert body["proposals"] == []
     citations = body["citations"]
     assert citations, "no citation"
-    assert all(set(item) == {"record_id", "title", "kind"} for item in citations), citations
+    assert all(set(item) == CITATION for item in citations), citations
     for item in citations:
         record = item["record_id"]
         assert own_or_sheet(tables, MINE, record), f"{record} is not the demo advisor's"
         assert item["title"] == tables.title[record]
         kind = read_tools.PRODUCT_SHEET if record in tables.sheets else read_tools.DOCUMENT
         assert item["kind"] == kind
+        assert item["trust"] == tables.trust[record]
         assert f"[source: {record}]" in body["answer"]
     assert any(tables.owner.get(item["record_id"]) == MINE for item in citations)
     assert body["grounding"] == {"figures": 0, "unmatched": 0, "unknown_citations": 0}
@@ -220,6 +224,27 @@ def test_a_cited_product_sheet_is_named_as_one(start: Any, tables: Tables) -> No
     body = start(model).ask(MINE, "What does the fund sheet say?").json()
     kinds = {item["record_id"]: item["kind"] for item in body["citations"]}
     assert kinds.get(sheet) == read_tools.PRODUCT_SHEET, kinds
+    trust = {item["record_id"]: item["trust"] for item in body["citations"]}
+    assert trust.get(sheet) == tables.trust[sheet] == "internal", trust
+
+
+def test_the_demo_mandates_e_mails_are_cited_as_untrusted(start: Any, tables: Tables) -> None:
+    # Timur's answer 2 on #35: a mailbox record's title is its sender's subject line, so
+    # the citation says it is untrusted. The search keeps to the demo mandate, whose few
+    # records all fit in one search, and every record it returns is cited.
+    own = demo_records(tables)
+    model = EchoModel(DEMO.family, cite=20, arguments={"mandate_id": DEMO.id, "limit": 20})
+    response = start(model).ask(MINE, QUESTIONS["en"], mandate_id=DEMO.id)
+    assert response.status_code == 200, response.text
+    trust = {item["record_id"]: item["trust"] for item in response.json()["citations"]}
+    assert set(trust) <= own, sorted(set(trust) - own)
+    mail = {record for record in trust if tables.origin[record] == "mailbox"}
+    assert mail, "control: no e-mail of the demo mandate was cited"
+    assert set(trust) - mail, "control: no other record of the demo mandate was cited"
+    assert {record: trust[record] for record in mail} == dict.fromkeys(mail, "untrusted")
+    others = set(trust) - mail
+    assert {record: trust[record] for record in others} == dict.fromkeys(others, "internal")
+    assert trust == {record: tables.trust[record] for record in trust}
 
 
 # The boundary.
@@ -729,8 +754,14 @@ def test_the_response_passes_the_pages_reading_of_the_contract(start: Any) -> No
     # #34 (PR 11), question 1: the page accepts a response only if trace_id is 32
     # lower-case hex digits, stop is one of the four, every count is a non-negative
     # integer with unmatched <= figures, and cost_usd is a non-negative JSON number or a
-    # plain decimal string without an exponent. The real route's response passes.
-    body = start(EchoModel(DEMO.family)).ask(MINE).json()
+    # plain decimal string without an exponent; and (Timur's answer 2 on #35) every
+    # citation's trust is exactly "internal" or "untrusted". The real route's response
+    # passes.
+    body = start(EchoModel(DEMO.family, cite=20, arguments={"limit": 20})).ask(MINE).json()
+    assert body["citations"], "control: nothing cited"
+    for item in body["citations"]:
+        assert set(item) == CITATION and all(type(value) is str for value in item.values())
+        assert item["trust"] in {"internal", "untrusted"}, item["trust"]
     assert re.fullmatch(r"[0-9a-f]{32}", body["trace_id"]), body["trace_id"]
     assert body["stop"] in {"end_turn", "refusal", "budget", "max_turns"}
     counts = [*body["grounding"].values(), *body["usage"].values()]

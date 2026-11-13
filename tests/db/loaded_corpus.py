@@ -70,25 +70,30 @@ def ensure_loaded(embedder: OnnxEmbedder, out: Path) -> load.Corpus:
 
 @dataclass(frozen=True)
 class Tables:
-    """What the superuser sees: whose each document is, the sheets, every title and trust."""
+    """What the superuser sees: whose each document is, the sheets, every title, origin
+    and trust."""
 
     owner: dict[str, str]
     sheets: frozenset[str]
     trust: dict[str, str]
     title: dict[str, str]
+    origin: dict[str, str]
 
 
 def read_tables() -> Tables:
     with connect(SUPERUSER_URL) as su:
         documents = su.execute(
-            sql.SQL("SELECT id, advisor_id, trust, title FROM {}").format(table("documents"))
+            sql.SQL("SELECT id, advisor_id, origin, trust, title FROM {}").format(
+                table("documents")
+            )
         ).fetchall()
         sheets = su.execute(
-            sql.SQL("SELECT id, trust, title FROM {}").format(table("product_sheets"))
+            sql.SQL("SELECT id, origin, trust, title FROM {}").format(table("product_sheets"))
         ).fetchall()
     return Tables(
-        owner={record: advisor for record, advisor, _, _ in documents},
-        sheets=frozenset(record for record, _, _ in sheets),
+        owner={record: advisor for record, advisor, _, _, _ in documents},
+        sheets=frozenset(record for record, _, _, _ in sheets),
         trust={row[0]: row[-2] for row in documents + sheets},
         title={row[0]: row[-1] for row in documents + sheets},
+        origin={row[0]: row[-3] for row in documents + sheets},
     )
