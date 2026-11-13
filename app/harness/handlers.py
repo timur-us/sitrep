@@ -33,7 +33,9 @@ or no report.
 cited_records() gives POST /api/ask the title, kind and trust of each record an answer
 cites (M1 PR 12; trust: M1 PR 12b, Timur's answer 2 on #35): one more advisor
 transaction after the loop, for the ids a tool returned. The trust is the row's own
-generated column, never inferred from its kind, origin or id; a value outside ADR 0010's
+generated column, never inferred from its kind, origin or id, read with the title in one
+statement (one snapshot) rather than carried from the search hit (M2 may carry both in
+the provenance); a value outside ADR 0010's
 two (TRUST) means the schema changed under the route, and is refused (GuardError), never
 passed on.
 

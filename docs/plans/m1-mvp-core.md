@@ -165,7 +165,7 @@ Never in parallel:
 ### The API contract (fixed here, so the UI PRs can build ahead of their routes)
 
 All routes need the login (401 otherwise). Every non-GET route needs the shim's Origin check (403). JSON only, with `Cache-Control: no-store`.
-- **`POST /api/ask`** `{question: str (1–2000), mandate_id?: str}` → 200 with `answer`, `citations: [{record_id, title, kind}]`, `grounding: {figures, unmatched, unknown_citations}`, `proposals: [{proposal_id, tool, mandate_id, arguments}]` (empty until PR 14), `usage: {input_tokens, output_tokens}`, `cost_usd`, `stop: "end_turn"|"refusal"|"budget"|"max_turns"` and `trace_id`. Over the rate limit: 429. Without a model key or a database: 503. (PR 12)
+- **`POST /api/ask`** `{question: str (1–2000), mandate_id?: str}` → 200 with `answer`, `citations: [{record_id, title, kind}]` (amended: `trust` in each, see the amendment of answer 2 on #35 below), `grounding: {figures, unmatched, unknown_citations}`, `proposals: [{proposal_id, tool, mandate_id, arguments}]` (empty until PR 14), `usage: {input_tokens, output_tokens}`, `cost_usd`, `stop: "end_turn"|"refusal"|"budget"|"max_turns"` and `trace_id`. Over the rate limit: 429. Without a model key or a database: 503. (PR 12)
 - **`GET /api/proposals`** → `[{proposal_id, tool, mandate_id, arguments, state, created_at}]`. (PR 15)
 - **`POST /api/proposals/{id}/approve`** → `{token, expires_at}`. (PR 15)
 - **`POST /api/proposals/{id}/redeem`** `{token}` → `{state: "done", result_id}`; every refusal is the same 409. (PR 15)
@@ -183,10 +183,10 @@ Amended (Timur, 2026-11-11, answer 1 on #35): the details of `POST /api/ask` tha
   - 503 `model unavailable` (no key), `search unavailable` (no embedding model) or `database unavailable`;
   - 502 `the model call failed`;
   - 500 `the request failed` for any other failure, a row of another advisor among them.
-- **Trust in `citations`** (Timur, 2026-11-11, answer 2 on #35) comes as its own amendment, with a small PR after the cut line.
+- **Trust in `citations`** (Timur, 2026-11-11, answer 2 on #35) comes as its own amendment, with a small PR after the cut line: below, built in PR 12b.
 
 Amended (Timur, 2026-11-11, answer 2 on #35): each citation carries the record's trust, built in a small PR after the cut line (`m1/12b-citation-trust`, M1 PR 12b), so the response's citations become `citations: [{record_id, title, kind, trust}]`. Timur decided that trust comes and in which PR; the details below were derived by the agent, and his merge of that PR confirms them:
-- **`trust`** is `"internal"` or `"untrusted"`: the record's own generated column (ADR 0010), read in the same statement as its title, never inferred from its kind, origin or id. A mailbox e-mail is `untrusted`; today every other corpus record is `internal`.
+- **`trust`** is `"internal"` or `"untrusted"`: the record's own generated column (ADR 0010), read in the same statement as its title, never inferred from its kind, origin or id. It is read again after the loop, as the title is, rather than carried from the search hit, so title and trust come from one snapshot; carrying both in the tool result's provenance is M2's. A mailbox e-mail is `untrusted`; today every other corpus record is `internal`.
 - **Any other value** means the schema changed under the route. The citations' lookup refuses it as a broken boundary: 500 `the request failed`, with `guard` on the span.
 - **The page** accepts a citation only if its trust is one of the two, and renders nothing otherwise ("Unexpected response."). It shows the trust as text next to the kind.
 - **The dev login's signed-in page** links to the advisor page at `/`, beside "Your mandates".
