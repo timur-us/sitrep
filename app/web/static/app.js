@@ -9,6 +9,10 @@
 // break that rule; tests/web/test_answer.py renders hostile output in Chromium.
 //
 // The grounding counts say where a figure was found, never that it is true (PR 9).
+//
+// Each source shows its trust next to its kind, as the route sends it: the record's own
+// column, "untrusted" for an e-mail, whose title is its sender's subject line (Timur's
+// answer 2 on #35). A citation without one of the two words renders nothing.
 "use strict";
 
 (() => {
@@ -23,6 +27,7 @@
     max_turns: "Stopped early: the turn limit for this question was reached.",
   });
   const KINDS = Object.freeze({ document: "document", product_sheet: "product sheet" });
+  const TRUST = Object.freeze({ internal: "internal", untrusted: "untrusted" });
   const FAILURES = Object.freeze({
     401: "Not signed in.",
     403: "The request was refused.",
@@ -54,7 +59,9 @@
       typeof item === "object" &&
       typeof item.record_id === "string" &&
       typeof item.title === "string" &&
-      typeof item.kind === "string"
+      typeof item.kind === "string" &&
+      typeof item.trust === "string" &&
+      Object.hasOwn(TRUST, item.trust)
     );
   }
 
@@ -118,6 +125,7 @@
     entry.append(
       span("title", item.title),
       span("kind", Object.hasOwn(KINDS, item.kind) ? KINDS[item.kind] : item.kind),
+      span("trust", TRUST[item.trust]),
       span("record", item.record_id),
     );
     return entry;

@@ -30,8 +30,12 @@ get_portfolio looks the mandate up the same way, then reads its report from the
 portfolio system only, so no e-mail can pose as one; None when there is no such mandate
 or no report.
 
-cited_records() gives POST /api/ask the title and kind of each record an answer cites
-(M1 PR 12): one more advisor transaction after the loop, for the ids a tool returned.
+cited_records() gives POST /api/ask the title, kind and trust of each record an answer
+cites (M1 PR 12; trust: M1 PR 12b, Timur's answer 2 on #35): one more advisor
+transaction after the loop, for the ids a tool returned. The trust is the row's own
+generated column, never inferred from its kind, origin or id; a value outside ADR 0010's
+two (TRUST) means the schema changed under the route, and is refused (GuardError), never
+passed on.
 
 ToolFailed's kinds in TOOL_FAILURES reach the model as they are (the loop gives every
 other failure a fixed "tool_failed"); a GuardError ends the request (M1 PR 12).
@@ -70,6 +74,9 @@ RRF_K = 60
 CANDIDATES = 20
 QUERY_TOO_LONG = "query_too_long"
 FOREIGN_ROW = "a row of another advisor reached a READ handler"
+# ADR 0010's trust levels, the only values the generated column holds.
+TRUST = frozenset({"internal", "untrusted"})
+UNKNOWN_TRUST = "a cited record's trust is not one of ADR 0010's two"
 
 Key = tuple[str, str]  # (kind, record id)
 
@@ -90,29 +97,40 @@ TOOL_FAILURES = frozenset({QUERY_TOO_LONG})
 
 @dataclass(frozen=True, slots=True)
 class Cited:
-    """A record an answer cites, as POST /api/ask names it: id, title and kind."""
+    """A record an answer cites, as POST /api/ask names it: id, title, kind and trust."""
 
     record_id: str
     title: str
     kind: str
+    trust: str
+
+
+def _trusted(rows: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+    """rows, refused unless each one's last column, its trust, is one of TRUST."""
+    if any(row[-1] not in TRUST for row in rows):
+        raise GuardError(UNKNOWN_TRUST)
+    return rows
 
 
 def cited(conn: AdvisorConnection, advisor_id: str, record_ids: Sequence[str]) -> list[Cited]:
-    """The cited records' titles and kinds, in the order cited, inside an advisor
+    """The cited records' titles, kinds and trust, in the order cited, inside an advisor
     transaction. A record gone since the search is left out; a document of another
-    advisor is refused (GuardError), as in a search."""
+    advisor, or a trust outside TRUST, is refused (GuardError)."""
     if not record_ids:
         return []
     ids = list(record_ids)
     rows = _own(advisor_id, conn.execute(queries.CITED_DOCUMENTS, (ids,)).fetchall())
-    documents = {record: title for _, record, title in rows}
-    sheets = dict(conn.execute(queries.CITED_SHEETS, (ids,)).fetchall())
+    documents = {record: (title, trust) for _, record, title, trust in _trusted(rows)}
+    sheet_rows = _trusted(conn.execute(queries.CITED_SHEETS, (ids,)).fetchall())
+    sheets = {record: (title, trust) for record, title, trust in sheet_rows}
     found = []
     for record in ids:
         if record in documents:
-            found.append(Cited(record, documents[record], DOCUMENT))
+            title, trust = documents[record]
+            found.append(Cited(record, title, DOCUMENT, trust))
         elif record in sheets:
-            found.append(Cited(record, sheets[record], PRODUCT_SHEET))
+            title, trust = sheets[record]
+            found.append(Cited(record, title, PRODUCT_SHEET, trust))
     return found
 
 

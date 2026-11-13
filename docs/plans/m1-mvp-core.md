@@ -1,6 +1,6 @@
 # M1 — MVP core, local: plan
 
-Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date; PR 12: the API contract's details) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
+Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date; PR 12: the API contract's details; trust in citations, built in PR 12b) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
 
 ## Context
 
@@ -184,6 +184,12 @@ Amended (Timur, 2026-11-11, answer 1 on #35): the details of `POST /api/ask` tha
   - 502 `the model call failed`;
   - 500 `the request failed` for any other failure, a row of another advisor among them.
 - **Trust in `citations`** (Timur, 2026-11-11, answer 2 on #35) comes as its own amendment, with a small PR after the cut line.
+
+Amended (Timur, 2026-11-11, answer 2 on #35): each citation carries the record's trust, built in a small PR after the cut line (`m1/12b-citation-trust`, M1 PR 12b), so the response's citations become `citations: [{record_id, title, kind, trust}]`. Timur decided that trust comes and in which PR; the details below were derived by the agent, and his merge of that PR confirms them:
+- **`trust`** is `"internal"` or `"untrusted"`: the record's own generated column (ADR 0010), read in the same statement as its title, never inferred from its kind, origin or id. A mailbox e-mail is `untrusted`; today every other corpus record is `internal`.
+- **Any other value** means the schema changed under the route. The citations' lookup refuses it as a broken boundary: 500 `the request failed`, with `guard` on the span.
+- **The page** accepts a citation only if its trust is one of the two, and renders nothing otherwise ("Unexpected response."). It shows the trust as text next to the kind.
+- **The dev login's signed-in page** links to the advisor page at `/`, beside "Your mandates".
 
 ## Working protocol (every PR)
 

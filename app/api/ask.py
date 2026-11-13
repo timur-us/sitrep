@@ -1,7 +1,8 @@
 """POST /api/ask: one advisor question through the agent loop (M1 plan, PR 12).
 
 The API contract (docs/plans/m1-mvp-core.md): `{question, mandate_id?}` in; `answer`,
-`citations: [{record_id, title, kind}]`, `grounding: {figures, unmatched,
+`citations: [{record_id, title, kind, trust}]` (trust: Timur's answer 2 on #35, the
+record's own column, "internal" or "untrusted"), `grounding: {figures, unmatched,
 unknown_citations}`, `proposals` (empty until M1 PR 14), `usage: {input_tokens,
 output_tokens}`, `cost_usd`, `stop` and `trace_id` out. JSON only, with
 `Cache-Control: no-store` (app/http/security_headers.py sets it on every path but the
@@ -37,8 +38,9 @@ page). A request meets, in this order:
    no clock). This is no wall-clock bound: a call already running ends within the
    client's own timeouts (per phase, ADR 0012), and the tool calls of its turn still run,
    each statement without a timeout until M2 (PR 8's sec-4).
-8. The citations' titles and kinds, in one more advisor transaction
-   (handlers.cited_records()), for the ids a tool returned and the answer cites.
+8. The citations' titles, kinds and trust, in one more advisor transaction
+   (handlers.cited_records()), for the ids a tool returned and the answer cites. A trust
+   outside ADR 0010's two is a GuardError there, so 500 like a row of another advisor.
 
 A LoopError maps to STATUS by its kind, with one fixed body each: 502 for a failed model
 call, 503 for the database, 500 for every other kind. A GuardError or a lost database in
@@ -88,6 +90,8 @@ MAX_BODY = 32_768
 MAX_QUESTION = loop.MAX_QUESTION
 MAX_MANDATE_ID = loop.MAX_MANDATE_ID
 MANDATE_ID = r"^[A-Za-z0-9][A-Za-z0-9_-]*$"  # the loop's form (app/harness/loop.py)
+# Each citation's fields, in the contract's order (the plan's amendment names them).
+CITATION_FIELDS = ("record_id", "title", "kind", "trust")
 # Per advisor: requests started in any window, and one in flight.
 REQUESTS_PER_WINDOW = 10
 WINDOW_SECONDS = 60.0
@@ -342,8 +346,7 @@ def post_ask(
         {
             "answer": result.answer,
             "citations": [
-                {"record_id": item.record_id, "title": item.title, "kind": item.kind}
-                for item in citations
+                {field: getattr(item, field) for field in CITATION_FIELDS} for item in citations
             ],
             "grounding": {
                 "figures": report.figures,
