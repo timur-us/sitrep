@@ -28,6 +28,9 @@ OTHER = next(person.id for person in branding.ADVISORS if person.id != MINE)
 SEARCH = "search_client_docs"
 PORTFOLIO = "get_portfolio"
 USAGE = {"input_tokens": 5_000, "output_tokens": 400}
+# raw_case()'s question, and as the runner resolves it: the first message of a sample.
+QUESTION_RAW = "What do I need to know before the call with the {mandate.demo} family?"
+QUESTION = QUESTION_RAW.replace("{mandate.demo}", DEMO.family)
 
 
 CORPUS = generate.build()
@@ -96,7 +99,8 @@ def sample(
     stop: str = "end_turn",
     status: int = 200,
     today: datetime.date = TODAY,
-    question: str = "What do I need to know?",
+    question: str = QUESTION,
+    error: str | None = None,
 ) -> dict[str, Any]:
     """One consistent sample: one turn of tool calls (one per result, then one per error
     tool name, each refused), then the answer."""
@@ -151,14 +155,18 @@ def sample(
         "messages": messages,
         "replies": replies,
         "response": {"status": status, "body": body if status == 200 else {"detail": "x"}},
+        "error": error,
     }
 
 
-def recording(case_id: str, samples: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def recording(
+    case_id: str, samples: Iterable[Mapping[str, Any]], *, advisor_id: str = MINE
+) -> dict[str, Any]:
     return {
         "format": transcript.FORMAT,
         "case_id": case_id,
         **transcript.current(),
+        "advisor": advisor_id,
         "samples": list(samples),
     }
 
@@ -167,7 +175,7 @@ def case(
     *,
     advisor_id: str = MINE,
     lang: str = "en",
-    question: str = "What do I need to know?",
+    question: str = QUESTION,
     **expect: Any,
 ) -> scoring.Case:
     """A parsed case, built directly: expect's fields by name."""
@@ -186,6 +194,6 @@ def raw_case(case_id: str, *, advisor_id: str = MINE, **expect: Any) -> dict[str
         "id": case_id,
         "lang": "en",
         "advisor": f"{{advisor.{advisor_id}}}",
-        "question": "What do I need to know before the call with the {mandate.demo} family?",
+        "question": QUESTION_RAW,
         "expect": expect,
     }

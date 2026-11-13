@@ -89,6 +89,7 @@ def test_the_committed_eval_cases_are_valid(capsys: pytest.CaptureFixture) -> No
     if missing:
         assert code == 1 and out == "", out
     else:
+        assert code == 0 and err == "", err
         assert f"{len(cases)} cases" in out.splitlines()[-1], out
 
 

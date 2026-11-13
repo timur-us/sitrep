@@ -8,6 +8,8 @@ run offline: no key is read from the repository, no socket opens.
 
 from __future__ import annotations
 
+import asyncio
+import datetime
 import json
 import os
 import socket
@@ -19,6 +21,7 @@ import pytest
 from recorded_runs import (
     DEMO_NOTE,
     DEMO_REPORT,
+    MINE,
     OTHER,
     OTHER_RECORD,
     PORTFOLIO,
@@ -106,7 +109,9 @@ def test_a_hard_failure_fails_the_gate_at_any_rate(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
     cases = {"a": raw_case("a", advisor_id=OTHER), "b": raw_case("b")}
-    leaked = recording("a", [sample("x", [hits((DEMO_NOTE, "note"))]), sample("x")])
+    leaked = recording(
+        "a", [sample("x", [hits((DEMO_NOTE, "note"))]), sample("x")], advisor_id=OTHER
+    )
     recordings = {"a": leaked, "b": answered("b", GOOD, GOOD)}
     assert run(suite(tmp_path, cases, recordings, rate=0.5)) == 1
     out = capsys.readouterr().out
@@ -409,3 +414,162 @@ def test_the_runner_records_into_the_current_versions_directory(tmp_path: Path) 
     path = live.write(tmp_path, planted)
     assert path == tmp_path / "recorded" / PROMPT_VERSION / "a.json"
     assert json.loads(path.read_text(encoding="utf-8")) == planted
+
+
+# --- Review round (M1 PR 16) -----------------------------------------------------------
+
+
+def test_a_recording_of_another_question_or_advisor_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # T2 / F4: the recording is bound to the case's question and advisor.
+    asked = recording("a", [sample(GOOD, question="Another question?")], advisor_id=MINE)
+    assert run(suite(tmp_path / "q", {"a": raw_case("a")}, {"a": asked}, samples=1)) == 1
+    assert "a.json: $.samples[0].messages[0]: not the case's question" in capsys.readouterr().err
+    moved = answered("a", GOOD)
+    other = {"a": raw_case("a", advisor_id=OTHER)}
+    assert run(suite(tmp_path / "adv", other, {"a": moved}, samples=1)) == 1
+    assert "a.json: $.advisor: not the case's advisor" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "flags", [("--l", "--y"), ("--liv", "--yes"), ("--live", "--ye"), ("--est",), ("--ca", "a")]
+)
+def test_flags_are_never_abbreviated(flags: tuple[str, ...], tmp_path: Path) -> None:
+    # F1: argparse would read --l --y as --live --yes, past an ask rule on "--live".
+    with pytest.raises(SystemExit) as refused:
+        run(suite(tmp_path, {"a": raw_case("a")}, {}), *flags)
+    assert refused.value.code == 2
+
+
+def test_the_estimate_ignores_a_stale_recording(tmp_path: Path) -> None:
+    # F6: an edited or stale file cannot lower the figure Timur approves.
+    stale = answered("a", GOOD, GOOD) | {"prompt_sha256": "0" * 64}
+    directory = suite(tmp_path, {"a": raw_case("a")}, {"a": stale})
+    assert estimate.estimate(directory, ["a"], 2).measured_cases == 0
+    fresh = suite(tmp_path / "fresh", {"a": raw_case("a")}, {"a": answered("a", GOOD, GOOD)})
+    assert estimate.estimate(fresh, ["a"], 2).measured_cases == 1
+    short = suite(tmp_path / "short", {"a": raw_case("a")}, {"a": answered("a", GOOD)})
+    assert estimate.estimate(short, ["a"], 2).measured_cases == 0
+
+
+class Stub:
+    model = "claude-sonnet-5-5"
+
+
+@pytest.fixture
+def stubbed(no_env: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """live.main with a stub client and embedder; _ask answers per the returned script."""
+    monkeypatch.setattr(live, "build_model_client", lambda settings: Stub())
+    monkeypatch.setattr(live.ask, "build_embedder", lambda: object())
+    script: list[Any] = []
+
+    async def fake_ask(app: Any, advisor_id: str, question: str) -> tuple[int, Any]:
+        item = script.pop(0) if len(script) > 1 else script[0]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    monkeypatch.setattr(live, "_ask", fake_ask)
+    return script
+
+
+def two_cases(tmp_path: Path) -> Path:
+    return suite(tmp_path / "suite", {"a": raw_case("a"), "b": raw_case("b")}, {}, samples=2)
+
+
+def test_a_fatal_status_stops_the_run_and_writes_nothing(
+    stubbed: list[Any], tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # T3: 503 (no database, say) stops the run; nothing is recorded for that case.
+    stubbed.append((503, {"detail": "database unavailable"}))
+    directory = two_cases(tmp_path)
+    assert run(directory, "--live", "--yes") == 1
+    out, err = capsys.readouterr()
+    assert "evals: live: a sample 1/2: 503" in out, out
+    assert "stopped: the app answered 503" in err, err
+    assert not (directory / "recorded" / PROMPT_VERSION).exists()
+
+
+def test_a_failed_ask_is_recorded_and_the_run_goes_on(
+    stubbed: list[Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # T3: a 502 or a 500 is a measurement (a failed sample), not the end of the run; the
+    # run reads its date once (the clock is called once, every sample carries its day).
+    days = iter([datetime.date(2026, 11, 13), datetime.date(2026, 11, 14)])
+    monkeypatch.setattr(live, "_today", lambda: next(days))
+    stubbed.append((502, {"detail": "the model call failed"}))
+    directory = two_cases(tmp_path)
+    assert run(directory, "--live", "--yes") == 0
+    for case_id in ("a", "b"):
+        path = directory / "recorded" / PROMPT_VERSION / f"{case_id}.json"
+        written = json.loads(path.read_text(encoding="utf-8"))
+        assert [s["response"]["status"] for s in written["samples"]] == [502, 502]
+        assert {s["date"] for s in written["samples"]} == {"2026-11-13"}
+        assert written["advisor"] == MINE
+
+
+def test_an_unexpected_failure_names_its_type_only(
+    stubbed: list[Any], tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # F5: no traceback, no message (it could quote a value), and what was spent.
+    stubbed.append(RuntimeError("cnry-live-4b1c"))
+    assert run(two_cases(tmp_path), "--live", "--yes") == 1
+    out, err = capsys.readouterr()
+    assert "evals: live: stopped: RuntimeError; USD 0 spent" in err, err
+    assert "cnry-live-4b1c" not in out + err and "Traceback" not in err
+
+
+def test_the_run_stops_past_the_estimates_ceiling(
+    stubbed: list[Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # F6: a cap, the ceiling the estimate printed for these asks.
+    def costly(case: Any, **kwargs: Any) -> dict[str, Any]:
+        kwargs["spend"](Decimal(1000))
+        raise AssertionError("the spend should have stopped the run")
+
+    monkeypatch.setattr(live, "record_case", costly)
+    assert run(two_cases(tmp_path), "--live", "--yes") == 1
+    assert "past the ceiling of USD" in capsys.readouterr().err
+
+
+def test_a_reply_without_a_price_stops_the_run() -> None:
+    # F6: a cost the table cannot price is not counted as zero.
+    class Inner:
+        model = "claude-sonnet-5-5"
+
+        def create(self, **request: Any) -> dict[str, Any]:
+            return {"content": [], "usage": {"input_tokens": 1, "service_tier": "priority"}}
+
+    recorder = live.RecordingClient(Inner())
+    recorder.create(system="s", messages=[], tools=[], max_tokens=1)
+    with pytest.raises(live.LiveError, match="price"):
+        live._spent(recorder)
+
+
+def test_a_refused_login_ends_the_ask() -> None:
+    async def refusing(scope: Any, receive: Any, send: Any) -> None:
+        await send({"type": "http.response.start", "status": 403, "headers": []})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    with pytest.raises(live.LiveError, match="the dev login answered 403"):
+        asyncio.run(live._ask(refusing, MINE, "q"))
+
+
+def test_the_recorder_keeps_a_request_whose_call_failed() -> None:
+    # F3: what was sent to the provider is evidence, even when the call failed.
+    class Failing:
+        model = "claude-sonnet-5-5"
+
+        def create(self, **request: Any) -> dict[str, Any]:
+            raise RuntimeError("boom")
+
+    recorder = live.RecordingClient(Failing())
+    with pytest.raises(RuntimeError):
+        recorder.create(
+            system="s", messages=[{"role": "user", "content": "q"}], tools=[], max_tokens=1
+        )
+    assert len(recorder.requests) == 1 and recorder.replies == []

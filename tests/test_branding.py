@@ -262,7 +262,6 @@ def test_known_placeholders_pass_in_cases_only(tmp_path: Path) -> None:
     assert flagged == ["evals/cases/c.json", "evals/cases/d.json", "tests/e.py"], flagged
     # d: the placeholder passes, the bare id beside it does not.
     assert [f.line for f in findings if f.path == "evals/cases/d.json"] == [1]
-    assert len([f for f in findings if f.path == "evals/cases/d.json"]) == 1
 
 
 def test_branding_only_in_branding_py() -> None:

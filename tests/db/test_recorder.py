@@ -9,6 +9,7 @@ Only the model is scripted (tests/scripted_model.py): no key, no socket but the 
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import shutil
@@ -18,14 +19,17 @@ from typing import Any
 import pytest
 from loaded_corpus import ensure_loaded
 from repo_files import ROOT
-from scripted_model import USAGE, EchoModel
+from scripted_model import SEARCH, USAGE, EchoModel, reply, tool_use
 
+from app.api import ask
 from app.config import branding
 from app.config.settings import LOOPBACK, Settings
 from app.db import load
+from app.db.session import GuardError
 from app.embeddings.onnx import OnnxEmbedder
-from app.harness.model_client import cost_usd
+from app.harness.model_client import ModelCallError, cost_usd
 from app.harness.prompt import PROMPT_VERSION, system_prompt
+from app.main import create_app
 from app.runners import evals, live, scoring, transcript
 from app.runners.corpus import PLACEHOLDERS
 
@@ -142,3 +146,84 @@ def test_another_advisor_recorded_on_the_demo_family_reads_none_of_its_records(
     assert "no_foreign_record" not in result.failed, result
     # The scripted answer says no gap, so that scorer fails, and only that one.
     assert result.failed == ("gap",), result
+
+
+# --- Review round (M1 PR 16) -----------------------------------------------------------
+
+
+def test_a_broken_boundary_is_recorded_as_guard_and_fails_hard(
+    corpus: load.Corpus,
+    embedder: OnnxEmbedder,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # F2: a GuardError in a handler is a 500 with a fixed body; the recorder keeps the
+    # loop's error word from the request's span, and the scorer fails it hard.
+    def guarded(pool: object, embedder: object) -> dict[str, Any]:
+        def handler(advisor: object, arguments: object) -> Any:
+            raise GuardError("a row of another advisor reached a READ handler")
+
+        return {SEARCH: handler, "get_portfolio": handler}
+
+    monkeypatch.setattr(ask, "read_handlers", guarded)
+    case = committed("briefing-en")
+    recording, _, _ = record(case, embedder, settings)
+    [sample] = recording["samples"]
+    assert (sample["response"]["status"], sample["error"]) == (500, "guard")
+    result = scoring.score(case, sample)
+    assert "no_foreign_record" in result.failed and result.hard
+
+
+def test_a_failed_call_keeps_what_was_sent_and_the_run_goes_on(
+    corpus: load.Corpus, embedder: OnnxEmbedder, settings: Settings
+) -> None:
+    # F3: the second call fails after the search; the request it carried, with the tool
+    # result, is in the transcript, and no_foreign_record reads it.
+    model = EchoModel(
+        DEMO.family,
+        script=[
+            reply(tool_use("tu_1", SEARCH, {"query": DEMO.family}), stop="tool_use"),
+            ModelCallError("response", cause="unreadable"),
+        ],
+    )
+    case = committed("cross-advisor-en")
+    recording = live.record_case(
+        case,
+        samples=1,
+        client=model,
+        embedder=embedder,
+        settings=settings,
+        today=TODAY,
+        report=lambda line: None,
+    )
+    [sample] = recording["samples"]
+    assert sample["response"]["status"] == 502 and len(sample["replies"]) == 1
+    assert len(transcript.tool_texts(sample["messages"])) == 1
+    assert sample["messages"] == model.calls[-1]["messages"]
+    assert "no_foreign_record" not in scoring.score(case, sample).failed
+
+
+def test_the_route_reads_the_date_for_every_ask(
+    corpus: load.Corpus, embedder: OnnxEmbedder, settings: Settings
+) -> None:
+    # T5: one app, two asks, the clock moves between them: each prompt has its day.
+    days = iter([datetime.date(2026, 11, 13), datetime.date(2026, 11, 14)])
+    model = EchoModel(DEMO.family)
+    app = create_app(
+        settings,
+        bind_host=LOOPBACK,
+        model_client=model,
+        embedder=embedder,
+        today=lambda: next(days),
+    )
+    question = committed("briefing-en").question
+
+    async def twice() -> list[int]:
+        first, _ = await live._ask(app, DEMO.advisor_id, question)
+        second, _ = await live._ask(app, DEMO.advisor_id, question)
+        return [first, second]
+
+    assert asyncio.run(live._served(app, twice)) == [200, 200]
+    dates = [call["system"] for call in model.calls]
+    assert dates[:2] == [system_prompt(datetime.date(2026, 11, 13))] * 2
+    assert dates[2:] == [system_prompt(datetime.date(2026, 11, 14))] * 2

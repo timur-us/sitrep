@@ -303,6 +303,14 @@ def test_only_the_two_read_tools_are_offered() -> None:
     ]
 
 
+def test_every_request_of_a_request_names_the_same_date() -> None:
+    # Review finding T11: the date is on every call of a turn, not the first only.
+    client = ScriptedClient(response(SEARCH, stop="tool_use"), response(text("Done.")))
+    run(client)
+    assert len(client.calls) == 2
+    assert {call["system"] for call in client.calls} == {prompt.system_prompt(TODAY)}
+
+
 def test_a_request_carries_exactly_the_contract_fields() -> None:
     client = ScriptedClient(response(text("ok")))
     run(client)
@@ -612,7 +620,11 @@ def test_v2_names_the_date_once_and_asks_for_no_markdown() -> None:
     assert rendered == template.replace(prompt.TODAY, "2026-11-13")
     assert "Today's date is 2026-11-13." in rendered
     assert "no Markdown formatting" in rendered
-    assert "past" in rendered and "gap" in rendered
+    # The one sentence beyond Timur's two (review finding S6, a question on the PR).
+    assert (
+        "A meeting, call or deadline in the records that lies before today, with no later"
+        " record that it took place, is a gap: name it as one." in rendered
+    )
     # Another day, another prompt text; the same template hash.
     assert prompt.system_prompt(TODAY + datetime.timedelta(days=1)) != rendered
 
