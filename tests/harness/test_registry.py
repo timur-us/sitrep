@@ -901,6 +901,7 @@ OVERRIDES = {
     ),
     "a helper method": lambda self: None,
     "a property": property(lambda self: 1),
+    "__hash__": lambda self: 0,
 }
 
 
