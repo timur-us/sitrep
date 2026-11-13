@@ -35,20 +35,27 @@ is refused as `extra_forbidden`, since every model forbids extra keys.
   datetime.date, a Literal of str, int or bool, a tuple of reviewed types (tuple[X, ...]
   or fixed), X | None, or a nested frozen model held to the same rules. Its metadata
   holds Field constraints only (min and max length, ge, gt, le, lt, multiple_of,
-  pattern, strict). Its Field sets nothing but a default of a reviewed type, a
-  description, title, examples and aliases. The model's config sets extra and frozen
-  only, and its class body holds fields, model_config and a docstring: no method, no
-  property, no validator, serializer or computed field. So a model cannot rewrite its
+  pattern, strict). Its Field sets nothing but a default of a reviewed type that its
+  own field accepts (checked strictly: pydantic does not validate defaults), a
+  description, title, examples and plain-name aliases (no AliasPath or AliasChoices,
+  which validate other keys than the schema shows). The model's config sets extra and
+  frozen only. Its metaclass is pydantic's, every base is a pydantic model (a mixin's
+  method would win over BaseModel's), and every own namespace holds only what Python
+  and pydantic write there (CLASS_NAMESPACE): no method, descriptor, property, class
+  attribute, validator, serializer or computed field. So a model cannot rewrite its
   input (a before, after, wrap or plain validator, on a field or the model, or a
-  method such as model_validate) or show another schema than it validates
-  (WithJsonSchema, SkipJsonSchema, json_schema_extra, a RootModel, a schema hook).
+  method such as model_validate, however it is bound) or show another schema than it
+  validates (WithJsonSchema, SkipJsonSchema, json_schema_extra, a RootModel, a schema
+  hook).
 
 validate_call() caps the raw arguments before pydantic sees them (M1 PR 13; PR 6
-sec-11, PR 8 sec-9): nested deeper than MAX_DEPTH containers (`too_deep`), larger than
-MAX_ARGUMENT_BYTES as compact UTF-8 JSON (`too_large`), or a key or a text holding a
+sec-11, PR 8 sec-9), in this order: nested deeper than MAX_DEPTH containers
+(`too_deep`); not JSON, such as a set, bytes or NaN (`not_json`); larger than
+MAX_ARGUMENT_BYTES as compact UTF-8 JSON (`too_large`); a key or a text holding a
 control character (`control_character`: C0, DEL and C1, except tab, LF and CR, which an
-e-mail body needs; CR and LF in recipients are M2's). Identity keys are still named
-beside a cap.
+e-mail body needs). Identity keys are still named beside a cap. Until M2 these pass:
+CR and LF in recipients, a subject or a title; bidi, zero-width and tag characters;
+U+2028 and U+2029; private-use characters (the plan, "Left out of M1").
 
 What this does not see: a handler that ignores its validated arguments; a field with a
 harmless name and a harmful meaning. Row-level security is the boundary; the registry
@@ -62,11 +69,20 @@ import json
 import re
 import types
 import unicodedata
+from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
-from pydantic import AliasChoices, AliasPath, BaseModel, RootModel, Strict, ValidationError
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    RootModel,
+    Strict,
+    TypeAdapter,
+    ValidationError,
+)
 from pydantic.fields import FieldInfo
 
 from app.harness.context import Untrusted
@@ -157,6 +173,7 @@ MAX_ARGUMENT_BYTES = 32 * 1024  # compact JSON, UTF-8
 TOO_DEEP = f"the arguments nest deeper than {MAX_DEPTH} levels"
 TOO_LARGE = f"the arguments are larger than {MAX_ARGUMENT_BYTES // 1024} KiB as JSON"
 CONTROL_CHARACTER = "a key or a text holds a control character"
+NOT_JSON = "the arguments are not JSON"
 TEXT_CONTROLS = frozenset("\t\n\r")  # the control characters a text may hold
 
 # The closed world of argument models (M1 PR 13).
@@ -182,6 +199,41 @@ REVIEWED_FIELD_ATTRIBUTES = frozenset(
     }
 )
 REVIEWED_CONFIG = frozenset({"extra", "frozen"})
+# What a model's own class may hold in its namespace: what Python and pydantic 2.14 write
+# there (measured on the MVP models), model_config and the docstring. Fields are not in
+# it: pydantic takes their defaults out. Anything else, a method, a descriptor, a class
+# attribute, is refused, so a model cannot rewrite its input or show another schema.
+CLASS_NAMESPACE = frozenset(
+    {
+        "__module__",
+        "__qualname__",
+        "__doc__",
+        "__annotations__",
+        "__firstlineno__",
+        "__static_attributes__",
+        "__abstractmethods__",
+        "_abc_impl",
+        "__weakref__",
+        "__dict__",
+        "__class_vars__",
+        "__private_attributes__",
+        "__signature__",
+        "__pydantic_complete__",
+        "__pydantic_computed_fields__",
+        "__pydantic_core_schema__",
+        "__pydantic_custom_init__",
+        "__pydantic_decorators__",
+        "__pydantic_extra_info__",
+        "__pydantic_fields__",
+        "__pydantic_generic_metadata__",
+        "__pydantic_parent_namespace__",
+        "__pydantic_post_init__",
+        "__pydantic_serializer__",
+        "__pydantic_setattr_handlers__",
+        "__pydantic_validator__",
+        "model_config",
+    }
+)
 _DECORATOR_KINDS = (
     "validators",
     "field_validators",
@@ -343,7 +395,28 @@ def _field_info_problems(info: FieldInfo, where: str) -> list[str]:
         problems.append(f"{where}: Field(json_schema_extra=...) is not reviewed")
     if "default" in chosen and not _reviewed_default(info.default):
         problems.append(f"{where}: a default of type {type(info.default).__name__} is not reviewed")
+    aliases = (info.alias, info.validation_alias, info.serialization_alias)
+    if any(alias is not None and type(alias) is not str for alias in aliases):
+        # An AliasPath or AliasChoices validates other keys than the schema shows.
+        problems.append(f"{where}: an alias other than a plain name is refused")
     return problems + _metadata_problems(info.metadata, where)
+
+
+def _default_problems(field: FieldInfo, where: str) -> list[str]:
+    """A default that its own field would refuse: pydantic does not validate defaults, so
+    it would reach the handler unchecked. The value is not named."""
+    if "default" not in (getattr(field, "_attributes_set", None) or {}):
+        return []
+    if not _reviewed_default(field.default):
+        return []  # reported by _field_info_problems
+    annotation = field.annotation
+    if field.metadata:
+        annotation = Annotated[(annotation, *field.metadata)]  # type: ignore[valid-type]
+    try:
+        TypeAdapter(annotation).validate_python(field.default, strict=True)
+    except Exception:  # noqa: BLE001 - any failure to fit is the same refusal
+        return [f"{where}: the default does not fit its own field"]
+    return []
 
 
 def _metadata_problems(metadata: list[Any] | tuple[Any, ...], where: str) -> list[str]:
@@ -395,22 +468,28 @@ def _type_problems(annotation: object, where: str) -> list[str]:
     return problems
 
 
-def _own_methods(model: type[BaseModel]) -> list[str]:
-    """Names the model's own classes define as functions, methods or descriptors."""
-    found = []
+def _class_problems(model: type[BaseModel]) -> list[str]:
+    """The model's classes: pydantic's metaclass, no base that is not a pydantic model
+    (a mixin's method would win over BaseModel's), and nothing in any own namespace
+    beyond CLASS_NAMESPACE (pydantic's own __hash__ for a frozen model aside)."""
+    name = model.__name__
+    problems = []
+    if type(model) is not type(BaseModel):
+        problems.append(f"{name}: a metaclass other than pydantic's is refused")
     for cls in model.__mro__:
-        if cls in (BaseModel, RootModel, object) or not issubclass(cls, BaseModel):
+        if cls in (BaseModel, RootModel, object):
             continue
-        for name, value in vars(cls).items():
-            made_by_pydantic = getattr(value, "__module__", "") or ""
-            if name == "__hash__" and made_by_pydantic.startswith("pydantic."):
+        if not (isinstance(cls, type) and issubclass(cls, BaseModel)):
+            problems.append(f"{name}: inherits from {cls.__qualname__}, not a pydantic model")
+            continue
+        for attribute, value in vars(cls).items():
+            if attribute in CLASS_NAMESPACE:
+                continue
+            made_by = getattr(value, "__module__", "") or ""
+            if attribute == "__hash__" and made_by.startswith("pydantic."):
                 continue  # the hash pydantic writes for a frozen model
-            descriptor = isinstance(value, classmethod | staticmethod | property)
-            # A validator or serializer sits in the class body behind pydantic's proxy.
-            proxy = type(value).__name__ == "PydanticDescriptorProxy"
-            if descriptor or proxy or (callable(value) and not isinstance(value, type)):
-                found.append(name)
-    return sorted(set(found))
+            problems.append(f"{name}: defines {attribute}, only fields may")
+    return problems
 
 
 def _closed_world_problems(model: type[BaseModel]) -> list[str]:
@@ -428,11 +507,12 @@ def _closed_world_problems(model: type[BaseModel]) -> list[str]:
     unreviewed = sorted(set(model.model_config) - REVIEWED_CONFIG)
     if unreviewed:
         problems.append(f"{name}: model_config {unreviewed} is not reviewed (extra, frozen only)")
-    problems += [f"{name}: defines {method}, only fields may" for method in _own_methods(model)]
+    problems += _class_problems(model)
     for field_name, field in model.model_fields.items():
         where = f"{name}.{field_name}"
         problems += _field_info_problems(field, where)
         problems += _type_problems(field.annotation, where)
+        problems += _default_problems(field, where)
     return problems
 
 
@@ -475,12 +555,13 @@ def _identity_keys(arguments: object) -> list[tuple[str | int, ...]]:
 
 
 def _cap_errors(arguments: object) -> list[CallError]:
-    """The caps on raw arguments, in order: depth, then size, then control characters.
-    Iterative, and it stops below MAX_DEPTH, so any depth is safe to inspect."""
-    stack: list[tuple[tuple[str | int, ...], object, int]] = [((), arguments, 1)]
+    """The caps on raw arguments, in order: depth, then JSON and size, then control
+    characters. Iterative and linear (a queue), and it stops below MAX_DEPTH, so any
+    depth and any width is safe to inspect."""
+    queue: deque[tuple[tuple[str | int, ...], object, int]] = deque([((), arguments, 1)])
     texts: list[tuple[tuple[str | int, ...], str]] = []
-    while stack:
-        loc, node, depth = stack.pop(0)
+    while queue:
+        loc, node, depth = queue.popleft()
         if isinstance(node, dict | list | tuple):
             if depth > MAX_DEPTH:
                 return [CallError("too_deep", loc, TOO_DEEP)]
@@ -488,13 +569,15 @@ def _cap_errors(arguments: object) -> list[CallError]:
             for key, value in items:
                 if isinstance(node, dict) and isinstance(key, str):
                     texts.append(((*loc, key), key))
-                stack.append(((*loc, key), value, depth + 1))
+                queue.append(((*loc, key), value, depth + 1))
         elif isinstance(node, str):
             texts.append((loc, node))
     try:
-        sent = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"))
+        sent = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     except (TypeError, ValueError):
-        sent = ""  # not JSON (a set, bytes): pydantic refuses it by type
+        # A set, bytes, an object or NaN: the loop sends JSON only, so this fails closed
+        # for any other caller (pydantic would turn bytes into a str unchecked).
+        return [CallError("not_json", (), NOT_JSON)]
     if len(sent.encode("utf-8", "surrogatepass")) > MAX_ARGUMENT_BYTES:
         return [CallError("too_large", (), TOO_LARGE)]
     found = {loc for loc, text in texts if _has_control(text)}

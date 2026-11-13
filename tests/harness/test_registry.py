@@ -925,6 +925,7 @@ OVERRIDES = {
     "a partialmethod": functools.partialmethod(classmethod(lambda cls, obj, **kw: obj)),
     "a cached property": functools.cached_property(lambda self: 1),
     "a class attribute": ClassVar[int],
+    "__pydantic_init_subclass__": classmethod(lambda cls, **kwargs: None),
 }
 
 
@@ -1226,8 +1227,9 @@ def test_a_class_config_is_refused() -> None:
         (Annotated[str, Field(max_length=2)], "long"),
         (tuple[str, ...], ("a", 1)),
         (str, Colour.RED),
+        (int, True),
     ],
-    ids=["literal", "bound", "pattern", "length", "tuple item", "enum member"],
+    ids=["literal", "bound", "pattern", "length", "tuple item", "enum member", "bool for int"],
 )
 def test_a_default_that_breaks_its_field_is_refused(annotation: Any, default: Any) -> None:
     # sec-3 (measured: Literal["note"] = "send" registered and was handed on).
