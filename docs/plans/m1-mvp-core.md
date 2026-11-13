@@ -60,12 +60,12 @@ The two paragraphs above are Timur's decision. The rest of this section **was de
   - the draft to an address outside the mandate (sec-2).
 
   A committed case without a recording fails the gate, so these cases cannot sit in PR 16 or PR 17 ahead of their tools. PR 14 adds them and raises both gates' `min_cases` to match.
-- **PR 14 records both suites again, at `v2`** (`v3` since the amendment of 2026-11-13). It raises `PROMPT_VERSION` to `v2` and adds two tools to the registry, so the stale check fails every `v1` recording. PR 14 therefore carries:
+- **PR 14 records both suites again, at `v2`** (`v3` since the amendment of 2026-11-13). It raises `PROMPT_VERSION` to `v2` (`v3`) and adds two tools to the registry, so the stale check fails every `v1` recording. PR 14 therefore carries:
   - the cases above;
   - a second recording of both suites by Timur, after the agent's cost estimate. This is his third live run in all.
 
   Until those recordings are committed, PR 14's `evals` and `redteam` jobs stay red, and the PR stays a draft.
-- **The `v1` recordings stay in the repository** as evidence (since the amendment of 2026-11-13 there are none: the first recordings are `v2`, and PR 14's `v3` ones join them), in `evals/recorded/v1/` and its red-team counterpart. The gates score only the current prompt version's directory; ADR 0014 (PR 16) fixes that rule. `redteam/results/m1.md` keeps the `v1` read-path rate and adds the `v2` rate. **M2 measures against the `v2` rate,** because M2 hardens the full tool set.
+- **The `v1` recordings stay in the repository** as evidence (since the amendment of 2026-11-13 there are none: the first recordings are `v2`, and PR 14's `v3` ones join them), in `evals/recorded/v1/` and its red-team counterpart. The gates score only the current prompt version's directory; ADR 0014 (PR 16) fixes that rule. `redteam/results/m1.md` keeps the `v1` read-path rate and adds the `v2` rate (`v3`). **M2 measures against the `v2` rate** (`v3`, amendment of 2026-11-13), because M2 hardens the full tool set.
 - **PR 13 merges after PR 17 and before PR 14,** and it must leave `registry.schema()` unchanged. If it changes the schema, it has to record again as well.
 - **The database chain** becomes 3 → 7 → 8 → 12 → 16's live step → 17 → 14 (with the `v2` recording) → 15 → 18.
 - **Timur's Bash-side guard decision** (before PR 17) is now due about 24.5 hours in, after PR 16.

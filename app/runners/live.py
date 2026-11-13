@@ -250,15 +250,16 @@ def record_sample(
         "response": {"status": status, "body": body},
         "error": errors.kind,
         "_tools_sha256": tools.pop() if tools else None,
-        "_cost": _spent(recorder),
+        "_spent": _spent(recorder),
     }
 
 
-def _spent(recorder: RecordingClient) -> Decimal:
-    """What the sample's answered calls cost, from their usage. A failed call may have
-    billed too; its cost is not known (ADR 0012). A usage the table cannot price stops
-    the run rather than count as nothing (review finding F6)."""
-    total = Decimal(0)
+def _spent(recorder: RecordingClient) -> tuple[Decimal, int]:
+    """What the sample's answered calls cost, from their usage, and how many replies the
+    price table cannot price. A failed call may have billed too; its cost is not known
+    (ADR 0012). The caller counts the priced part, then stops the run on an unpriced
+    one rather than count it as nothing (review finding F6)."""
+    total, unpriced = Decimal(0), 0
     for reply in recorder.replies:
         usage = reply.get("usage")
         if not isinstance(usage, dict):
@@ -266,8 +267,8 @@ def _spent(recorder: RecordingClient) -> Decimal:
         try:
             total += cost_usd(recorder.model, usage)
         except PriceUnknown:
-            raise LiveError("a reply's usage has no price in the table") from None
-    return total
+            unpriced += 1
+    return total, unpriced
 
 
 def record_case(
@@ -288,7 +289,10 @@ def record_case(
         sample = record_sample(
             case, client=client, embedder=embedder, settings=settings, today=today
         )
-        spend(sample.pop("_cost"))
+        cost, unpriced = sample.pop("_spent")
+        spend(cost)
+        if unpriced:
+            raise LiveError(f"a reply's usage has no price in the table ({case.id})")
         status = sample["response"]["status"]
         body = sample["response"]["body"] if isinstance(sample["response"]["body"], dict) else {}
         report(
@@ -296,7 +300,7 @@ def record_case(
             f" {body.get('stop', '-')} USD {body.get('cost_usd', '-')}"
         )
         if status in FATAL:
-            raise LiveError(f"the app answered {status}")
+            raise LiveError(f"the app answered {status} ({case.id}, not written)")
         taken.append(sample)
     hashes = {sample.pop("_tools_sha256") for sample in taken} - {None}
     if len(hashes) > 1:

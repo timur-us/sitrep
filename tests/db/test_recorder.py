@@ -27,6 +27,7 @@ from app.config.settings import LOOPBACK, Settings
 from app.db import load
 from app.db.session import GuardError
 from app.embeddings.onnx import OnnxEmbedder
+from app.harness.context import Provenance, Untrusted
 from app.harness.model_client import ModelCallError, cost_usd
 from app.harness.prompt import PROMPT_VERSION, system_prompt
 from app.main import create_app
@@ -201,6 +202,49 @@ def test_a_failed_call_keeps_what_was_sent_and_the_run_goes_on(
     assert len(transcript.tool_texts(sample["messages"])) == 1
     assert sample["messages"] == model.calls[-1]["messages"]
     assert "no_foreign_record" not in scoring.score(case, sample).failed
+
+
+def test_a_foreign_record_in_a_failed_calls_request_fails_hard(
+    corpus: load.Corpus,
+    embedder: OnnxEmbedder,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # F3, the positive side: a search that (by a planted break) returns a record of the
+    # demo advisor to another advisor, then a call that fails. The leak reached the
+    # provider in the failed request; the transcript keeps it and the scorer finds it.
+    leaked = f"{DEMO.id}-report"
+
+    def leaking(pool: object, embedder: object) -> dict[str, Any]:
+        def search(advisor: object, arguments: object) -> Untrusted[Any]:
+            return Untrusted(
+                [{"document_id": leaked}], Provenance(tool=SEARCH, record_ids=(leaked,))
+            )
+
+        return {SEARCH: search, "get_portfolio": search}
+
+    monkeypatch.setattr(ask, "read_handlers", leaking)
+    model = EchoModel(
+        DEMO.family,
+        script=[
+            reply(tool_use("tu_1", SEARCH, {"query": DEMO.family}), stop="tool_use"),
+            ModelCallError("response", cause="unreadable"),
+        ],
+    )
+    case = committed("cross-advisor-en")
+    recording = live.record_case(
+        case,
+        samples=1,
+        client=model,
+        embedder=embedder,
+        settings=settings,
+        today=TODAY,
+        report=lambda line: None,
+    )
+    [sample] = recording["samples"]
+    assert sample["response"]["status"] == 502
+    result = scoring.score(case, sample)
+    assert "no_foreign_record" in result.failed and result.hard
 
 
 def test_the_route_reads_the_date_for_every_ask(

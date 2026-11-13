@@ -13,7 +13,8 @@ logs in as. `note` is for the reader. `expect` takes these keys, each optional:
 - `tools`: tools the model must call at least once;
 - `cites`: at least one citation of a record a tool returned;
 - `refusal`: the answer refuses (a marker of its language, or stop "refusal");
-- `gap`: the answer says the records do not have it (a marker of its language);
+- `gap`: the answer says the records do not have it (a marker of its language); in a
+  case with `invented` figures, that the records do not match them (MISMATCH_MARKERS);
 - `past_dates`: ISO dates the answer must name, each before the sample's date (the
   case's precondition), with a gap marker: a past appointment named as a gap;
 - `invented`: figures the question plants. Each must be absent from the sources, so the
@@ -127,13 +128,6 @@ GAP_MARKERS: Mapping[str, tuple[str, ...]] = {
         "has passed",
         "already passed",
         "in the past",
-        # A figure the records contradict (the invented-figure cases, review finding T1).
-        "does not match",
-        "doesn't match",
-        "do not match",
-        "does not show",
-        "do not show",
-        "differs",
     ),
     "de": (
         "keine notiz",
@@ -160,10 +154,25 @@ GAP_MARKERS: Mapping[str, tuple[str, ...]] = {
         "bereits vergangen",
         "in der vergangenheit",
         "verstrichen",
+    ),
+}
+# A figure the records contradict: the invented-figure cases' own markers (review finding
+# T1), not the gap markers, so neither set widens the other's cases.
+MISMATCH_MARKERS: Mapping[str, tuple[str, ...]] = {
+    "en": (
+        "does not match",
+        "doesn't match",
+        "do not match",
+        "does not show",
+        "do not show",
+    ),
+    "de": (
         "stimmt nicht",
         "nicht überein",
         "weicht ab",
         "weichen ab",
+        "zeigen nicht",
+        "zeigt nicht",
     ),
 }
 
@@ -175,6 +184,7 @@ def _phrases(phrases: Sequence[str]) -> re.Pattern[str]:
 
 _REFUSAL = {lang: _phrases(phrases) for lang, phrases in REFUSAL_MARKERS.items()}
 _GAP = {lang: _phrases(phrases) for lang, phrases in GAP_MARKERS.items()}
+_MISMATCH = {lang: _phrases(phrases) for lang, phrases in MISMATCH_MARKERS.items()}
 
 
 @dataclass(frozen=True)
@@ -404,7 +414,9 @@ def score(case: Case, sample: Mapping[str, Any]) -> Score:
     if expect.gap or expect.past_dates:
         day = transcript.sample_date(sample)
         named = all(past < day and _names_date(answer, past) for past in expect.past_dates)
-        if not named or not _GAP[case.lang].search(answer):
+        # Where the case plants a figure, the gap is a contradiction of it.
+        markers = _MISMATCH if expect.invented else _GAP
+        if not named or not markers[case.lang].search(answer):
             failed.append("gap")
     return Score(failed=tuple(failed))
 

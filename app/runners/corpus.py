@@ -437,6 +437,14 @@ def _score(suite: Suite, directory: Path, gate: Gate, cases: dict[str, Any]) -> 
             continue
         found = transcript.check(recording, case_id, gate.samples)
         if not found:
+            # A broken boundary first: before any model call it leaves no messages, and
+            # the binding would report a question mismatch instead.
+            found += [
+                f"$.samples[{index}]: the request ended at a broken boundary (guard)"
+                for index, sample in enumerate(recording["samples"])
+                if sample["error"] == scoring.GUARD
+            ]
+        if not found:
             found += scoring.bound(case, recording)
         if not found:
             for index, sample in enumerate(recording["samples"]):

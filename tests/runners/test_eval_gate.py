@@ -13,6 +13,8 @@ import datetime
 import json
 import os
 import socket
+import subprocess
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -31,11 +33,12 @@ from recorded_runs import (
     recording,
     sample,
 )
+from repo_files import ROOT
 
 from app.config.settings import ENV_PREFIX, KEY_VARIABLE, env_name
 from app.harness import loop
 from app.harness.prompt import PROMPT_VERSION
-from app.runners import estimate, evals, live
+from app.runners import estimate, evals, live, scoring
 
 REPORT = "Gesamtvermögen: 5.922.761,95 EUR"
 GOOD = f"Total EUR 5,922,761.95 [source: {DEMO_REPORT}]."
@@ -432,6 +435,40 @@ def test_a_recording_of_another_question_or_advisor_fails(
     assert "a.json: $.advisor: not the case's advisor" in capsys.readouterr().err
 
 
+def test_a_guard_before_any_model_call_is_named_as_such(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # Second security pass, finding 4: a GuardError in the route's first transaction
+    # leaves no messages; the gate names the broken boundary, not a question mismatch.
+    broken = sample("", status=500, error="guard")
+    broken["messages"] = []
+    broken["replies"] = []
+    planted = recording("a", [broken])
+    assert run(suite(tmp_path, {"a": raw_case("a")}, {"a": planted}, samples=1)) == 1
+    err = capsys.readouterr().err
+    assert "a.json: $.samples[0]: the request ended at a broken boundary (guard)" in err, err
+    assert "not the case's question" not in err
+
+
+def test_an_unpriced_reply_still_counts_what_was_priced(
+    stubbed: list[Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    # Second security pass, finding 2: the priced replies of the stopping sample count.
+    class Mixed:
+        model = "claude-sonnet-5-5"
+
+    recorder = live.RecordingClient(Mixed())
+    recorder.replies = [
+        {"usage": {"input_tokens": 1_000_000, "output_tokens": 0}},
+        {"usage": {"input_tokens": 1, "service_tier": "priority"}},
+    ]
+    total, unpriced = live._spent(recorder)
+    assert (total, unpriced) == (Decimal(2), 1)
+
+
 @pytest.mark.parametrize(
     "flags", [("--l", "--y"), ("--liv", "--yes"), ("--live", "--ye"), ("--est",), ("--ca", "a")]
 )
@@ -520,34 +557,83 @@ def test_an_unexpected_failure_names_its_type_only(
     assert "cnry-live-4b1c" not in out + err and "Traceback" not in err
 
 
-def test_the_run_stops_past_the_estimates_ceiling(
+def test_the_run_stops_one_cent_past_the_estimates_ceiling(
     stubbed: list[Any],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture,
 ) -> None:
-    # F6: a cap, the ceiling the estimate printed for these asks.
+    # F6: the cap is the ceiling --estimate prints for these asks (2 cases x 2 samples):
+    # spending exactly it goes on, a cent more stops the run.
+    ceiling = estimate.ceiling_per_ask() * 2 * 2
+    costs = iter([ceiling, Decimal("0.01")])
+
     def costly(case: Any, **kwargs: Any) -> dict[str, Any]:
-        kwargs["spend"](Decimal(1000))
-        raise AssertionError("the spend should have stopped the run")
+        kwargs["spend"](next(costs))
+        return answered(case.id, GOOD)
 
     monkeypatch.setattr(live, "record_case", costly)
-    assert run(two_cases(tmp_path), "--live", "--yes") == 1
-    assert "past the ceiling of USD" in capsys.readouterr().err
+    directory = two_cases(tmp_path)
+    assert run(directory, "--live", "--yes") == 1
+    err = capsys.readouterr().err
+    assert f"past the ceiling of USD {ceiling:.2f}" in err, err
+    assert (directory / "recorded" / PROMPT_VERSION / "a.json").is_file()  # within it
+    assert not (directory / "recorded" / PROMPT_VERSION / "b.json").exists()
+    # The same figure the estimate prints.
+    printed = estimate.estimate(directory, ["a", "b"], 2).ceiling_usd
+    assert printed == ceiling.quantize(Decimal("0.01"), "ROUND_CEILING")
 
 
-def test_a_reply_without_a_price_stops_the_run() -> None:
-    # F6: a cost the table cannot price is not counted as zero.
-    class Inner:
-        model = "claude-sonnet-5-5"
+def test_the_runners_entry_point_logs_a_failure_by_its_type(tmp_path: Path) -> None:
+    # F5: python -m app.runners.evals installs the entry point's log config and hooks,
+    # so a failure outside live.main's own guard shows its type, not its text.
+    directory = suite(tmp_path, {"a": raw_case("a")}, {})
+    canary = "cnry-entry-9d2e"
+    program = (
+        "import runpy, sys\n"
+        "from app.runners import estimate\n"
+        "def boom(*args, **kwargs):\n"
+        f"    raise RuntimeError({canary!r})\n"
+        "estimate.estimate = boom\n"
+        f"sys.argv = ['evals', '--estimate', '--dir', {str(directory)!r}]\n"
+        "runpy.run_module('app.runners.evals', run_name='__main__')\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-P", "-c", program],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=ROOT,
+        check=False,
+    )
+    assert done.returncode != 0
+    assert "RuntimeError" in done.stderr, done.stderr
+    assert canary not in done.stdout + done.stderr
+    assert "Traceback" not in done.stderr
 
-        def create(self, **request: Any) -> dict[str, Any]:
-            return {"content": [], "usage": {"input_tokens": 1, "service_tier": "priority"}}
 
-    recorder = live.RecordingClient(Inner())
-    recorder.create(system="s", messages=[], tools=[], max_tokens=1)
-    with pytest.raises(live.LiveError, match="price"):
-        live._spent(recorder)
+def test_a_reply_without_a_price_stops_the_run_after_counting_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # F6: a cost the table cannot price is not counted as zero, and the priced part of
+    # the same sample still counts.
+    def priced_and_not(case: Any, **kwargs: Any) -> dict[str, Any]:
+        return sample(GOOD) | {"_spent": (Decimal(2), 1), "_tools_sha256": None}
+
+    monkeypatch.setattr(live, "record_sample", priced_and_not)
+    spent: list[Decimal] = []
+    with pytest.raises(live.LiveError, match="no price"):
+        live.record_case(
+            scoring.Case("a", "en", MINE, "q", scoring.Expect()),
+            samples=1,
+            client=Stub(),
+            embedder=object(),
+            settings=object(),
+            today=datetime.date(2026, 11, 13),
+            report=lambda line: None,
+            spend=spent.append,
+        )
+    assert spent == [Decimal(2)]
 
 
 def test_a_refused_login_ends_the_ask() -> None:
