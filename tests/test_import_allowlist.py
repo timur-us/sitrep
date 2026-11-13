@@ -27,21 +27,24 @@ ALLOWED = frozenset(
         "anthropic",
         "app",
         "argparse",
-        # app/main.py sets the loop's exception handler (M1 PR 5); the connecting and
-        # serving calls of asyncio stay banned below.
+        # app/main.py sets the loop's exception handler (M1 PR 5), and the live recorder
+        # drives the app over ASGI in process (app/runners/live.py, M1 PR 16); the
+        # connecting and serving calls of asyncio stay banned below.
         "asyncio",
         "collections",
         "contextlib",
-        # app/db/load.py only: the generator's ORIGIN, trust_for, LANGS and paths
+        # app/db/load.py: the generator's ORIGIN, trust_for, LANGS and paths
         # (data/synthetic/generate.py, standard library and branding only; ADR 0010).
-        # The image carries no data/, and no request path imports the loader.
+        # app/runners/scoring.py: which advisor owns each record, for the eval scorer
+        # (ADR 0014). The image carries no data/, and no request path imports either.
         "data",
         "dataclasses",
         # app/harness/model_client.py: the cost, exact to the table's cents; the number
         # guard's figures (app/harness/grounding.py, app/harness/context.py).
         "decimal",
         # app/harness/mvp_tools.py: the follow-up's due date; the number guard's dates
-        # (app/harness/grounding.py). No clock is read in app/.
+        # (app/harness/grounding.py); the prompt's date (app/harness/prompt.py). The date
+        # is read from the clock in two files only (CLOCK_FILES, M1 PR 16).
         "datetime",
         "enum",
         "errno",
@@ -224,10 +227,15 @@ EMBEDDER_FILE = "app/embeddings/onnx.py"
 MODEL_CLIENT_FILE = "app/harness/model_client.py"
 # The loader: the one file that reads the synthetic corpus's generator (ADR 0010).
 LOADER_FILE = "app/db/load.py"
-# Modules that one file alone may import.
-SINGLE_FILE = {
-    # The loop's exception handler, set in the lifespan; the hooks (M1 PR 5).
-    "asyncio": "app/main.py",
+# The live recorder (ADR 0014): it drives the app over ASGI, and reads the date once.
+LIVE_FILE = "app/runners/live.py"
+# The eval scorer: record ownership from the corpus generator (ADR 0014).
+SCORER_FILE = "app/runners/scoring.py"
+# Modules that one file alone may import (two, where a tuple names them).
+SINGLE_FILE: dict[str, str | tuple[str, ...]] = {
+    # The loop's exception handler, set in the lifespan; the hooks (M1 PR 5); the live
+    # recorder's event loop (M1 PR 16).
+    "asyncio": ("app/main.py", LIVE_FILE),
     "threading": "app/observability/logs.py",
     "warnings": "app/observability/logs.py",
     # The route's clock (M1 PR 12).
@@ -238,8 +246,13 @@ SINGLE_FILE = {
     "numpy": EMBEDDER_FILE,
     "onnxruntime": EMBEDDER_FILE,
     "tokenizers": EMBEDDER_FILE,
-    "data": LOADER_FILE,
+    "data": (LOADER_FILE, SCORER_FILE),
 }
+# Reading the date from the clock: the route, for the prompt, and the live recorder, for
+# its run (M1 PR 16). Scoring reads none: a sample carries its date. time.* is
+# SINGLE_FILE's (app/api/ask.py).
+CLOCK_NAMES = frozenset({"today", "now", "utcnow"})
+CLOCK_FILES = ("app/api/ask.py", LIVE_FILE)
 # In the model client, the SDK's names it may use, and nothing else of the package: no
 # other client, no credential helper, no beta namespace, no copied client (review
 # finding sec-r2). Attribute chains from the module and from-imports are both checked.
@@ -304,6 +317,8 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
                     module == "os" and OS_PROGRAM.fullmatch(alias.name)
                 ):
                     problems.append(f"{rel}:{node.lineno}: from {module} import {alias.name}")
+                if alias.name in CLOCK_NAMES and rel not in CLOCK_FILES:
+                    problems.append(f"{rel}:{node.lineno}: import {alias.name} reads the clock")
         elif isinstance(node, ast.Attribute):
             on_os = isinstance(node.value, ast.Name) and node.value.id in os_names
             if rel == MODEL_CLIENT_FILE:
@@ -323,13 +338,16 @@ def scan(source: str, rel: str) -> tuple[set[str], list[str]]:
                     problems.append(f"{rel}:{node.lineno}: .{node.attr} in the model client")
             if node.attr in BANNED_ATTRIBUTES or (on_os and OS_PROGRAM.fullmatch(node.attr)):
                 problems.append(f"{rel}:{node.lineno}: .{node.attr}")
+            if node.attr in CLOCK_NAMES and rel not in CLOCK_FILES:
+                problems.append(f"{rel}:{node.lineno}: .{node.attr} reads the clock")
             if node.attr == "connect" and rel != DB_CONNECT_FILE:
                 problems.append(f"{rel}:{node.lineno}: .connect outside {DB_CONNECT_FILE}")
         elif isinstance(node, ast.Name) and node.id in BANNED_NAMES:
             problems.append(f"{rel}:{node.lineno}: {node.id}")
-    for module, only in sorted(SINGLE_FILE.items()):
-        if module in modules and rel != only:
-            problems.append(f"{rel}: {module} outside {only}")
+    for module, files in sorted(SINGLE_FILE.items()):
+        allowed = (files,) if isinstance(files, str) else files
+        if module in modules and rel not in allowed:
+            problems.append(f"{rel}: {module} outside {' and '.join(allowed)}")
     banned = {entry for name in dotted if (entry := banned_module(name))}
     problems += [f"{rel}: banned module {entry}" for entry in sorted(banned)]
     return modules, problems
@@ -361,6 +379,8 @@ def test_import_allowlist() -> None:
         EMBEDDER_FILE,
         MODEL_CLIENT_FILE,
         LOADER_FILE,
+        LIVE_FILE,
+        SCORER_FILE,
     ):
         assert required in sources, f"{required} was not scanned"
     modules, problems = check(sources)
@@ -407,9 +427,15 @@ PLANTED = [
     ("import tokenizers\n", "tokenizers outside app/embeddings/onnx.py"),
     ("from tokenizers import Tokenizer\n", "tokenizers outside"),
     ("import numpy as np\n", "numpy outside app/embeddings/onnx.py"),
-    # The generator, outside the loader (ADR 0010).
-    ("from data.synthetic import generate\n", "data outside app/db/load.py"),
-    ("import data.synthetic.generate\n", "data outside app/db/load.py"),
+    # The generator, outside the loader (ADR 0010) and the eval scorer (ADR 0014).
+    ("from data.synthetic import generate\n", "data outside app/db/load.py and app/runners"),
+    ("import data.synthetic.generate\n", "data outside app/db/load.py and app/runners"),
+    # The date from the clock, outside the route and the live recorder (M1 PR 16).
+    ("import datetime\ndatetime.date.today()\n", ".today reads the clock"),
+    ("from datetime import datetime\ndatetime.now()\n", ".now reads the clock"),
+    ("import datetime as d\nd.datetime.utcnow()\n", ".utcnow reads the clock"),
+    ("from datetime import date\nclock = date.today\n", ".today reads the clock"),
+    ("from somewhere import today\n", "import today reads the clock"),
     # Their network and native-code paths, anywhere.
     ("Tokenizer.from_pretrained('org/model')\n", ".from_pretrained"),
     ("from transformers import from_pretrained\n", "import from_pretrained"),
@@ -440,7 +466,7 @@ PLANTED = [
     ("from threading import Timer\n", "import Timer"),
     ("loop.start_tls(t, p, c)\n", ".start_tls"),
     ("from asyncio import subprocess\n", "banned module asyncio.subprocess"),
-    ("import asyncio\n", "asyncio outside app/main.py"),
+    ("import asyncio\n", "asyncio outside app/main.py and app/runners/live.py"),
     ("import threading\n", "threading outside app/observability/logs.py"),
     # The clock, outside the route that needs it, and any sleep (M1 PR 12).
     ("import time\n", "time outside app/api/ask.py"),
@@ -494,6 +520,23 @@ def test_clean_code_is_not_reported() -> None:
 def test_the_clock_is_allowed_in_the_ask_route_only() -> None:
     assert scan("import time\nnow = time.monotonic\n", "app/api/ask.py")[1] == []
     assert scan("import time\ntime.sleep(1)\n", "app/api/ask.py")[1] != []
+
+
+def test_the_date_is_read_in_the_route_and_the_live_recorder_only() -> None:
+    source = "import datetime\ntoday = datetime.date.today\nday = datetime.date.today()\n"
+    for rel in CLOCK_FILES:
+        assert scan(source, rel)[1] == [], rel
+    for rel in ("app/runners/scoring.py", "app/harness/loop.py", "app/harness/prompt.py"):
+        assert scan(source, rel)[1] != [], rel
+    # A date that is passed in reads no clock (the loop, the prompt and the scorer).
+    assert scan("import datetime\nday = datetime.date(2026, 11, 13)\n", SCORER_FILE)[1] == []
+
+
+def test_asyncio_is_allowed_in_the_app_and_the_live_recorder_only() -> None:
+    assert scan("import asyncio\nasyncio.run(main())\n", LIVE_FILE)[1] == []
+    assert scan("import asyncio\n", SCORER_FILE)[1] != []
+    # Its connecting calls stay banned there too.
+    assert scan("import asyncio\nasyncio.open_connection('h', 1)\n", LIVE_FILE)[1] != []
 
 
 def test_the_pool_is_allowed_in_its_own_file() -> None:
@@ -551,10 +594,12 @@ def test_the_model_client_libraries_are_allowed_in_their_own_file() -> None:
     assert banned_module("httpx2") is None and banned_module("httpx") == "httpx"
 
 
-def test_the_generator_is_allowed_in_the_loader_only() -> None:
+def test_the_generator_is_allowed_in_the_loader_and_the_scorer_only() -> None:
     source = "from data.synthetic import generate\n"
     assert scan(source, LOADER_FILE)[1] == []
+    assert scan(source, SCORER_FILE)[1] == []
     assert scan(source, "app/db/migrate.py")[1] != []
+    assert scan(source, LIVE_FILE)[1] != []
 
 
 def test_connect_is_allowed_in_its_own_file() -> None:

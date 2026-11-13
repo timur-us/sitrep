@@ -102,7 +102,7 @@ web-deps: ## Download Chromium for Playwright (from Playwright's CDN, not hash-p
 web-test: up migrate model load web-deps ## The browser tests (tests/web) against the app on 127.0.0.1: up, migrate, model, load, Chromium, then pytest
 	$(UV_RUN) python -P -m pytest tests/web
 
-evals: ## The eval gate, offline: check the corpus against evals/gate.toml (no scoring in M0)
+evals: ## The eval gate, offline: score the recorded runs against evals/gate.toml (ADR 0014)
 	$(UV_RUN) python -P -m app.runners.evals
 
 redteam: ## The red-team gate, offline: check the attacks against redteam/gate.toml (no scoring in M0)

@@ -29,7 +29,9 @@ page). A request meets, in this order:
 6. The database (503): one advisor transaction opens and closes before the first model
    call, so a database that is down costs no model call.
 7. The loop (app/harness/loop.py) with the READ handlers bound to the app's pool and
-   embedder (read_handlers()). Each tool call opens and closes its own advisor
+   embedder (read_handlers()), and the server's date, read once per request
+   (datetime.date.today(), the server's local date): the system prompt names it, so the
+   model can tell a past appointment from a future one (prompt v2, M1 PR 16). Each tool call opens and closes its own advisor
    transaction, so no connection is held while the model is called (PR 5b sec-5). The
    model client is wrapped in DeadlineClient: no model call starts DEADLINE_SECONDS or
    more after the request's clock started, and the request then ends with stop
@@ -56,6 +58,7 @@ copy of the request's context, so the loop's span attributes land on the request
 
 from __future__ import annotations
 
+import datetime
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -191,8 +194,9 @@ class DeadlineClient:
 
 
 class AskState:
-    """What the route keeps between requests: the rate limit and the lazily built model
-    client and embedder. Only the event loop touches it, so it holds no lock."""
+    """What the route keeps between requests: the rate limit, the lazily built model
+    client and embedder, and the two clocks (monotonic for the limit and the deadline,
+    the date for the prompt). Only the event loop touches it, so it holds no lock."""
 
     def __init__(
         self,
@@ -200,9 +204,11 @@ class AskState:
         model_client: ModelClient | None,
         embedder: Embedder | None,
         clock: Callable[[], float],
+        today: Callable[[], datetime.date] = datetime.date.today,
     ) -> None:
         self.settings = settings
         self.clock = clock
+        self.today = today
         self.limit = RateLimit(REQUESTS_PER_WINDOW, WINDOW_SECONDS, clock)
         self._model_client = model_client
         self._embedder = embedder
@@ -324,6 +330,7 @@ def post_ask(
             client=DeadlineClient(client, began + DEADLINE_SECONDS, state.clock),
             handlers=read_handlers(pool, embedder),
             model=client.model,
+            today=state.today(),
         )
     except loop.LoopError as error:
         failure = error.kind
@@ -370,9 +377,17 @@ def mount(
     model_client: ModelClient | None = None,
     embedder: Embedder | None = None,
     clock: Callable[[], float] | None = None,
+    today: Callable[[], datetime.date] | None = None,
 ) -> None:
     """Adds the route to the app itself (not an included router, so the route list and
-    the no-redirect scan see it). model_client, embedder and clock are for tests and the
-    live runner (M1 PR 16); the app builds the first two at the first ask."""
-    app.state.ask = AskState(settings, model_client, embedder, clock or time.monotonic)
+    the no-redirect scan see it). model_client, embedder, clock and today are for tests
+    and the live runner (M1 PR 16); the app builds the first two at the first ask, and
+    reads the server's monotonic clock and date otherwise."""
+    app.state.ask = AskState(
+        settings,
+        model_client,
+        embedder,
+        clock or time.monotonic,
+        today or datetime.date.today,
+    )
     app.add_api_route(ROUTE, post_ask, methods=["POST"], response_class=JSONResponse)

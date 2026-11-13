@@ -1,8 +1,10 @@
 """The eval and red-team runners, in-process through main(argv).
 
-In M0 a runner checks the corpus and the gate, offline, and scores nothing: an empty
-corpus passes with min_cases = 0, and anything it cannot check fails. Live runs are
-refused. Error output names the file and the rule, never the file's text.
+Both runners check the corpus and the gate, offline: an empty corpus passes with
+min_cases = 0, and anything they cannot check fails. Since M1 PR 16 the eval runner
+scores recorded runs (tests/runners/test_eval_gate.py); the red-team runner scores
+nothing until M1 PR 17, so any attack fails closed, and refuses live runs. Error output
+names the file and the rule, never the file's text.
 """
 
 from __future__ import annotations
@@ -35,7 +37,10 @@ def make_suite(
     directory = root / suite
     (directory / case_dir).mkdir(parents=True)
     (directory / "recorded").mkdir()
-    (directory / "gate.toml").write_text(f"min_cases = {json.dumps(min_cases)}\n")
+    gate = f"min_cases = {json.dumps(min_cases)}\n"
+    if suite == "evals":
+        gate += "samples = 1\nmin_pass_rate = 1.0\n"
+    (directory / "gate.toml").write_text(gate)
     for rel, body in (cases or {}).items():
         _write(directory / case_dir / rel, body)
     for rel, body in (recordings or {}).items():
@@ -61,12 +66,31 @@ def test_empty_corpus_passes(suite: str, tmp_path: Path, capsys: pytest.CaptureF
     assert err == "", err
 
 
-@pytest.mark.parametrize("suite", sorted(RUNNERS))
-def test_the_committed_suite_passes(suite: str, capsys: pytest.CaptureFixture) -> None:
-    # `make evals` and `make redteam` run without --dir, on the committed corpus.
-    module, _ = RUNNERS[suite]
-    assert module.main([]) == 0
-    assert capsys.readouterr().out == f"{suite}: no cases (min_cases=0)\n"
+def test_the_committed_red_team_suite_passes(capsys: pytest.CaptureFixture) -> None:
+    # `make redteam` runs without --dir, on the committed corpus.
+    assert redteam.main([]) == 0
+    assert capsys.readouterr().out == "redteam: no cases (min_cases=0)\n"
+
+
+def test_the_committed_eval_cases_are_valid(capsys: pytest.CaptureFixture) -> None:
+    # `make evals` runs without --dir. Every committed case parses; until Timur records
+    # them (by hand, plan default 17), the only problems are missing recordings, and with
+    # every recording in place the gate's verdict is all that is left.
+    code = evals.main([])
+    out, err = capsys.readouterr()
+    cases = sorted(path.stem for path in (ROOT / "evals" / "cases").glob("*.json"))
+    assert len(cases) >= 14, cases
+    missing = [
+        line
+        for line in err.splitlines()
+        if line.endswith("missing (record it: --live --yes, by hand)")
+    ]
+    assert err.splitlines() == missing, err
+    if missing:
+        assert code == 1 and out == "", out
+    else:
+        assert code == 0 and err == "", err
+        assert f"{len(cases)} cases" in out.splitlines()[-1], out
 
 
 @pytest.mark.parametrize("suite", sorted(RUNNERS))
@@ -250,18 +274,20 @@ def test_recording_with_a_credential_header_fails(
     assert "abc" not in err, "the error shows the header's value"
 
 
-def test_a_valid_corpus_fails_closed_in_m0(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
-    # Nothing scores a case before M1, so a corpus with cases cannot pass the gate.
+def test_a_valid_attack_corpus_fails_closed(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    # Nothing scores an attack before M1 PR 17, so a corpus with attacks cannot pass.
     directory = make_suite(
         tmp_path,
-        "evals",
+        "redteam",
         min_cases=1,
         cases={"a.json": {"id": "a", "question": "x"}},
         recordings={"v1/a.json": {"answer": "y"}},
     )
-    assert run("evals", directory) == 1
+    assert run("redteam", directory) == 1
     out, err = capsys.readouterr()
-    assert out == "evals: cases=1 (min_cases=1); scoring arrives in M1, so the gate fails closed\n"
+    assert (
+        out == "redteam: cases=1 (min_cases=1); scoring arrives in M1, so the gate fails closed\n"
+    )
     assert err == "", err
 
 
@@ -273,12 +299,12 @@ def test_live_without_yes_exits_2(
     assert "--live needs --yes" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("suite", sorted(RUNNERS))
-def test_live_with_yes_is_not_available(
-    suite: str, tmp_path: Path, capsys: pytest.CaptureFixture
+@pytest.mark.parametrize("flags", [("--live", "--yes"), ("--estimate",)])
+def test_the_red_team_has_no_live_run_or_estimate_yet(
+    flags: tuple[str, ...], tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:
-    assert run(suite, make_suite(tmp_path, suite), "--live", "--yes") == 2
-    assert "not available in M0" in capsys.readouterr().err
+    assert run("redteam", make_suite(tmp_path, "redteam"), *flags) == 2
+    assert "arrive with M1 PR 17" in capsys.readouterr().err
 
 
 def test_yes_without_live_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
@@ -307,6 +333,7 @@ def test_a_dummy_key_causes_no_connection(tmp_path: Path, monkeypatch: pytest.Mo
     assert run("evals", empty) == 0
     assert run("redteam", full) == 1
     assert run("evals", empty, "--live", "--yes") == 2
+    assert run("evals", empty, "--estimate") == 0
     assert attempts == [], attempts
 
 

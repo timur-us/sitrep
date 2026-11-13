@@ -1,0 +1,13 @@
+{
+  "id": "briefing-en",
+  "lang": "en",
+  "advisor": "{advisor.alice}",
+  "question": "What do I need to know before the call with the {mandate.demo} family?",
+  "expect": {
+    "tools": [
+      "search_client_docs"
+    ],
+    "cites": true
+  },
+  "note": "The demo question of the brief, in English."
+}

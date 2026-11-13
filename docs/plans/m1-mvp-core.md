@@ -1,6 +1,6 @@
 # M1 — MVP core, local: plan
 
-Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date; PR 12: the API contract's details) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
+Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date; PR 12: the API contract's details), 2026-11-13 (prompt v2 in PR 16; no CI model cache) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
 
 ## Context
 
@@ -34,7 +34,7 @@ The outcome that matters: an advisor asks "What do I need to know before the cal
 | # | Topic | Default | Why |
 |---|---|---|---|
 | 5 | Runtime-written text | Drafts and follow-ups live in their own tables with origins `agent_draft` and `agent_followup`, trust `untrusted`, and are never retrieved in M1. | Timur's answer to PR 8 sec-1. A draft carrying injected text cannot re-enter a later context. M4's poisoning path revisits it. |
-| 6 | The real embedder in CI | `make model` becomes a prerequisite of `lint-test` (and of `load`): about 490 MB from Hugging Face at the pinned revision, sha256-checked, with no cache. No `ci.yml` edit. **Fallback** (Fable's addition): if `lint-test` grows past three minutes, a cache whose entry is sha256-verified after every restore. | This deviates from ADR 0005's "cached": a cache needs a new pinned action, and cache entries are not content-verified. Amended in PR 4, with the fallback and its trigger. |
+| 6 | The real embedder in CI | `make model` becomes a prerequisite of `lint-test` (and of `load`): about 490 MB from Hugging Face at the pinned revision, sha256-checked, with no cache. No `ci.yml` edit. **Fallback** (Fable's addition): if `lint-test` grows past three minutes, a cache whose entry is sha256-verified after every restore. Amended (Timur, 2026-11-13): the trigger was reached, but the download takes 6 to 11 seconds of the job; no cache. | This deviates from ADR 0005's "cached": a cache needs a new pinned action, and cache entries are not content-verified. Amended in PR 4, with the fallback and its trigger. |
 | 7 | Model settings | `ANTHROPIC_API_KEY` keeps its name; `ANTHROPIC_MODEL` becomes `SITREP_MODEL`. | The secret hook (`.claude/hooks/block_secrets.py`) and the GitHub checklist key on `ANTHROPIC_API_KEY`. Renaming it would weaken a guardrail only Timur may change. |
 | 8 | ADR PRs | Docs class: spec-reviewer plus security-reviewer. **Fable reads ADR 0010 and ADR 0011 before their merge**, as a short design review, even though they are docs class (Fable's addition). | A design flaw costs less to fix in the ADR than in the code that follows it. |
 | 9 | The UI PRs | Sensitive. | They render untrusted model output: the image and link exfiltration paths go through them. |
@@ -53,24 +53,37 @@ The outcome that matters: an advisor asks "What do I need to know before the cal
 PR 16 (recorded runs, evals v1) and PR 17 (red team v1, unhardened) may be built and merged right after PR 12, before PRs 13 to 15. The reason: the EchoLeak case needs only the read path. The e-mail sits in Weber's mailbox, `search_client_docs` returns it, and the attack succeeds when the canary reaches the answer. Measuring that rate does not have to wait for the approval gate.
 
 The two paragraphs above are Timur's decision. The rest of this section **was derived by the agent and is proposed for Timur to confirm**: his merge of the amendment PR confirms it, and his answers on that PR override it. It is applied in the sections below.
-- **The first recordings run at prompt `v1`**, with the two READ tools. The live steps of PR 16 and PR 17 run after PR 12, not after PR 15.
+- **The first recordings run at prompt `v1`** (`v2` since the amendment of 2026-11-13), with the two READ tools. The live steps of PR 16 and PR 17 run after PR 12, not after PR 15.
 - **Some cases need a proposal tool, so they land with PR 14:**
   - the eval cases for a draft e-mail and a follow-up;
   - EchoLeak's `draft_email` form (body and recipient);
   - the draft to an address outside the mandate (sec-2).
 
   A committed case without a recording fails the gate, so these cases cannot sit in PR 16 or PR 17 ahead of their tools. PR 14 adds them and raises both gates' `min_cases` to match.
-- **PR 14 records both suites again, at `v2`.** It raises `PROMPT_VERSION` to `v2` and adds two tools to the registry, so the stale check fails every `v1` recording. PR 14 therefore carries:
+- **PR 14 records both suites again, at `v2`** (`v3` since the amendment of 2026-11-13). It raises `PROMPT_VERSION` to `v2` (`v3`) and adds two tools to the registry, so the stale check fails every `v1` recording. PR 14 therefore carries:
   - the cases above;
   - a second recording of both suites by Timur, after the agent's cost estimate. This is his third live run in all.
 
   Until those recordings are committed, PR 14's `evals` and `redteam` jobs stay red, and the PR stays a draft.
-- **The `v1` recordings stay in the repository** as evidence, in `evals/recorded/v1/` and its red-team counterpart. The gates score only the current prompt version's directory; ADR 0014 (PR 16) fixes that rule. `redteam/results/m1.md` keeps the `v1` read-path rate and adds the `v2` rate. **M2 measures against the `v2` rate,** because M2 hardens the full tool set.
+- **The `v1` recordings stay in the repository** as evidence (since the amendment of 2026-11-13 there are none: the first recordings are `v2`, and PR 14's `v3` ones join them), in `evals/recorded/v1/` and its red-team counterpart. The gates score only the current prompt version's directory; ADR 0014 (PR 16) fixes that rule. `redteam/results/m1.md` keeps the `v1` read-path rate and adds the `v2` rate (`v3`). **M2 measures against the `v2` rate** (`v3`, amendment of 2026-11-13), because M2 hardens the full tool set.
 - **PR 13 merges after PR 17 and before PR 14,** and it must leave `registry.schema()` unchanged. If it changes the schema, it has to record again as well.
 - **The database chain** becomes 3 → 7 → 8 → 12 → 16's live step → 17 → 14 (with the `v2` recording) → 15 → 18.
 - **Timur's Bash-side guard decision** (before PR 17) is now due about 24.5 hours in, after PR 16.
 - **ADR numbers stay:** 0014 is still PR 16's. PRs 13–15 add amendments only.
 - **The cost.** On the critical path, M1 closes about 6 hours later, at about day 24 instead of day 21, and the unhardened EchoLeak rate arrives about 3.5 hours earlier ("Time budget"). The build hours were not re-estimated: the proposal cases move from PR 16 and PR 17 to PR 14, and the table keeps each PR's figure, so the total stays at about 56.5 hours.
+
+### Amendment (Timur, 2026-11-13): prompt v2 in PR 16, and no CI model cache
+
+Timur's instructions for this session (2026-11-13):
+- **PR 16 builds system prompt `v2`:** it names the server's current date and asks for "no Markdown formatting", with the new hash pinned. So PR 16 raises `PROMPT_VERSION` to `v2`, and the first recordings run at `v2`. No `v1` recording exists.
+- **No cache for the model in CI.** Default 6's fallback was due (`lint-test` at 3m12s to 3m20s), but measured on `main` the model's download and check take 6 to 11 seconds of a job whose pytest takes 100 to 172. A verified cache would save a few seconds at the price of a new pinned action and a cache-poisoning surface; Timur chose to skip it. Default 6 stays "no cache", and the slow part, pytest, is a separate question.
+
+Derived by the agent, proposed for Timur to confirm (his merge of PR 16 confirms it, his answers on it override it), and applied below where the text names a version:
+- **PR 14 raises `PROMPT_VERSION` to `v3`**, not `v2`, and records both suites at `v3`; `evals/results/v2.md` belongs to PR 16 and `v3.md` to PR 14. **M2 measures against the `v3` rate.**
+- **PR 17 records at `v2`,** with the prompt of PR 16.
+- The amendment of 2026-11-10 holds otherwise: wherever it says `v1` for the first recordings, read `v2`, and for PR 14's, `v3`.
+- **One sentence of `v2` is the agent's, not Timur's:** besides the date and "no Markdown formatting", the prompt says that a meeting, call or deadline before today with no later record is a gap to be named. The past-appointment case scores exactly that, so the prompt meets its own eval; Timur confirms or drops it before the recording (a drop changes the pinned hash).
+- **`evals/results/v2.md` comes with the recordings**, in the commit that adds them after Timur's live run, not before: it reports their scores.
 
 ## Defaults that shape every PR
 
@@ -559,13 +572,13 @@ New for two sessions:
   - grants: INSERT and SELECT, and UPDATE on the proposal's state columns only.
 - `app/harness/approval.py`: the gate, with `redeem(advisor, proposal_id, token)` returning the stored call.
 - `app/harness/handlers.py`: `draft_email` stores a draft (nothing is sent; there is no mail system), and `create_followup` stores a follow-up.
-- `app/harness/loop.py`: DRAFT and SIDE_EFFECT calls go to `gate.propose()` and return a `Proposal`. The prompt tells the advisor that approval happens in the UI (`PROMPT_VERSION` "v2").
+- `app/harness/loop.py`: DRAFT and SIDE_EFFECT calls go to `gate.propose()` and return a `Proposal`. The prompt tells the advisor that approval happens in the UI (`PROMPT_VERSION` "v2"; "v3" since the amendment of 2026-11-13).
 - `tests/db/test_rls_catalog.py`: a grant matrix per table.
 - An ADR 0008 amendment; the threat model, path 4.
 - **From the amendment of 2026-11-10:**
   - the cases that need a proposal tool (the eval draft and follow-up; EchoLeak's `draft_email` form; the sec-2 draft);
-  - Timur's `v2` re-recording of both suites, after the agent's cost estimate;
-  - `evals/results/v2.md`, and the `v2` rate added to `redteam/results/m1.md`.
+  - Timur's `v3` re-recording of both suites, after the agent's cost estimate (`v2` before the amendment of 2026-11-13);
+  - `evals/results/v3.md`, and the `v3` rate added to `redteam/results/m1.md`.
 
 **Tests that fail before the change** (the contract tests):
 - **The happy path.** Propose stores; approve returns a token once, and only its hash is in the database; redeem runs the stored call once.
@@ -607,15 +620,16 @@ New for two sessions:
   - `--estimate` (cost from cases × samples × the measured tokens, with no network) and `--live --yes`;
   - the scorers: valid citations, grounding, expected tools, no foreign record id, and the refusal marker;
   - `gate.toml` keys;
-  - `evals/results/<prompt version>.md` (the eval-run skill's naming): `v1.md` here, `v2.md` from PR 14 (amendment, 2026-11-10).
-- `evals/cases/`, about 14 cases in EN and DE in all, fewer at `v1` (the draft and follow-up ones come with PR 14, amendment):
+  - `evals/results/<prompt version>.md` (the eval-run skill's naming): `v2.md` here, with the recordings after Timur's live run, `v3.md` from PR 14 (amendments of 2026-11-10 and 2026-11-13).
+- `app/harness/prompt.py`: `PROMPT_VERSION = "v2"`, with the server's current date and no Markdown formatting, the new hash pinned (amendment, 2026-11-13). The route passes the date; the loop still reads no clock.
+- `evals/cases/`, about 14 cases in EN and DE in all, fewer at `v2` (the draft and follow-up ones come with PR 14, amendment). Built: 14 at `v2`, among them a past appointment that must be named as a gap, an invented figure that must be unmatched, and a cross-advisor case (Timur, 2026-11-13):
   - the Weber briefing;
   - portfolio figures;
   - a product sheet question;
   - a draft e-mail and a follow-up (proposals): **these land with PR 14** (amendment);
   - the pushy "guaranteed return" (a refusal);
   - Bob asking about Weber (no Weber record).
-- `evals/recorded/<prompt version>/`, recorded by Timur (default 17) after PR 12, at `v1` (amendment, 2026-11-10).
+- `evals/recorded/<prompt version>/`, recorded by Timur (default 17) after PR 12, at `v2` (amendments of 2026-11-10 and 2026-11-13).
 
 **Tests that fail before the change.**
 - Planted transcripts pass and fail each scorer.
@@ -709,11 +723,11 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
 1. Start the second session in its worktree, and be present for prompts in both.
 2. Get Fable's security review for PRs 3–17 (15 PRs, 10 of them before the cut line), plus Fable's short design read of ADR 0010 and ADR 0011 (PRs 1 and 2).
 3. Merge every PR himself on GitHub, after the review report and, where required, Fable's.
-4. Run the cut-line hand check after PR 12, and the live recordings himself (`! uv run python -P -m app.runners.evals --live --yes`, then the red team's), each after the agent's estimate. Since the amendment of 2026-11-10 there are three: PR 16's and PR 17's at `v1` after PR 12, then both suites at `v2` in PR 14.
+4. Run the cut-line hand check after PR 12, and the live recordings himself (`! uv run python -P -m app.runners.evals --live --yes`, then the red team's), each after the agent's estimate. Since the amendment of 2026-11-10 there are three: PR 16's and PR 17's at `v2` after PR 12, then both suites at `v3` in PR 14 (versions as amended on 2026-11-13).
 5. After PR 3, rename his own `.env` lines if he has any.
 6. Decide the Bash-side guard before PR 17. Since the amendment, that is about 24.5 hours in, after PR 16.
 7. Apply the CLAUDE.md Commands changes (rule 11): new lines for `make model` (PR 4) and `make load` (PR 7); the reworded `make lint-test` (PR 4) and `make web-test` (PR 12) lines; and M0's two lines.
-8. Watch `lint-test`'s time from PR 4 on: past three minutes, the verified cache becomes the fallback (default 6).
+8. Watch `lint-test`'s time from PR 4 on: past three minutes, the verified cache becomes the fallback (default 6). Done 2026-11-13: past three minutes, measured, no cache (amendment).
 
 **Still open from M0:** the ruleset, Dependabot #7, #16 and #17, and the `AZURE_CONFIG_DIR` folder. The merge checklist is dropped (default 18).
 
