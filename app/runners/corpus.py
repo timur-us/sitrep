@@ -437,6 +437,8 @@ def _score(suite: Suite, directory: Path, gate: Gate, cases: dict[str, Any]) -> 
             continue
         found = transcript.check(recording, case_id, gate.samples)
         if not found:
+            found += scoring.bound(case, recording)
+        if not found:
             for index, sample in enumerate(recording["samples"]):
                 found += [f"$.samples[{index}]{p}" for p in scoring.integrity(sample)]
         if found:
@@ -482,7 +484,11 @@ def _selected(
 
 
 def main(suite: Suite, argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog=f"python -P -m app.runners.{suite.name}")
+    # No abbreviations: --l --y would be --live --yes, past an ask rule that matches
+    # "--live" (review finding F1).
+    parser = argparse.ArgumentParser(
+        prog=f"python -P -m app.runners.{suite.name}", allow_abbrev=False
+    )
     parser.add_argument("--dir", type=Path, default=ROOT / suite.name, help="suite directory")
     parser.add_argument("--live", action="store_true", help="record new runs (by hand)")
     parser.add_argument("--yes", action="store_true", help="confirm a live run's cost")

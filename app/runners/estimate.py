@@ -28,6 +28,7 @@ from app.config.settings import DEFAULT_MODEL
 from app.harness import loop
 from app.harness.model_client import PRICES_AS_OF, cost_usd
 from app.harness.prompt import PROMPT_VERSION
+from app.runners import transcript
 
 ASSUMED = {"input_tokens": 12_000, "output_tokens": 1_500}
 GEO = "us"
@@ -53,13 +54,17 @@ def ceiling_per_ask() -> Decimal:
     return _cost(loop.REQUEST_BUDGET - output, output)
 
 
-def measured(path: Path) -> dict[str, int] | None:
-    """The mean usage of a recording's answered samples, or None without one."""
+def measured(path: Path, case_id: str, samples: int) -> dict[str, int] | None:
+    """The mean usage of a recording's answered samples, or None without one. Only a
+    recording that passes transcript.check() counts, so a stale or edited file cannot
+    lower the figure (review finding F6)."""
     if not path.is_file() or path.is_symlink():
         return None
     try:
         recording = json.loads(path.read_text(encoding="utf-8"))
     except (UnicodeDecodeError, ValueError):
+        return None
+    if transcript.check(recording, case_id, samples):
         return None
     counts = []
     for sample in recording.get("samples", []) if isinstance(recording, dict) else []:
@@ -78,7 +83,8 @@ def estimate(directory: Path, case_ids: Sequence[str], samples: int) -> Estimate
     per_case: list[Mapping[str, Any]] = []
     found = 0
     for case_id in case_ids:
-        usage = measured(directory / "recorded" / PROMPT_VERSION / f"{case_id}.json")
+        path = directory / "recorded" / PROMPT_VERSION / f"{case_id}.json"
+        usage = measured(path, case_id, samples)
         found += usage is not None
         per_case.append(usage or ASSUMED)
     asks = len(case_ids) * samples

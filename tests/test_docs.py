@@ -1320,6 +1320,7 @@ def test_planted_adr_0013_blocks() -> None:
 ADR_0014_KEYS = (
     "format",
     "stale_keys",
+    "bound",
     "scorers",
     "hard",
     "samples",
@@ -1338,6 +1339,7 @@ def adr_0014_facts() -> dict[str, object]:
     return {
         "format": transcript.FORMAT,
         "stale_keys": list(transcript.STALE_KEYS),
+        "bound": list(scoring.BOUND),
         "scorers": list(scoring.SCORERS),
         "hard": sorted(scoring.HARD),
         "samples": gate["samples"],
@@ -1382,6 +1384,7 @@ def test_planted_adr_0014_blocks() -> None:
     expected = {
         "format": 1,
         "stale_keys": ["a", "b"],
+        "bound": ["c"],
         "scorers": ["x", "y"],
         "hard": ["y"],
         "samples": 3,
@@ -1389,7 +1392,8 @@ def test_planted_adr_0014_blocks() -> None:
         "assumed_tokens": {"input_tokens": 10, "output_tokens": 2},
     }
     good = (
-        "```yaml\nformat: 1\nstale_keys: [a, b]\nscorers: [x, y]\nhard: [y]\nsamples: 3\n"
+        "```yaml\nformat: 1\nstale_keys: [a, b]\nbound: [c]\nscorers: [x, y]\nhard: [y]\n"
+        "samples: 3\n"
         "min_pass_rate: 0.8\nassumed_tokens: {input_tokens: 10, output_tokens: 2}\n```\n"
     )
     assert adr_0014_problems(good, expected) == []

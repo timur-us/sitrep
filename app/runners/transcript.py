@@ -4,18 +4,21 @@ A recording is one JSON file per case, `recorded/<prompt version>/<case id>.json
 
     {"format": 1, "case_id": …,
      "prompt_version": …, "prompt_sha256": …, "tools_sha256": …, "corpus_sha256": …,
-     "model": …,
+     "model": …, "advisor": …,
      "samples": [{"date": "YYYY-MM-DD", "system": …, "messages": […], "replies": […],
-                  "response": {"status": …, "body": …}}, …]}
+                  "response": {"status": …, "body": …}, "error": … | null}, …]}
 
 - the five STALE_KEYS name what the run ran on: the prompt version and the template's
   sha256 (app/harness/prompt.py), the tools as the model was sent them, the reviewed
   corpus (app/config/corpus.py) and the model. current() gives today's values; a
   recording that differs in any is stale, and the gate fails it;
+- `advisor` is the advisor the run logged in as; the gate checks it, and each sample's
+  first message, against the case (scoring.bound(), review findings T2 and F4);
 - a sample is one ask through the app: the date the prompt was filled in with, the
-  system prompt as sent, the messages of the last model request (the question, every
-  assistant turn and every tool result, as the model read them), every reply in order,
-  and the route's status and JSON body.
+  system prompt as sent, the messages of the last model request, sent or failed (the
+  question, every assistant turn and every tool result, as the model read them; review
+  finding F3), every reply in order, the route's status and JSON body, and the loop's
+  error word from the request's span, if any (`guard` for a broken boundary, F2).
 
 sources() rebuilds the tool results the loop handed the number guard: each tool_result
 that is not an error is the text wrap() wrote (app/harness/context.py), so its tool, its
@@ -44,8 +47,11 @@ from app.harness.prompt import PROMPT_SHA256, PROMPT_VERSION, system_prompt
 
 FORMAT = 1
 STALE_KEYS = ("prompt_version", "prompt_sha256", "tools_sha256", "corpus_sha256", "model")
-TOP_KEYS = frozenset({"format", "case_id", *STALE_KEYS, "samples"})
-SAMPLE_KEYS = frozenset({"date", "system", "messages", "replies", "response"})
+TOP_KEYS = frozenset({"format", "case_id", *STALE_KEYS, "advisor", "samples"})
+SAMPLE_KEYS = frozenset({"date", "system", "messages", "replies", "response", "error"})
+# The loop's error kinds and the route's (app/harness/loop.py KINDS): lower-case words.
+ERROR_KIND = re.compile(r"[a-z][a-z_]{0,31}")
+ADVISOR_ID = re.compile(r"[a-z]{1,32}")
 RESPONSE_KEYS = frozenset({"status", "body"})
 # wrap()'s output, exactly: the tool, the record ids, the escaped text.
 _WRAPPED = re.compile(
@@ -177,6 +183,9 @@ def check(recording: object, case_id: str, samples: int) -> list[str]:
         problems.append(f"$.format: not {FORMAT}")
     if recording["case_id"] != case_id:
         problems.append("$.case_id: not the file's case")
+    advisor = recording["advisor"]
+    if not isinstance(advisor, str) or not ADVISOR_ID.fullmatch(advisor):
+        problems.append("$.advisor: not an advisor id")
     problems += [f"$.{key}: stale (not the current {key})" for key in stale(recording)]
     items = recording["samples"]
     if not isinstance(items, list) or len(items) != samples:
@@ -206,6 +215,11 @@ def _sample_problems(sample: object) -> list[str]:
             problems.append(f".messages: {error}")
     if not isinstance(replies, list) or not all(isinstance(r, dict) for r in replies):
         problems.append(".replies: not a list of objects")
+    error = sample["error"]
+    if error is not None and not isinstance(error, str):
+        problems.append(".error: not a kind or null")
+    elif isinstance(error, str) and not ERROR_KIND.fullmatch(error):
+        problems.append(".error: not a kind")
     if not isinstance(response, dict) or set(response) != RESPONSE_KEYS:
         problems.append(f".response: keys are not exactly {sorted(RESPONSE_KEYS)}")
     elif type(response["status"]) is not int:

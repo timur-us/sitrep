@@ -488,7 +488,7 @@ def test_a_fatal_status_stops_the_run_and_writes_nothing(
     out, err = capsys.readouterr()
     assert "evals: live: a sample 1/2: 503" in out, out
     assert "stopped: the app answered 503" in err, err
-    assert not (directory / "recorded" / PROMPT_VERSION).exists()
+    assert list((directory / "recorded" / PROMPT_VERSION).glob("*.json")) == []
 
 
 def test_a_failed_ask_is_recorded_and_the_run_goes_on(

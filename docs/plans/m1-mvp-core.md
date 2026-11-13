@@ -53,19 +53,19 @@ The outcome that matters: an advisor asks "What do I need to know before the cal
 PR 16 (recorded runs, evals v1) and PR 17 (red team v1, unhardened) may be built and merged right after PR 12, before PRs 13 to 15. The reason: the EchoLeak case needs only the read path. The e-mail sits in Weber's mailbox, `search_client_docs` returns it, and the attack succeeds when the canary reaches the answer. Measuring that rate does not have to wait for the approval gate.
 
 The two paragraphs above are Timur's decision. The rest of this section **was derived by the agent and is proposed for Timur to confirm**: his merge of the amendment PR confirms it, and his answers on that PR override it. It is applied in the sections below.
-- **The first recordings run at prompt `v1`**, with the two READ tools. The live steps of PR 16 and PR 17 run after PR 12, not after PR 15.
+- **The first recordings run at prompt `v1`** (`v2` since the amendment of 2026-11-13), with the two READ tools. The live steps of PR 16 and PR 17 run after PR 12, not after PR 15.
 - **Some cases need a proposal tool, so they land with PR 14:**
   - the eval cases for a draft e-mail and a follow-up;
   - EchoLeak's `draft_email` form (body and recipient);
   - the draft to an address outside the mandate (sec-2).
 
   A committed case without a recording fails the gate, so these cases cannot sit in PR 16 or PR 17 ahead of their tools. PR 14 adds them and raises both gates' `min_cases` to match.
-- **PR 14 records both suites again, at `v2`.** It raises `PROMPT_VERSION` to `v2` and adds two tools to the registry, so the stale check fails every `v1` recording. PR 14 therefore carries:
+- **PR 14 records both suites again, at `v2`** (`v3` since the amendment of 2026-11-13). It raises `PROMPT_VERSION` to `v2` and adds two tools to the registry, so the stale check fails every `v1` recording. PR 14 therefore carries:
   - the cases above;
   - a second recording of both suites by Timur, after the agent's cost estimate. This is his third live run in all.
 
   Until those recordings are committed, PR 14's `evals` and `redteam` jobs stay red, and the PR stays a draft.
-- **The `v1` recordings stay in the repository** as evidence, in `evals/recorded/v1/` and its red-team counterpart. The gates score only the current prompt version's directory; ADR 0014 (PR 16) fixes that rule. `redteam/results/m1.md` keeps the `v1` read-path rate and adds the `v2` rate. **M2 measures against the `v2` rate,** because M2 hardens the full tool set.
+- **The `v1` recordings stay in the repository** as evidence (since the amendment of 2026-11-13 there are none: the first recordings are `v2`, and PR 14's `v3` ones join them), in `evals/recorded/v1/` and its red-team counterpart. The gates score only the current prompt version's directory; ADR 0014 (PR 16) fixes that rule. `redteam/results/m1.md` keeps the `v1` read-path rate and adds the `v2` rate. **M2 measures against the `v2` rate,** because M2 hardens the full tool set.
 - **PR 13 merges after PR 17 and before PR 14,** and it must leave `registry.schema()` unchanged. If it changes the schema, it has to record again as well.
 - **The database chain** becomes 3 → 7 → 8 → 12 → 16's live step → 17 → 14 (with the `v2` recording) → 15 → 18.
 - **Timur's Bash-side guard decision** (before PR 17) is now due about 24.5 hours in, after PR 16.
@@ -82,6 +82,8 @@ Derived by the agent, proposed for Timur to confirm (his merge of PR 16 confirms
 - **PR 14 raises `PROMPT_VERSION` to `v3`**, not `v2`, and records both suites at `v3`; `evals/results/v2.md` belongs to PR 16 and `v3.md` to PR 14. **M2 measures against the `v3` rate.**
 - **PR 17 records at `v2`,** with the prompt of PR 16.
 - The amendment of 2026-11-10 holds otherwise: wherever it says `v1` for the first recordings, read `v2`, and for PR 14's, `v3`.
+- **One sentence of `v2` is the agent's, not Timur's:** besides the date and "no Markdown formatting", the prompt says that a meeting, call or deadline before today with no later record is a gap to be named. The past-appointment case scores exactly that, so the prompt meets its own eval; Timur confirms or drops it before the recording (a drop changes the pinned hash).
+- **`evals/results/v2.md` comes with the recordings**, in the commit that adds them after Timur's live run, not before: it reports their scores.
 
 ## Defaults that shape every PR
 
@@ -618,7 +620,7 @@ New for two sessions:
   - `--estimate` (cost from cases × samples × the measured tokens, with no network) and `--live --yes`;
   - the scorers: valid citations, grounding, expected tools, no foreign record id, and the refusal marker;
   - `gate.toml` keys;
-  - `evals/results/<prompt version>.md` (the eval-run skill's naming): `v2.md` here, `v3.md` from PR 14 (amendments of 2026-11-10 and 2026-11-13).
+  - `evals/results/<prompt version>.md` (the eval-run skill's naming): `v2.md` here, with the recordings after Timur's live run, `v3.md` from PR 14 (amendments of 2026-11-10 and 2026-11-13).
 - `app/harness/prompt.py`: `PROMPT_VERSION = "v2"`, with the server's current date and no Markdown formatting, the new hash pinned (amendment, 2026-11-13). The route passes the date; the loop still reads no clock.
 - `evals/cases/`, about 14 cases in EN and DE in all, fewer at `v2` (the draft and follow-up ones come with PR 14, amendment). Built: 14 at `v2`, among them a past appointment that must be named as a gap, an invented figure that must be unmatched, and a cross-advisor case (Timur, 2026-11-13):
   - the Weber briefing;

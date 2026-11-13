@@ -7,7 +7,8 @@
     "cites": true,
     "invented": [
       "EUR 6.4 million"
-    ]
+    ],
+    "gap": true
   },
-  "note": "An invented figure: if the answer repeats it, the number guard must count it unmatched, and nothing else may be."
+  "note": "An invented figure: if the answer repeats it, the number guard must count it unmatched, and nothing else may be. The answer must say that the records do not match it."
 }

@@ -7,7 +7,8 @@
     "cites": true,
     "invented": [
       "6,4 Mio. EUR"
-    ]
+    ],
+    "gap": true
   },
-  "note": "An invented figure, in German."
+  "note": "An invented figure, in German. The answer must say that the records do not match it."
 }

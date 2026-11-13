@@ -22,6 +22,13 @@ call. The embedding model and the database are the app's: a 503 stops the run.
 **The date** is read once, when the run starts, and passed to the app as its date, so
 every sample of a run has the same prompt; each sample records it.
 
+**What it records** besides the transcript: the advisor it logged in as, and the loop's
+error word from each ask's span (`guard` for a broken boundary). **Limits:** a 401, 403
+or 503 stops the run; so does spending past the ceiling the estimate prints for these
+asks, and a usage the price table cannot price. Any other failure stops it naming only
+the exception's type (python -m app.runners.evals installs the entry point's logging
+config and exception hooks first).
+
 Nothing here logs a question, an answer or a tool result. The output names cases,
 statuses, stops and cost.
 """
@@ -38,7 +45,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor, TracerProvider
 from pydantic import ValidationError
 
 from app.api import ask
@@ -53,8 +60,9 @@ from app.harness.model_client import (
 )
 from app.harness.prompt import PROMPT_VERSION
 from app.main import create_app
+from app.observability import tracing
 from app.observability.tracing import PlaintextRefused
-from app.runners import transcript
+from app.runners import estimate, transcript
 from app.runners.scoring import Case
 
 # Read from the working directory, as the entry point reads it.
@@ -74,8 +82,9 @@ class LiveError(Exception):
 
 
 class RecordingClient:
-    """The ModelClient of app/harness/model.py around another: every request and reply
-    of a successful call, copied as JSON."""
+    """The ModelClient of app/harness/model.py around another: every request, copied as
+    JSON before the call, so a call that fails is evidence too (review finding F3), and
+    the reply of every call that answered."""
 
     def __init__(self, inner: ModelClient) -> None:
         self._inner = inner
@@ -84,10 +93,23 @@ class RecordingClient:
         self.replies: list[dict[str, Any]] = []
 
     def create(self, **request: Any) -> Mapping[str, Any]:
-        reply = self._inner.create(**request)
         self.requests.append(json.loads(json.dumps(request)))
+        reply = self._inner.create(**request)
         self.replies.append(json.loads(json.dumps(dict(reply))))
         return reply
+
+
+class LoopErrors(SpanProcessor):
+    """The loop's error word (tracing.LOOP["error"]) from the ended spans of one ask: a
+    reviewed word, never text. `guard` is a broken boundary (review finding F2)."""
+
+    def __init__(self) -> None:
+        self.kind: str | None = None
+
+    def on_end(self, span: ReadableSpan) -> None:
+        value = (span.attributes or {}).get(tracing.LOOP["error"])
+        if isinstance(value, str):
+            self.kind = value
 
 
 # --- The app, over ASGI ---------------------------------------------------------------
@@ -199,9 +221,12 @@ def record_sample(
 ) -> dict[str, Any]:
     """One ask of case through a fresh app, as a transcript sample."""
     recorder = RecordingClient(client)
+    errors = LoopErrors()
+    provider = TracerProvider()
+    provider.add_span_processor(errors)
     app = create_app(
         settings,
-        tracer_provider=TracerProvider(),
+        tracer_provider=provider,
         bind_host=LOOPBACK,
         model_client=recorder,
         embedder=embedder,
@@ -223,6 +248,7 @@ def record_sample(
         "messages": last.get("messages", []),  # a JSON copy already
         "replies": recorder.replies,
         "response": {"status": status, "body": body},
+        "error": errors.kind,
         "_tools_sha256": tools.pop() if tools else None,
         "_cost": _spent(recorder),
     }
@@ -230,15 +256,17 @@ def record_sample(
 
 def _spent(recorder: RecordingClient) -> Decimal:
     """What the sample's answered calls cost, from their usage. A failed call may have
-    billed too; its cost is not known (ADR 0012)."""
+    billed too; its cost is not known (ADR 0012). A usage the table cannot price stops
+    the run rather than count as nothing (review finding F6)."""
     total = Decimal(0)
     for reply in recorder.replies:
         usage = reply.get("usage")
-        if isinstance(usage, dict):
-            try:
-                total += cost_usd(recorder.model, usage)
-            except PriceUnknown:
-                continue
+        if not isinstance(usage, dict):
+            continue
+        try:
+            total += cost_usd(recorder.model, usage)
+        except PriceUnknown:
+            raise LiveError("a reply's usage has no price in the table") from None
     return total
 
 
@@ -280,6 +308,7 @@ def record_case(
         **now,
         "tools_sha256": hashes.pop() if hashes else now["tools_sha256"],
         "model": client.model,
+        "advisor": case.advisor_id,
         "samples": taken,
     }
 
@@ -294,6 +323,11 @@ def write(directory: Path, recording: Mapping[str, Any]) -> Path:
 
 
 # --- The command ----------------------------------------------------------------------
+
+
+def _today() -> datetime.date:
+    """The server's date: read once per run (main)."""
+    return datetime.date.today()
 
 
 def _settings() -> Settings:
@@ -336,8 +370,16 @@ def main(directory: Path, cases: Sequence[Case], samples: int) -> int:
             file=sys.stderr,
         )
         return REFUSED
-    today = datetime.date.today()  # the server's date, once per run
+    today = _today()
+    # The cap: the ceiling the estimate prints for these asks (review finding F6).
+    ceiling = estimate.ceiling_per_ask() * len(cases) * samples
     spent: list[Decimal] = []
+
+    def spend(cost: Decimal) -> None:
+        spent.append(cost)
+        if sum(spent) > ceiling:
+            raise LiveError(f"spent past the ceiling of USD {ceiling:.2f}")
+
     try:
         for case in cases:
             recording = record_case(
@@ -347,11 +389,15 @@ def main(directory: Path, cases: Sequence[Case], samples: int) -> int:
                 embedder=embedder,
                 settings=settings,
                 today=today,
-                spend=spent.append,
+                spend=spend,
             )
             write(directory, recording)
     except (LiveError, PlaintextRefused) as error:
         print(f"evals: live: stopped: {error}; USD {sum(spent)} spent", file=sys.stderr)
+        return 1
+    except Exception as error:  # noqa: BLE001 - its message may quote a value: the type only
+        name = type(error).__name__
+        print(f"evals: live: stopped: {name}; USD {sum(spent)} spent", file=sys.stderr)
         return 1
     print(
         f"evals: live: {len(cases)} cases recorded on {today.isoformat()}; USD {sum(spent)} spent"
