@@ -1313,3 +1313,65 @@ def test_planted_adr_0013_blocks() -> None:
     assert adr_0013_problems(good.replace("rrf_k: 60", "rrf_k: 60\nrrf_k: 60"), expected) == [
         "the yaml block repeats a key: duplicate key 'rrf_k'"
     ]
+
+
+# The API contract's trust amendment (Timur's answer 2 on #35): the plan, the README and
+# the runbook name the citation fields the route sends, trust among them.
+M1_PLAN = ROOT / "docs" / "plans" / "m1-mvp-core.md"
+RUNBOOK = ROOT / "docs" / "runbooks" / "local-setup.md"
+TRUST_AMENDMENT = "Amended (Timur, 2026-11-11, answer 2 on #35)"
+
+
+def contract_fields_problems(plan: str, fields: tuple[str, ...]) -> list[str]:
+    """What is wrong with the plan's API contract section against the route's fields."""
+    section = plan.partition("### The API contract")[2].partition("\n## ")[0]
+    if not section:
+        return ["no API contract section"]
+    problems = []
+    if TRUST_AMENDMENT not in section:
+        problems.append("no trust amendment")
+    shape = "`citations: [{" + ", ".join(fields) + "}]`"
+    if shape not in section.partition(TRUST_AMENDMENT)[2]:
+        problems.append(f"the amendment does not name {shape}")
+    return problems
+
+
+def test_the_m1_plan_records_trust_in_citations() -> None:
+    from app.api import ask
+
+    assert ask.CITATION_FIELDS == ("record_id", "title", "kind", "trust")
+    assert contract_fields_problems(M1_PLAN.read_text(encoding="utf-8"), ask.CITATION_FIELDS) == []
+    runbook = RUNBOOK.read_text(encoding="utf-8")
+    assert "`{record_id, title, kind, trust}`" in runbook
+    assert "title, kind, trust and record id" in runbook
+    assert "title, kind and trust" in README.read_text(encoding="utf-8")
+
+
+def test_planted_contract_sections() -> None:
+    fields = ("record_id", "title", "kind", "trust")
+    good = (
+        "### The API contract\n\n- `citations: [{record_id, title, kind}]`\n\n"
+        f"{TRUST_AMENDMENT}: `citations: [{{record_id, title, kind, trust}}]`.\n\n## PR 0\n"
+    )
+    assert contract_fields_problems(good, fields) == []
+    assert contract_fields_problems("## PR 0\n", fields) == ["no API contract section"]
+    assert contract_fields_problems(good.replace(TRUST_AMENDMENT, "Amended"), fields) == [
+        "no trust amendment",
+        "the amendment does not name `citations: [{record_id, title, kind, trust}]`",
+    ]
+    # The old shape before the amendment does not count.
+    before = good.replace(", kind, trust}]`.", ", kind}]`.")
+    assert contract_fields_problems(before, fields) == [
+        "the amendment does not name `citations: [{record_id, title, kind, trust}]`"
+    ]
+    # Outside the section does not count either.
+    outside = (
+        good.replace("## PR 0\n", "").replace(
+            f"{TRUST_AMENDMENT}: `citations: [{{record_id, title, kind, trust}}]`.\n\n", ""
+        )
+        + f"\n## PR 1\n{TRUST_AMENDMENT}: `citations: [{{record_id, title, kind, trust}}]`.\n"
+    )
+    assert contract_fields_problems(outside, fields) == [
+        "no trust amendment",
+        "the amendment does not name `citations: [{record_id, title, kind, trust}]`",
+    ]

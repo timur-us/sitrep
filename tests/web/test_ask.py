@@ -11,8 +11,12 @@ no name and reaches no address but 127.0.0.1 (tests/web/conftest.py).
   (a same-origin fetch is "cors" mode, where the no-referrer policy does not null the
   Origin, unlike the login form's navigation). The page shows the answer and its
   sources: every listed record is the demo advisor's document or a product sheet, with
-  its title from the database and its kind; at least one is the advisor's own. The
-  route's JSON carries no-store; no CSP violation fires and no request leaves the origin.
+  its title from the database, its kind and its trust as the database generates it; at
+  least one is the advisor's own, and the demo family's e-mails are shown as untrusted
+  (Timur's answer 2 on #35). The route's JSON carries no-store; no CSP violation fires
+  and no request leaves the origin.
+- The signed-in page links to the advisor page: the demo advisor gets there by that
+  link, not by typing the address.
 - Another advisor asks the same in the page and is shown sources, none of them, and
   nothing on the page, the demo advisor's.
 - Control: a page on another local port (same site, so the SameSite=Strict cookie goes
@@ -22,7 +26,7 @@ no name and reaches no address but 127.0.0.1 (tests/web/conftest.py).
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 import pytest
@@ -55,25 +59,37 @@ def origin(url: str) -> tuple[str, str]:
     return parts.scheme, parts.netloc
 
 
-def corpus_rows() -> tuple[dict[str, str], dict[str, str], set[str]]:
-    """Each document's advisor, each record's title, and the sheets, as the superuser
-    sees them; fails unless `make load` has run."""
+class Corpus(NamedTuple):
+    owner: dict[str, str]  # document -> advisor
+    titles: dict[str, str]  # record -> title
+    sheets: set[str]
+    trust: dict[str, str]  # record -> the database's generated trust
+    mail: set[str]  # the mailbox's documents
+
+
+def corpus_rows() -> Corpus:
+    """What the superuser sees of the loaded corpus; fails unless `make load` has run."""
     with connect(loopback_database_url("postgres")) as su:
         documents = su.execute(
-            sql.SQL("SELECT id, advisor_id, title FROM {}").format(
+            sql.SQL("SELECT id, advisor_id, title, trust, origin FROM {}").format(
                 sql.Identifier(names.SCHEMA, "documents")
             )
         ).fetchall()
         sheets = su.execute(
-            sql.SQL("SELECT id, title FROM {}").format(
+            sql.SQL("SELECT id, title, trust FROM {}").format(
                 sql.Identifier(names.SCHEMA, "product_sheets")
             )
         ).fetchall()
-    owner = {record: advisor for record, advisor, _ in documents}
+    owner = {record: advisor for record, advisor, _, _, _ in documents}
     if MINE.id not in owner.values():
         pytest.fail("no corpus in the database: run `make load` (make web-test does)")
-    titles = {record: title for record, _, title in documents} | dict(sheets)
-    return owner, titles, {record for record, _ in sheets}
+    return Corpus(
+        owner=owner,
+        titles={row[0]: row[2] for row in documents} | {row[0]: row[1] for row in sheets},
+        sheets={record for record, _, _ in sheets},
+        trust={row[0]: row[3] for row in documents} | {row[0]: row[2] for row in sheets},
+        mail={row[0] for row in documents if row[4] == "mailbox"},
+    )
 
 
 @pytest.fixture
@@ -92,9 +108,11 @@ def sign_in(page: Page, app_url: str, person: branding.Person) -> None:
 
 
 def ask_in_the_page(page: Page, app_url: str) -> Any:
-    """Opens the advisor page, types the question and presses Ask; the route's response,
-    once the page shows the answer."""
-    assert page.goto(app_url + "/").status == 200
+    """Follows the signed-in page's link to the advisor page, types the question and
+    presses Ask; the route's response, once the page shows the answer."""
+    with page.expect_navigation():
+        page.click('a[href="/"]')
+    assert page.url == app_url + "/", page.url
     page.fill("#question", QUESTION)
     with page.expect_response(app_url + ROUTE) as answered:
         page.click("#ask button[type=submit]")
@@ -104,14 +122,15 @@ def ask_in_the_page(page: Page, app_url: str) -> Any:
     return answered.value
 
 
-def shown_sources(page: Page) -> list[tuple[str, str, str]]:
-    """(record id, title, kind) of each source the page lists, in order."""
+def shown_sources(page: Page) -> list[tuple[str, str, str, str]]:
+    """(record id, title, kind, trust) of each source the page lists, in order."""
     items = page.locator("#citations li")
     return [
         (
             items.nth(i).locator(".record").text_content() or "",
             items.nth(i).locator(".title").text_content() or "",
             items.nth(i).locator(".kind").text_content() or "",
+            items.nth(i).locator(".trust").text_content() or "",
         )
         for i in range(items.count())
     ]
@@ -120,7 +139,8 @@ def shown_sources(page: Page) -> list[tuple[str, str, str]]:
 def test_the_demo_advisor_asks_in_the_page_and_sees_own_sources(
     context: BrowserContext, ask_app_url: str
 ) -> None:
-    owner, titles, sheets = corpus_rows()
+    corpus = corpus_rows()
+    owner, titles, sheets = corpus.owner, corpus.titles, corpus.sheets
     requests: list[str] = []
     context.on("request", lambda request: requests.append(request.url))
     page = context.new_page()
@@ -138,15 +158,20 @@ def test_the_demo_advisor_asks_in_the_page_and_sees_own_sources(
 
     sources = shown_sources(page)
     assert sources, "the page lists no source"
-    assert [record for record, _, _ in sources] == [c["record_id"] for c in body["citations"]]
-    for record, title, kind in sources:
+    assert [source[0] for source in sources] == [c["record_id"] for c in body["citations"]]
+    for record, title, kind, trust in sources:
         assert owner.get(record) == MINE.id or record in sheets, (
             f"{record} is not the demo advisor's"
         )
         assert title == titles[record]
         expected = "product_sheet" if record in sheets else "document"
         assert kind == SHOWN_KINDS[expected]
-    assert any(owner.get(record) == MINE.id for record, _, _ in sources)
+        assert trust == corpus.trust[record], (record, trust)
+    assert any(owner.get(source[0]) == MINE.id for source in sources)
+    mail = [source for source in sources if source[0] in corpus.mail]
+    assert mail, "control: none of the demo family's e-mails is among the sources"
+    assert all(trust == "untrusted" for _, _, _, trust in mail), mail
+    assert any(trust == "internal" for _, _, _, trust in sources), "control: all untrusted"
     assert page.locator("#answer").text_content() == body["answer"]
     assert page.locator("#trace").text_content() == body["trace_id"]
     assert body["trace_id"] == response.header_value("x-trace-id")
@@ -160,13 +185,13 @@ def test_the_demo_advisor_asks_in_the_page_and_sees_own_sources(
 def test_another_advisor_asks_the_same_and_sees_nothing_of_theirs(
     context: BrowserContext, ask_app_url: str
 ) -> None:
-    owner, _, _ = corpus_rows()
+    owner = corpus_rows().owner
     page = context.new_page()
     sign_in(page, ask_app_url, OTHER)
     response = ask_in_the_page(page, ask_app_url)
     sources = shown_sources(page)
     assert sources, "control: the other advisor's search returned nothing to cite"
-    assert all(owner.get(record) != MINE.id for record, _, _ in sources), sources
+    assert all(owner.get(source[0]) != MINE.id for source in sources), sources
     theirs = [record for record, advisor in owner.items() if advisor == MINE.id]
     shown = page.locator("body").text_content() or ""
     leaked = [record for record in theirs if record in shown or record in response.text()]
