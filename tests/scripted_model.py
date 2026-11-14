@@ -70,7 +70,7 @@ def records(block: Mapping[str, Any]) -> list[str]:
 class EchoModel:
     """Searches for `query`, then cites up to `cite` of the records the search returned.
 
-    `answer` is the text before the citations; `on_call(model)` runs at the start of
+    `arguments` adds to the search call's (a mandate id, a limit); `answer` is the text before the citations; `on_call(model)` runs at the start of
     every call. `script`, when given, replaces the behaviour: the replies (or exceptions)
     in order.
     """
@@ -81,6 +81,7 @@ class EchoModel:
         *,
         answer: str = "Briefing before the call.",
         cite: int = 3,
+        arguments: Mapping[str, Any] | None = None,
         model: str = DEFAULT_MODEL,
         on_call: Callable[[EchoModel], None] | None = None,
         script: Sequence[object] | None = None,
@@ -88,6 +89,7 @@ class EchoModel:
         self.query = query
         self.answer = answer
         self.cite = cite
+        self.arguments = dict(arguments or {})
         self.model = model
         self.on_call = on_call
         self.script = list(script) if script is not None else None
@@ -106,7 +108,8 @@ class EchoModel:
             return copy.deepcopy(item)  # type: ignore[arg-type]
         results = tool_results(request["messages"])
         if not results:
-            return reply(tool_use("tu_1", SEARCH, {"query": self.query}), stop="tool_use")
+            search = {"query": self.query, **self.arguments}
+            return reply(tool_use("tu_1", SEARCH, search), stop="tool_use")
         cited = [record for block in results for record in records(block)][: self.cite]
         sources = " ".join(f"[source: {record}]" for record in cited)
         return reply(text(f"{self.answer} {sources}".strip()), model=self.model)
