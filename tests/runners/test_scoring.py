@@ -446,6 +446,15 @@ def test_a_recording_is_bound_to_its_cases_question_and_advisor() -> None:
         "an unclosed ** here",
         "```python",
         "*** three asterisks",
+        # The table rule with optional spaces (Fable, 2026-11-15): a line of dash cells,
+        # with or without colons, separated by pipes.
+        "| Class | Share |\n| --- | --- |\n| Bonds | most |",
+        "| --- |",
+        "| :--- |",
+        "| :---: | ---: |",
+        "  |  ---  |  ",
+        "Class | Share\n--- | ---",
+        "| a |\r\n| --- |\r\n| b |",
     ],
 )
 def test_markdown_fails_plain_text_softly(answer: str) -> None:
@@ -467,10 +476,12 @@ def test_markdown_fails_plain_text_softly(answer: str) -> None:
         "- a dash list\n- is plain text",
         "a | b | c, and a rule of --- alone",
         "| - | dashes not after a bar |",
-        # Near misses of the table rule (review, item 3): two dashes, and the spaced GFM
-        # rule, which the rule as given ("|---") does not name.
+        # Near misses of the table rule (review, item 3): two dashes inside text, a line of
+        # dashes without a pipe (a plain separator), and a pipe beside a word.
         "a|--b",
-        "| --- | --- |",
+        "Before.\n---\nAfter.",
+        "- one\n- two",
+        "Range | 3 - 5",
         "",
     ],
 )
