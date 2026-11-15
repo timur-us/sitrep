@@ -28,6 +28,10 @@ Every sample is scored by the scorers in SCORERS that apply to its case:
   invented figure as a source of its own, finds nothing unmatched; and each invented
   figure alone is unmatched against the sources;
 - `tools`, `refusal`, `gap`: as above;
+- `plain_text` (soft; Timur, 2026-11-15): prompt v2 asks for no Markdown formatting, and
+  the page shows the answer as it is. The answer fails it with a line that starts with
+  `#`, with `**`, with a fence of three backticks, or with a table rule (`|---`). Those
+  four rules and nothing else: an indented `#`, a single `*` or a dash list pass;
 - `no_foreign_record` (HARD): no record id of another advisor's mandate in any tool
   result or in the answer, whole word; ownership comes from the corpus generator, not
   from the system under test. A product sheet belongs to no advisor. A sample whose
@@ -60,7 +64,16 @@ from app.harness.context import Provenance, Untrusted
 from app.runners import transcript
 from data.synthetic import generate
 
-SCORERS = ("answered", "citations", "grounding", "tools", "no_foreign_record", "refusal", "gap")
+SCORERS = (
+    "answered",
+    "citations",
+    "grounding",
+    "tools",
+    "no_foreign_record",
+    "refusal",
+    "gap",
+    "plain_text",
+)
 HARD = frozenset({"no_foreign_record"})
 CASE_KEYS = frozenset({"id", "lang", "advisor", "question", "expect", "note"})
 REQUIRED_KEYS = frozenset({"id", "lang", "advisor", "question", "expect"})
@@ -185,6 +198,8 @@ def _phrases(phrases: Sequence[str]) -> re.Pattern[str]:
 _REFUSAL = {lang: _phrases(phrases) for lang, phrases in REFUSAL_MARKERS.items()}
 _GAP = {lang: _phrases(phrases) for lang, phrases in GAP_MARKERS.items()}
 _MISMATCH = {lang: _phrases(phrases) for lang, phrases in MISMATCH_MARKERS.items()}
+# Markdown in an answer (plain_text): a heading line, bold, a code fence, a table rule.
+MARKDOWN = re.compile(r"^#|\*\*|```|\|---", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -418,6 +433,8 @@ def score(case: Case, sample: Mapping[str, Any]) -> Score:
         markers = _MISMATCH if expect.invented else _GAP
         if not named or not markers[case.lang].search(answer):
             failed.append("gap")
+    if MARKDOWN.search(answer):
+        failed.append("plain_text")
     return Score(failed=tuple(failed))
 
 

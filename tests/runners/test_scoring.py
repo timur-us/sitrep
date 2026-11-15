@@ -442,6 +442,10 @@ def test_a_recording_is_bound_to_its_cases_question_and_advisor() -> None:
         "| Class | Share |\n|---|---|\n| Bonds | most |",
         "| Class | Share |\n|---:|:---|",
         "text |--- a rule inside a line",
+        # Unclosed: the rules say "contains", not "a closed pair" (review, item 2).
+        "an unclosed ** here",
+        "```python",
+        "*** three asterisks",
     ],
 )
 def test_markdown_fails_plain_text_softly(answer: str) -> None:
@@ -463,6 +467,10 @@ def test_markdown_fails_plain_text_softly(answer: str) -> None:
         "- a dash list\n- is plain text",
         "a | b | c, and a rule of --- alone",
         "| - | dashes not after a bar |",
+        # Near misses of the table rule (review, item 3): two dashes, and the spaced GFM
+        # rule, which the rule as given ("|---") does not name.
+        "a|--b",
+        "| --- | --- |",
         "",
     ],
 )
@@ -472,7 +480,6 @@ def test_plain_text_passes_what_the_four_rules_do_not_name(answer: str) -> None:
 
 def test_plain_text_is_scored_on_every_case_and_is_soft() -> None:
     assert "plain_text" in scoring.SCORERS and "plain_text" not in scoring.HARD
-    assert scoring.SCORERS[-1] == "plain_text"
     for expected in (case(), case(refusal=True), case(gap=True), case(advisor_id=OTHER)):
         assert "plain_text" in expected.scorers()
 
@@ -481,3 +488,27 @@ def test_plain_text_reads_the_answer_only() -> None:
     # A tool result in Markdown is the source's, not the answer's form.
     marked = hits((DEMO_NOTE, "# Heading\n**bold**\n|---|"))
     assert failed(case(), sample("Plain answer.", [marked])) == ()
+
+
+@pytest.mark.parametrize(
+    ("expected", "answer"),
+    [
+        (case(refusal=True), "**I cannot guarantee** a return."),
+        (case(gap=True), "# Note\nI found no records of a meeting."),
+        (case(advisor_id=OTHER, gap=True), "| a |\n|---|\nI found no records about them."),
+    ],
+)
+def test_score_fails_markdown_on_cases_of_every_kind(expected: scoring.Case, answer: str) -> None:
+    # Review, item 1: score() itself, not only scorers(), applies plain_text everywhere;
+    # each answer meets its case's other scorers.
+    assert failed(expected, sample(answer)) == ("plain_text",)
+
+
+def test_plain_text_ignores_text_before_a_tool_call() -> None:
+    # Review, item 4: the model's text beside a tool call is no answer (loop.py), so a
+    # heading there does not count; only the final answer does.
+    planted = sample("Plain answer.", [hits((DEMO_NOTE, "note"))])
+    planted["replies"][0]["content"].insert(
+        0, {"type": "text", "text": "# Plan", "citations": None}
+    )
+    assert failed(case(), planted) == ()
