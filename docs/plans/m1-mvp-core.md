@@ -1,6 +1,6 @@
 # M1 — MVP core, local: plan
 
-Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date; PR 12: the API contract's details), 2026-11-13 (prompt v2 in PR 16; no CI model cache) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
+Date: 2026-11-08 · Status: accepted by Timur with his answers to four questions and Fable's three additions (merging, the ADR design reads, the cache fallback; folded in below) · Owner: Timur · Amended: 2026-11-10 (the red team before the approval path), 2026-11-11 (PR 8: no GIN index, no report date; PR 12: the API contract's details; trust in citations, built in PR 12b), 2026-11-13 (PR 13: control characters, the closed world's additions; prompt v2 in PR 16; no CI model cache) · Milestone: M1, days 4–9 of `docs/brief.md`, re-baselined (question 4)
 
 ## Context
 
@@ -178,7 +178,7 @@ Never in parallel:
 ### The API contract (fixed here, so the UI PRs can build ahead of their routes)
 
 All routes need the login (401 otherwise). Every non-GET route needs the shim's Origin check (403). JSON only, with `Cache-Control: no-store`.
-- **`POST /api/ask`** `{question: str (1–2000), mandate_id?: str}` → 200 with `answer`, `citations: [{record_id, title, kind}]`, `grounding: {figures, unmatched, unknown_citations}`, `proposals: [{proposal_id, tool, mandate_id, arguments}]` (empty until PR 14), `usage: {input_tokens, output_tokens}`, `cost_usd`, `stop: "end_turn"|"refusal"|"budget"|"max_turns"` and `trace_id`. Over the rate limit: 429. Without a model key or a database: 503. (PR 12)
+- **`POST /api/ask`** `{question: str (1–2000), mandate_id?: str}` → 200 with `answer`, `citations: [{record_id, title, kind}]` (amended: `trust` in each, see the amendment of answer 2 on #35 below), `grounding: {figures, unmatched, unknown_citations}`, `proposals: [{proposal_id, tool, mandate_id, arguments}]` (empty until PR 14), `usage: {input_tokens, output_tokens}`, `cost_usd`, `stop: "end_turn"|"refusal"|"budget"|"max_turns"` and `trace_id`. Over the rate limit: 429. Without a model key or a database: 503. (PR 12)
 - **`GET /api/proposals`** → `[{proposal_id, tool, mandate_id, arguments, state, created_at}]`. (PR 15)
 - **`POST /api/proposals/{id}/approve`** → `{token, expires_at}`. (PR 15)
 - **`POST /api/proposals/{id}/redeem`** `{token}` → `{state: "done", result_id}`; every refusal is the same 409. (PR 15)
@@ -196,7 +196,13 @@ Amended (Timur, 2026-11-11, answer 1 on #35): the details of `POST /api/ask` tha
   - 503 `model unavailable` (no key), `search unavailable` (no embedding model) or `database unavailable`;
   - 502 `the model call failed`;
   - 500 `the request failed` for any other failure, a row of another advisor among them.
-- **Trust in `citations`** (Timur, 2026-11-11, answer 2 on #35) comes as its own amendment, with a small PR after the cut line.
+- **Trust in `citations`** (Timur, 2026-11-11, answer 2 on #35) comes as its own amendment, with a small PR after the cut line: below, built in PR 12b.
+
+Amended (Timur, 2026-11-11, answer 2 on #35): each citation carries the record's trust, built in a small PR after the cut line (`m1/12b-citation-trust`, M1 PR 12b), so the response's citations become `citations: [{record_id, title, kind, trust}]`. Timur decided that trust comes and in which PR; the details below were derived by the agent, and his merge of that PR confirms them:
+- **`trust`** is `"internal"` or `"untrusted"`: the record's own generated column (ADR 0010), read in the same statement as its title, never inferred from its kind, origin or id. It is read again after the loop, as the title is, rather than carried from the search hit, so title and trust come from one snapshot; carrying both in the tool result's provenance is M2's. A mailbox e-mail is `untrusted`; today every other corpus record is `internal`.
+- **Any other value** means the schema changed under the route. The citations' lookup refuses it as a broken boundary: 500 `the request failed`, with `guard` on the span.
+- **The page** accepts a citation only if its trust is one of the two, and renders nothing otherwise ("Unexpected response."). It shows the trust as text next to the kind.
+- **The dev login's signed-in page** links to the advisor page at `/`, beside "Your mandates".
 
 ## Working protocol (every PR)
 
@@ -562,6 +568,15 @@ New for two sessions:
 
 **Handover rows.** PR 6 sec-2 and sec-11. **Hours** 2.0.
 
+Amended (2026-11-13, M1 PR 13, #37): derived by the agent from #32's sec-9 handover and #37's review, and proposed for Timur to confirm. His merge of #37 confirms it, and his answers on #37 override it.
+- **Control characters.** `validate_call()` also refuses a key or a text with a C0, DEL or C1 control character (`control_character`), before pydantic. Tab, LF and CR pass, since an e-mail body has lines. Arguments that are not JSON (a set, bytes, NaN) are `not_json`. The caps run in order: depth, then JSON and size, then control characters.
+- **The closed world** also refuses:
+  - a base class that is not a pydantic model, a foreign metaclass, and anything in a model's own namespace beyond what Python and pydantic write there (a method, a descriptor, a class attribute);
+  - a default that its own field would refuse;
+  - an alias that is not a plain name (`AliasPath`, `AliasChoices`).
+- **Files** also: `tests/harness/test_loop.py` (no handler runs) and `tests/test_docs.py` (ADR 0001's line).
+- **Not refused here:** CR and LF in recipients, the subject and a follow-up's title; bidi, zero-width and tag characters; U+2028 and U+2029; private-use characters. They are M2's (below). A schema-valid `draft_email` body of many multi-byte characters can exceed 32 KiB, and then the cap wins; PR 14 decides whether the body's bound changes.
+
 ## PR 14 — The approval gate and the two proposal tools
 
 **Purpose.** ADR 0011 built, with the first writes the app role may do, and `draft_email` and `create_followup` in the loop.
@@ -686,6 +701,7 @@ New for two sessions:
 | PR 5b GIN index | PR 8 | decided against, with EXPLAIN evidence (amendment, Timur, 2026-11-11) |
 | PR 6 sec-2 | PR 13 | type allowlist (default 11); below the cut line |
 | PR 6 sec-11 | PR 13 | below the cut line |
+| #32 sec-9 (M1 PR 8) | PR 13 | control characters refused in arguments (amendment of 2026-11-13) |
 | PR 6 test-14 | PR 8 (READ), PR 14 (DRAFT, SIDE_EFFECT) | |
 | PR 6 forged-argument handler | PR 8 | |
 | PR 6 approval tokens | PR 2 (ADR), PR 14 | |
@@ -764,7 +780,7 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
 
 - **M2:**
   - the output policy: exact-URL links and per-mandate recipients enforced (question 1), plus the canary scan and alarm;
-  - provenance hardening: a delimiter nonce and Unicode tag, bidi and zero-width characters (PR 6 sec-9), the `_value` read-scan, pickle and slots (sec-7), a record-id pattern (sec-8), and CR and LF in recipients;
+  - provenance hardening: a delimiter nonce and Unicode tag, bidi and zero-width characters (PR 6 sec-9), the `_value` read-scan, pickle and slots (sec-7), a record-id pattern (sec-8), CR and LF in recipients, the subject and a follow-up's title, U+2028, U+2029 and private-use characters;
   - the CSP-off rate, and the regression gate against a baseline (the brief's "eval gate in CI");
   - 15–20 automated variants, and the Haiku guard layer;
   - granite-r2 against e5 (default 15);
