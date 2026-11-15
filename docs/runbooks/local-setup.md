@@ -273,7 +273,7 @@ The bases are pinned by digest: `python:3.12.16-slim-trixie` and `ghcr.io/astral
 
 `lint-test` starts the database with `make up` (the same `compose.yaml`, on the runner's Docker) and migrates it before the tests. It is not a service container. Since M1 PR 12 `web-test` does the same, and fetches the model and loads the corpus (`make load`) before Chromium starts.
 
-Dependabot (`.github/dependabot.yml`) proposes updates for actions, the uv lock, the Docker images and the image in `compose.yaml`: weekly, grouped, and only for releases at least 7 days old. When `make audit` reports a vulnerability whose fix cannot be taken yet (inside that window) and that is not reachable here, the exception is recorded as an `--ignore-vuln` in the `audit` target, with a dated comment naming the reason and the fixed version, and in `tests/test_audit_exceptions.py`; that test fails once `uv.lock` holds the fixed version, so the ignore expires with the bump (today: CVE-2026-126360, until opentelemetry-api 1.45.2).
+Dependabot (`.github/dependabot.yml`) proposes updates for actions, the uv lock, the Docker images and the image in `compose.yaml`: weekly, grouped, and only for releases at least 7 days old. When `make audit` reports a vulnerability whose fix cannot be taken yet (inside that window) and that is not reachable here, the exception is recorded as an `--ignore-vuln` in the `audit` target, with a dated comment naming the reason, the test that shows it is not reached, the fixed version and a review-by date, and in `tests/test_audit_exceptions.py`; that test fails once `uv.lock` holds the fixed version or the date has passed, so the ignore expires with the bump.
 
 ## Evals and red team in M0
 

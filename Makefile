@@ -81,21 +81,25 @@ test: lint ## Lint, then run the offline tests (all of tests/ except tests/web; 
 
 lint-test: up migrate model test ## CI's lint-test job: up, migrate, model, then make test (which also scans the branch's commits for secrets)
 
-# Re-resolving the lock catches a hand edit that the hashes do not cover (ADR 0006).
-# --refresh: without it, uv answers from its cache and misses a backdated upload-time.
-# The audit reads an export of the lock with hashes, so pip-audit installs nothing.
-#
-# Audit exceptions: each names its id, the date, why it does not apply here, and the
-# version that ends it. tests/test_audit_exceptions.py fails once uv.lock holds that
-# version while the ignore is still here, so the ignore goes with the bump.
+# Audit exceptions: each names its id, the date, why it does not apply here, the test
+# that shows it, the version that ends it and a review-by date.
+# tests/test_audit_exceptions.py fails once uv.lock holds that version, or after that
+# date, while the ignore is still here, so the ignore goes with the bump. pip-audit
+# ignores an id (and its aliases) in every package, not in one.
 # CVE-2026-126360 (2026-11-15, Fable's triage on #37): a ReDoS in opentelemetry-api's
 #   TraceContextTextMapPropagator.extract(), fixed in 1.45.2 (published 2026-11-13).
 #   Not reachable: app/observability/tracing.py installs an empty global propagator, so
-#   no inbound traceparent is extracted, and the model client's propagation is off. The
-#   fix is younger than pyproject's 7-day exclude-newer window. Remove this ignore when
-#   uv.lock holds opentelemetry-api 1.45.2 or later (resolvable from 2026-11-20).
+#   no inbound traceparent is extracted (test_the_propagator_extract_is_not_reached),
+#   and the model client's propagation is off. The fix is younger than pyproject's
+#   7-day exclude-newer window. Remove this ignore when uv.lock holds opentelemetry-api
+#   1.45.2 or later (resolvable from 2026-11-20; pyproject pins the OpenTelemetry
+#   packages exactly, so the bump is by hand); review it by 2026-12-15 at the latest.
 AUDIT_IGNORE := --ignore-vuln CVE-2026-126360
 
+# Re-resolving the lock catches a hand edit that the hashes do not cover (ADR 0006).
+# --refresh: without it, uv answers from its cache and misses a backdated upload-time.
+# The audit reads an export of the lock with hashes, so pip-audit installs nothing.
+# It hands pip-audit the exceptions in AUDIT_IGNORE (above).
 audit: ## Re-resolve the lock, then pip-audit it with hashes (needs the network)
 	uv lock --check --refresh
 	@set -eu; \
