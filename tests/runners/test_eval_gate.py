@@ -108,6 +108,20 @@ def test_a_rate_below_the_bar_fails_and_names_the_scorer(
     assert run(suite(tmp_path / "lenient", cases, recordings, rate=0.75)) == 0
 
 
+def test_a_markdown_answer_is_a_soft_failure_named_in_the_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # plain_text is soft: it counts against the rate, and the gate names it.
+    marked = f"**Total** EUR 5,922,761.95 [source: {DEMO_REPORT}]."
+    cases = {"a": raw_case("a")}
+    recordings = {"a": answered("a", GOOD, marked)}
+    assert run(suite(tmp_path / "half", cases, recordings, rate=0.5)) == 0
+    out = capsys.readouterr().out
+    assert "evals: a: 1/2 samples pass; failed: sample 2: plain_text" in out, out
+    assert "hard failures 0: the gate passes" in out, out
+    assert run(suite(tmp_path / "all", cases, recordings, rate=1.0)) == 1
+
+
 def test_a_hard_failure_fails_the_gate_at_any_rate(
     tmp_path: Path, capsys: pytest.CaptureFixture
 ) -> None:

@@ -371,6 +371,7 @@ def test_a_case_parses_with_its_question_resolved() -> None:
         "tools",
         "no_foreign_record",
         "gap",
+        "plain_text",
     )
 
 
@@ -423,3 +424,60 @@ def test_a_recording_is_bound_to_its_cases_question_and_advisor() -> None:
     asked = recording("planted", [sample("x"), sample("x", question="Something else?")])
     assert scoring.bound(case(), asked) == ["$.samples[1].messages[0]: not the case's question"]
     assert scoring.bound(case(advisor_id=OTHER), good) == ["$.advisor: not the case's advisor"]
+
+
+# --- plain_text (Timur, 2026-11-15: prompt v2 asks for no Markdown) --------------------
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "# Briefing\nThe family is fine.",
+        "The family is fine.\n## Next steps\nCall them.",
+        "#Briefing without a space",
+        "The total is **EUR 5,922,761.95**.",
+        "Gesamtvermögen **5.922.761,95 EUR**.",
+        "Before.\n```\nraw\n```\nAfter.",
+        "Inline ```fence``` mid-line",
+        "| Class | Share |\n|---|---|\n| Bonds | most |",
+        "| Class | Share |\n|---:|:---|",
+        "text |--- a rule inside a line",
+    ],
+)
+def test_markdown_fails_plain_text_softly(answer: str) -> None:
+    # The portfolio as the source, so a figure in the answer is grounded: plain_text is
+    # the one scorer each sample can fail.
+    result = scoring.score(case(), sample(answer, [report()]))
+    assert result.failed == ("plain_text",), result
+    assert not result.hard
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Item #3 is due; see note #2.",
+        "C# and F# are languages, not headings.",
+        "  # an indented hash does not start the line",
+        "A single *asterisk* or 5 * 3 is no bold.",
+        "Two ``backticks`` are no fence.",
+        "- a dash list\n- is plain text",
+        "a | b | c, and a rule of --- alone",
+        "| - | dashes not after a bar |",
+        "",
+    ],
+)
+def test_plain_text_passes_what_the_four_rules_do_not_name(answer: str) -> None:
+    assert scoring.score(case(), sample(answer, [report()])).failed == ()
+
+
+def test_plain_text_is_scored_on_every_case_and_is_soft() -> None:
+    assert "plain_text" in scoring.SCORERS and "plain_text" not in scoring.HARD
+    assert scoring.SCORERS[-1] == "plain_text"
+    for expected in (case(), case(refusal=True), case(gap=True), case(advisor_id=OTHER)):
+        assert "plain_text" in expected.scorers()
+
+
+def test_plain_text_reads_the_answer_only() -> None:
+    # A tool result in Markdown is the source's, not the answer's form.
+    marked = hits((DEMO_NOTE, "# Heading\n**bold**\n|---|"))
+    assert failed(case(), sample("Plain answer.", [marked])) == ()

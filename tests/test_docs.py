@@ -1493,3 +1493,13 @@ def test_adr_0001_records_the_registry_caps() -> None:
         "control characters",
     ):
         assert needle in line, needle
+
+
+def test_the_runbook_names_every_eval_scorer() -> None:
+    # M1 PR 16: "Evals (M1)" lists the scorers by name, plain_text (2026-11-15) included.
+    from app.runners import scoring
+
+    found = [body for heading, body in sections(read(RUNBOOK)) if heading == "Evals (M1)"]
+    assert len(found) == 1, found
+    missing = [name for name in scoring.SCORERS if f"`{name}`" not in found[0]]
+    assert not missing, f"the runbook's Evals (M1) section does not name {missing}"
