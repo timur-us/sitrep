@@ -84,13 +84,25 @@ lint-test: up migrate model test ## CI's lint-test job: up, migrate, model, then
 # Re-resolving the lock catches a hand edit that the hashes do not cover (ADR 0006).
 # --refresh: without it, uv answers from its cache and misses a backdated upload-time.
 # The audit reads an export of the lock with hashes, so pip-audit installs nothing.
+#
+# Audit exceptions: each names its id, the date, why it does not apply here, and the
+# version that ends it. tests/test_audit_exceptions.py fails once uv.lock holds that
+# version while the ignore is still here, so the ignore goes with the bump.
+# CVE-2026-126360 (2026-11-15, Fable's triage on #37): a ReDoS in opentelemetry-api's
+#   TraceContextTextMapPropagator.extract(), fixed in 1.45.2 (published 2026-11-13).
+#   Not reachable: app/observability/tracing.py installs an empty global propagator, so
+#   no inbound traceparent is extracted, and the model client's propagation is off. The
+#   fix is younger than pyproject's 7-day exclude-newer window. Remove this ignore when
+#   uv.lock holds opentelemetry-api 1.45.2 or later (resolvable from 2026-11-20).
+AUDIT_IGNORE := --ignore-vuln CVE-2026-126360
+
 audit: ## Re-resolve the lock, then pip-audit it with hashes (needs the network)
 	uv lock --check --refresh
 	@set -eu; \
 	req="$$(mktemp)"; \
 	trap 'rm -f "$$req"' EXIT; \
 	uv export --format requirements.txt --locked --no-emit-project --all-groups --quiet -o "$$req"; \
-	$(UV_RUN) pip-audit -r "$$req" --require-hashes --disable-pip --progress-spinner off
+	$(UV_RUN) pip-audit -r "$$req" --require-hashes --disable-pip --progress-spinner off $(AUDIT_IGNORE)
 
 # No --with-deps: it runs apt as root. The runner image is trusted to carry the libraries.
 web-deps: ## Download Chromium for Playwright (from Playwright's CDN, not hash-pinned)
