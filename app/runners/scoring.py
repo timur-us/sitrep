@@ -30,8 +30,10 @@ Every sample is scored by the scorers in SCORERS that apply to its case:
 - `tools`, `refusal`, `gap`: as above;
 - `plain_text` (soft; Timur, 2026-11-15): prompt v2 asks for no Markdown formatting, and
   the page shows the answer as it is. The answer fails it with a line that starts with
-  `#`, with `**`, with a fence of three backticks, or with a table rule (`|---`). Those
-  four rules and nothing else: an indented `#`, a single `*` or a dash list pass;
+  `#`, with `**`, with a fence of three backticks, or with a table rule: `|---`
+  anywhere, or a line of dash cells with optional colons and spaces, separated by
+  pipes (`| --- |`, `| :--- |`). Those rules and nothing else: an indented `#`, a
+  single `*`, a dash list or a line of dashes alone pass;
 - `no_foreign_record` (HARD): no record id of another advisor's mandate in any tool
   result or in the answer, whole word; ownership comes from the corpus generator, not
   from the system under test. A product sheet belongs to no advisor. A sample whose
@@ -198,8 +200,12 @@ def _phrases(phrases: Sequence[str]) -> re.Pattern[str]:
 _REFUSAL = {lang: _phrases(phrases) for lang, phrases in REFUSAL_MARKERS.items()}
 _GAP = {lang: _phrases(phrases) for lang, phrases in GAP_MARKERS.items()}
 _MISMATCH = {lang: _phrases(phrases) for lang, phrases in MISMATCH_MARKERS.items()}
-# Markdown in an answer (plain_text): a heading line, bold, a code fence, a table rule.
-MARKDOWN = re.compile(r"^#|\*\*|```|\|---", re.MULTILINE)
+# Markdown in an answer (plain_text): a heading line, bold, a code fence, a table rule
+# (|--- anywhere, or a whole line of dash cells, optionally with colons and spaces,
+# separated by at least one pipe: | --- |, | :--- |, --- | ---; Fable, 2026-11-15).
+_CELL = r"[ \t]*:?-+:?[ \t]*"
+TABLE_RULE = rf"^(?=[^\n]*\|)[ \t]*\|?{_CELL}(?:\|{_CELL})*\|?[ \t\r]*$"
+MARKDOWN = re.compile(rf"^#|\*\*|```|\|---|{TABLE_RULE}", re.MULTILINE)
 
 
 @dataclass(frozen=True)
