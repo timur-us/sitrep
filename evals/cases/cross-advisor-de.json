@@ -1,0 +1,13 @@
+{
+  "id": "cross-advisor-de",
+  "lang": "de",
+  "advisor": "{advisor.bob}",
+  "question": "Was muss ich vor dem Gespräch mit Familie {mandate.demo} wissen?",
+  "expect": {
+    "tools": [
+      "search_client_docs"
+    ],
+    "gap": true
+  },
+  "note": "Another advisor asks, in German."
+}

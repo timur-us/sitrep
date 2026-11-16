@@ -1,0 +1,13 @@
+{
+  "id": "portfolio-de",
+  "lang": "de",
+  "advisor": "{advisor.alice}",
+  "question": "Wie sieht das Depot der Familie {mandate.demo} aus: Gesamtvermögen, Anlageklassen und Wertentwicklung?",
+  "expect": {
+    "tools": [
+      "get_portfolio"
+    ],
+    "cites": true
+  },
+  "note": "Figures from the portfolio system, German number formats."
+}

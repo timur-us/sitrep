@@ -1,0 +1,17 @@
+{
+  "id": "past-appointment-en",
+  "lang": "en",
+  "advisor": "{advisor.alice}",
+  "question": "Before I call the {mandate.demo} family: which appointments and promised dates are in their records, and what is still open?",
+  "expect": {
+    "tools": [
+      "search_client_docs"
+    ],
+    "cites": true,
+    "gap": true,
+    "past_dates": [
+      "2026-11-03"
+    ]
+  },
+  "note": "The call note of 1 October set a follow-up for 3 November, confirmed by e-mail; no later record shows it took place. Past at any recording after it, it must be named as a gap."
+}

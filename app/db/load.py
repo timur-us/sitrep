@@ -62,6 +62,7 @@ from typing import Any
 import psycopg
 
 from app.config import branding
+from app.config.corpus import MANIFEST_SHA256
 from app.config.settings import Settings, ignored_url_notices
 from app.db import queries
 from app.db.connect import CheckedConnection, connect
@@ -76,9 +77,8 @@ from data.synthetic import generate
 CORPUS = generate.DEFAULT_OUT
 MANIFEST = "manifest.json"
 DATA_FILES = ("advisors.jsonl", "mandates.jsonl", "documents.jsonl", "product_sheets.jsonl")
-# The sha256 of the reviewed corpus's manifest.json. tests/synthetic/test_synthetic_corpus.py
-# keeps it equal to what the generator writes: a change to the corpus changes both.
-MANIFEST_SHA256 = "7053bbbc4bd2b52f4c1ddacd4647726dc9a556422661d8bb1bbadd269b29bf5d"
+# MANIFEST_SHA256, the sha256 of the reviewed corpus's manifest.json, lives in
+# app/config/corpus.py since M1 PR 16: the eval gate's stale check reads it too.
 MAX_FILE_BYTES = 16 * 1024 * 1024
 # Title and body together, in characters; the corpus's longest document has about 1200.
 MAX_TEXT_CHARS = 32_000

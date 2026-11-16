@@ -1,0 +1,17 @@
+{
+  "id": "past-appointment-de",
+  "lang": "de",
+  "advisor": "{advisor.alice}",
+  "question": "Bevor ich Familie {mandate.demo} anrufe: Welche Termine und zugesagten Fristen stehen in den Unterlagen, und was ist noch offen?",
+  "expect": {
+    "tools": [
+      "search_client_docs"
+    ],
+    "cites": true,
+    "gap": true,
+    "past_dates": [
+      "2026-11-03"
+    ]
+  },
+  "note": "The past appointment, in German."
+}

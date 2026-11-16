@@ -1,0 +1,13 @@
+{
+  "id": "portfolio-en",
+  "lang": "en",
+  "advisor": "{advisor.alice}",
+  "question": "What are the current portfolio figures for the {mandate.demo} mandate: total assets, asset classes and performance?",
+  "expect": {
+    "tools": [
+      "get_portfolio"
+    ],
+    "cites": true
+  },
+  "note": "Figures from the portfolio system; every figure must be grounded."
+}

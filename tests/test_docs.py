@@ -1315,6 +1315,106 @@ def test_planted_adr_0013_blocks() -> None:
     ]
 
 
+# ADR 0014 (M1 PR 16): the recorded runs' facts, as the ADR's one yaml block, pinned to
+# app/runners/ and evals/gate.toml.
+ADR_0014_KEYS = (
+    "format",
+    "stale_keys",
+    "bound",
+    "scorers",
+    "hard",
+    "samples",
+    "min_pass_rate",
+    "assumed_tokens",
+)
+
+
+def adr_0014_facts() -> dict[str, object]:
+    """What the code and the committed gate say, in the block's terms."""
+    import tomllib
+
+    from app.runners import estimate, scoring, transcript
+
+    gate = tomllib.loads((ROOT / "evals" / "gate.toml").read_text(encoding="utf-8"))
+    return {
+        "format": transcript.FORMAT,
+        "stale_keys": list(transcript.STALE_KEYS),
+        "bound": list(scoring.BOUND),
+        "scorers": list(scoring.SCORERS),
+        "hard": sorted(scoring.HARD),
+        "samples": gate["samples"],
+        "min_pass_rate": gate["min_pass_rate"],
+        "assumed_tokens": dict(estimate.ASSUMED),
+    }
+
+
+def adr_0014_problems(adr: str, expected: dict[str, object]) -> list[str]:
+    """One line per way ADR 0014's block differs from the code."""
+    blocks = yaml_blocks(adr)
+    if len(blocks) != 1:
+        return [f"expected one yaml block, found {len(blocks)}"]
+    facts, problem = load_block(blocks[0])
+    if problem:
+        return [problem]
+    if not isinstance(facts, dict):
+        return ["the yaml block is not a mapping"]
+    problems = [f"{key}: not in the block" for key in ADR_0014_KEYS if key not in facts]
+    problems += [f"{key}: in the block, not expected" for key in facts if key not in ADR_0014_KEYS]
+    if problems:
+        return problems
+    for key in ADR_0014_KEYS:
+        found, wanted = facts[key], expected[key]
+        if found != wanted or type(found) is not type(wanted):
+            problems.append(f"{key}: {found!r} in the block, {wanted!r} in the code")
+    return problems
+
+
+def _adr_0014() -> str:
+    found = sorted(DECISIONS.glob("0014-*.md")) if DECISIONS.is_dir() else []
+    assert len(found) == 1, f"expected one ADR 0014 in docs/decisions, found {len(found)}"
+    return found[0].read_text(encoding="utf-8")
+
+
+def test_adr_0014_block() -> None:
+    problems = adr_0014_problems(_adr_0014(), adr_0014_facts())
+    assert not problems, "ADR 0014 and the runners:\n" + "\n".join(problems)
+
+
+def test_planted_adr_0014_blocks() -> None:
+    expected = {
+        "format": 1,
+        "stale_keys": ["a", "b"],
+        "bound": ["c"],
+        "scorers": ["x", "y"],
+        "hard": ["y"],
+        "samples": 3,
+        "min_pass_rate": 0.8,
+        "assumed_tokens": {"input_tokens": 10, "output_tokens": 2},
+    }
+    good = (
+        "```yaml\nformat: 1\nstale_keys: [a, b]\nbound: [c]\nscorers: [x, y]\nhard: [y]\n"
+        "samples: 3\n"
+        "min_pass_rate: 0.8\nassumed_tokens: {input_tokens: 10, output_tokens: 2}\n```\n"
+    )
+    assert adr_0014_problems(good, expected) == []
+    assert adr_0014_problems("no block\n", expected) == ["expected one yaml block, found 0"]
+    assert adr_0014_problems(good.replace("samples: 3", "samples: 5"), expected) == [
+        "samples: 5 in the block, 3 in the code"
+    ]
+    assert adr_0014_problems(good.replace("min_pass_rate: 0.8", "min_pass_rate: 1"), expected) == [
+        "min_pass_rate: 1 in the block, 0.8 in the code"
+    ]
+    assert adr_0014_problems(good.replace("hard: [y]", "hard: []"), expected) == [
+        "hard: [] in the block, ['y'] in the code"
+    ]
+    assert adr_0014_problems(good.replace("samples: 3\n", ""), expected) == [
+        "samples: not in the block"
+    ]
+    assert adr_0014_problems(good.replace("format: 1", "format: 1\nnote: x"), expected) == [
+        "note: in the block, not expected"
+    ]
+
+
 # The API contract's trust amendment (Timur's answer 2 on #35): the plan, the README and
 # the runbook name the citation fields the route sends, trust among them.
 M1_PLAN = ROOT / "docs" / "plans" / "m1-mvp-core.md"
@@ -1393,3 +1493,13 @@ def test_adr_0001_records_the_registry_caps() -> None:
         "control characters",
     ):
         assert needle in line, needle
+
+
+def test_the_runbook_names_every_eval_scorer() -> None:
+    # M1 PR 16: "Evals (M1)" lists the scorers by name, plain_text (2026-11-15) included.
+    from app.runners import scoring
+
+    found = [body for heading, body in sections(read(RUNBOOK)) if heading == "Evals (M1)"]
+    assert len(found) == 1, found
+    missing = [name for name in scoring.SCORERS if f"`{name}`" not in found[0]]
+    assert not missing, f"the runbook's Evals (M1) section does not name {missing}"

@@ -1,0 +1,13 @@
+{
+  "id": "cross-advisor-en",
+  "lang": "en",
+  "advisor": "{advisor.bob}",
+  "question": "What do I need to know before the call with the {mandate.demo} family?",
+  "expect": {
+    "tools": [
+      "search_client_docs"
+    ],
+    "gap": true
+  },
+  "note": "Another advisor asks about the demo mandate: no record of it, and the answer says it has none."
+}

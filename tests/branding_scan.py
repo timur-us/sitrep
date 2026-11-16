@@ -7,6 +7,11 @@ bank, domain or cast member itself.
   as whole words.
 - Substrings, case-insensitive: the domains.
 - Whole words, case-insensitive: the cast, the demo mandate and the slug.
+
+Eval cases and attacks name the cast and the demo mandate through placeholders that the
+runner resolves from branding (`{advisor.<id>}`, `{mandate.demo}`; app/runners/corpus.py,
+which refuses a literal). In those two directories only, a placeholder the runner knows is
+blanked before the rules run; any literal around it is still found (M1 PR 16).
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from repo_files import ROOT, list_files, read_text
 
 from app.config import branding
 from app.config.settings import ENV_PREFIX, Settings, env_name
+from app.runners.corpus import PLACEHOLDER, PLACEHOLDERS
 
 # Never scanned. Prose must spell out the name (CLAUDE.md scopes the single source
 # to generator, prompts, allowlists, tests and UI); recordings are generated data.
@@ -31,6 +37,20 @@ EXCLUDED = (
     "**/recorded/**",
     "app/config/branding.py",
 )
+
+# Case files, where the runner's placeholders stand in for the names (see the docstring).
+PLACEHOLDER_DIRS = ("evals/cases/**", "redteam/attacks/**")
+
+
+def blank_placeholders(line: str) -> str:
+    """line with every placeholder the runner resolves replaced by spaces."""
+
+    def known(match: re.Match[str]) -> str:
+        key = f"{match.group(1)}.{match.group(2)}"
+        return " " * len(match.group(0)) if key in PLACEHOLDERS else match.group(0)
+
+    return PLACEHOLDER.sub(known, line)
+
 
 # Infrastructure files that cannot import Python: the slug is allowed there, and
 # only the slug.
@@ -148,7 +168,10 @@ def scan(root: Path = ROOT) -> tuple[list[str], list[Finding]]:
             continue
         scanned.append(rel)
         slug_allowed = matches_any(rel, SLUG_ALLOWED)
+        placeholders = matches_any(rel, PLACEHOLDER_DIRS)
         for number, line in enumerate(text.splitlines(), start=1):
+            if placeholders:
+                line = blank_placeholders(line)
             if slug_allowed:
                 # The settings' variables (ADR 0009) carry the slug in capitals; there
                 # they are the slug, not the product name.
