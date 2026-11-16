@@ -13,11 +13,13 @@ if the input cannot be read, the call is blocked, and settings.json sets
 well. Started with `python3 -I`, so nothing from the working directory is imported.
 
 The rule: a command that names a guardrail path passes only if every segment of it
-(split on |, ;, && and ||) starts with a read-only program, and the command holds no
-redirect (>, >>, <<) and no `tee`. Anything else that names such a path is blocked,
-whatever it meant. This is a text heuristic (layer 2): a glob (`.c?aude`), a quote
-inside a name (`.git'hub'`) or a variable (`d=.github; rm -r $d`) does not name the
-path and passes. The GitHub ruleset and the human merge (layer 3) do not depend on
+(split on |, ;, &, &&, ||, newline and carriage return) starts with a read-only program
+named without a path, and the command holds no redirect (>, >>, <<), no `tee`, no
+substitution ($(…), backticks, <(…), >(…)) and no flag that writes or runs a program.
+Anything else that names such a path is blocked, whatever it meant. This is a text
+heuristic (layer 2): a glob (`.c?aude`), a quote inside a name (`.git'hub'`), a
+variable (`d=.github; rm -r $d`) or a command that names no path (`git checkout
+<rev> -- .`) passes. The GitHub ruleset and the human merge (layer 3) do not depend on
 it. Tests: tests/guardrails/test_block_guardrail_writes.py.
 """
 
@@ -27,16 +29,20 @@ import sys
 
 # A guardrail path named anywhere in the command, as its own path segment.
 # Case-insensitive, because the default macOS file system is.
+# For the two dot-names nothing may hide the dot: `cp -t.claude` names .claude, and so
+# does `foo.claude` (a false positive, the cost of a text check).
 GUARDRAIL_PATH = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:CLAUDE\.md|\.claude|\.github)(?![A-Za-z0-9_-])",
+    r"(?:(?<![A-Za-z0-9_.-])CLAUDE\.md|\.(?:claude|github))(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
 
 # Programs that only read. A segment must start with one of these, plain (no `env`,
-# `command` or variable assignment in front). Not on the list, because they can write
-# or run other programs: find (-delete, -exec), awk (system()), sort (-o), xargs, sed,
-# perl, python. `git` is read-only only with the subcommands listed, and never with
-# --output. echo and printf stay: they write only through a redirect, which is blocked.
+# `command`, variable assignment or path in front: `./cat` is any program). Not on the
+# list, because they can write or run other programs: find (-delete, -exec), awk
+# (system()), sort (-o), uniq (IN OUT), xargs, sed, perl, python. `git` is read-only
+# only with the subcommands listed, and never with --output or -O (git grep opens a
+# pager program); rg never with --pre. echo and printf stay: they write only through a
+# redirect, which is blocked.
 READ_ONLY = (
     "cat",
     "head",
@@ -52,7 +58,6 @@ READ_ONLY = (
     "diff",
     "file",
     "stat",
-    "uniq",
     "cut",
     "tr",
     "jq",
@@ -77,8 +82,15 @@ GIT_READ_ONLY = (
 )
 
 REDIRECT = re.compile(r">|<<")
-OUTPUT_FLAG = re.compile(r"(?<![\w-])--output(?![\w])")  # git diff/log --output=FILE writes
-SEGMENT = re.compile(r"\|\||&&|[|;]")
+# Flags that make a read-only program write or run another: git --output, git grep
+# -O / --open-files-in-pager (also inside a cluster such as -Orm), rg --pre.
+RUN_FLAG = re.compile(
+    r"(?<![\w-])(?:--output|--open-files-in-pager|--pre|-[A-Za-z]*O[A-Za-z]*)(?![\w])"
+)
+# A substitution runs whatever is inside it, and the segment split does not see it.
+SUBSTITUTION = re.compile(r"\$\(|`|<\(|>\(")
+# Segments: a pipe, ;, &&, ||, a single & (background), a newline or carriage return.
+SEGMENT = re.compile(r"\|\||&&|[|;&\n\r]")
 FIRST_WORD = re.compile(r"^\s*([^\s]+)(?:\s+([^\s]+))?")
 
 
@@ -93,7 +105,8 @@ def read_only(segment: str) -> bool:
     if found is None:
         return True  # an empty segment: nothing runs
     program, second = found.group(1), found.group(2)
-    program = program.rsplit("/", 1)[-1]
+    if "/" in program:
+        return False  # a path names any program, whatever it is called
     if program == "git":
         return second in GIT_READ_ONLY
     return program in READ_ONLY
@@ -117,9 +130,15 @@ def main() -> None:
         )
     if re.search(r"(?<![\w-])tee(?![\w-])", command):
         block(f"the command names {where} and uses tee. Guardrail files belong to Timur (rule 11).")
-    if OUTPUT_FLAG.search(command):
+    if RUN_FLAG.search(command):
         block(
-            f"the command names {where} with an output flag. Guardrail files belong to Timur (rule 11)."
+            f"the command names {where} with a flag that writes or runs a program. Guardrail "
+            "files belong to Timur (rule 11)."
+        )
+    if SUBSTITUTION.search(command):
+        block(
+            f"the command names {where} and substitutes a command. Guardrail files belong to "
+            "Timur (rule 11)."
         )
     for segment in SEGMENT.split(command):
         if not read_only(segment):
