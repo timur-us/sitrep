@@ -372,6 +372,7 @@ def test_a_case_parses_with_its_question_resolved() -> None:
         "no_foreign_record",
         "gap",
         "plain_text",
+        "language",
     )
 
 
@@ -523,3 +524,148 @@ def test_plain_text_ignores_text_before_a_tool_call() -> None:
         0, {"type": "text", "text": "# Plan", "citations": None}
     )
     assert failed(case(), planted) == ()
+
+
+# --- Fable's decisions on the v2 diagnosis (2026-11-16): R1 to R5 and language --------
+# Each planted answer below has the shape of a recorded one (evals/results/v2.md).
+
+FAMILY = branding.DEMO_MANDATE.family
+LATER_NOTE = "Persönliches Gespräch am 28.10.2026. Nächster Schritt: Rückruf bis 19.11.2026."
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        f"Briefing Familie {FAMILY} (Stand 13.11.2026). Die Notiz ist da [source: {DEMO_NOTE}].",
+        f"Briefing, as of 13 November 2026: the note is there [source: {DEMO_NOTE}].",
+        f"Today, 2026-11-13, the note is there [source: {DEMO_NOTE}].",
+    ],
+)
+def test_r1_the_samples_date_is_a_known_figure(answer: str) -> None:
+    # R1: the server's date, in the system prompt, is no figure from nowhere.
+    planted = sample(answer, [hits((DEMO_NOTE, NOTE_TEXT))], today=TODAY)
+    assert scoring.score(case(), planted).failed == ()
+
+
+def test_r1_another_date_still_counts_as_unmatched() -> None:
+    answer = f"Stand 14.11.2026 [source: {DEMO_NOTE}]."
+    planted = sample(answer, [hits((DEMO_NOTE, NOTE_TEXT))], today=TODAY)
+    assert scoring.score(case(), planted).failed == ("grounding",)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        f"Laut Notiz vom 28.10. ist der Rückruf offen [source: {DEMO_NOTE}].",
+        f"Die Familie hat am 28.10. gefragt [source: {DEMO_NOTE}].",
+        f"The 28.10. note records the question [source: {DEMO_NOTE}].",
+        f"The 28.10 note also says no reallocation [source: {DEMO_NOTE}].",
+        f"Es wurde am 1.10. besprochen und am 28.10. bestätigt [source: {DEMO_NOTE}].",
+    ],
+)
+def test_r2_a_day_and_month_a_tool_result_holds_as_a_date_is_grounded(answer: str) -> None:
+    # R2: 28.10. is the record's 28.10.2026 written short, not the decimal 28.10.
+    sources = [hits((DEMO_NOTE, f"Telefonat vom 01.10.2026. {LATER_NOTE}"))]
+    assert scoring.score(case(), sample(answer, sources)).failed == ()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        f"Die Familie hat am 27.10. gefragt [source: {DEMO_NOTE}].",
+        f"Laut Notiz vom 28.11. [source: {DEMO_NOTE}].",
+        f"A fee of EUR 28.10 applies [source: {DEMO_NOTE}].",
+        f"A fee of 28.10 EUR applies [source: {DEMO_NOTE}].",
+        f"The share is 28.10 % [source: {DEMO_NOTE}].",
+        f"The fee is 28.10 [source: {DEMO_NOTE}].",
+    ],
+)
+def test_r2_is_narrow(answer: str) -> None:
+    # Only a day and month that a tool result holds as DD.MM.YYYY; never an amount, a
+    # percentage, or a decimal at the end of a sentence that merely looks like it.
+    sources = [hits((DEMO_NOTE, LATER_NOTE))]
+    assert scoring.score(case(), sample(answer, sources)).failed == ("grounding",)
+
+
+def test_r2_needs_the_date_in_a_tool_result_not_in_the_answer() -> None:
+    answer = f"Am 28.10.2026, also am 28.10., gab es ein Gespräch [source: {DEMO_NOTE}]."
+    assert scoring.score(case(), sample(answer, [hits((DEMO_NOTE, NOTE_TEXT))])).failed == (
+        "grounding",
+    )
+
+
+def test_r3_found_no_names_the_gap() -> None:
+    answer = f"I can't brief you on them. I found no {FAMILY} mandate in your records."
+    assert failed(case(advisor_id=OTHER, gap=True), sample(answer)) == ()
+
+
+def test_r4_the_plural_stimmen_nicht_contradicts_an_invented_figure() -> None:
+    answer = (
+        "Nein, die 6,4 Mio. EUR stimmen nicht mit unseren Unterlagen überein. "
+        f"Gesamtvermögen 5.922.761,95 EUR [source: {DEMO_REPORT}]."
+    )
+    expected = case(lang="de", cites=True, gap=True, invented=("6,4 Mio. EUR",))
+    assert failed(expected, sample(answer, [report()])) == ()
+
+
+def test_r5_garantiert_keines_is_a_refusal() -> None:
+    answer = "In den Unterlagen garantiert keines unserer Produkte eine Rendite."
+    expected = case(lang="de", refusal=True, invented=("7,25 %",))
+    assert failed(expected, sample(answer)) == ()
+
+
+def words(german: int, english: int, filler: int = 40) -> str:
+    """A text with exactly german and english stopwords of the language scorer's lists,
+    among neutral words: the shape of a recorded answer."""
+    de = ["der", "die", "das", "und", "nicht", "ist", "ein"]
+    en = ["the", "and", "of", "is", "not", "a", "to"]
+    parts = [de[i % 7] for i in range(german)] + [en[i % 7] for i in range(english)]
+    parts += ["Mandat", "Bericht", "Liquidität", "report"] * (filler // 4)
+    return " ".join(parts) + "."
+
+
+# (case language, German stopwords, English stopwords, fails): the recorded shapes of
+# v2, among them the five German answers to English questions, and the boundaries.
+SHAPES = [
+    ("en", 34, 0, True),  # briefing-en 1
+    ("en", 20, 0, True),  # briefing-en 2
+    ("en", 28, 0, True),  # past-appointment-en 1
+    ("en", 29, 0, True),  # portfolio-en 1
+    ("en", 12, 2, True),  # product-sheet-en 2, the closest
+    ("en", 2, 62, False),  # guaranteed-return-en 1: German product names quoted
+    ("en", 1, 37, False),  # product-sheet-en 3
+    ("en", 0, 13, False),  # cross-advisor-en 1, the shortest
+    ("de", 36, 1, False),  # guaranteed-return-de 1
+    ("de", 8, 0, False),  # cross-advisor-de 3, the fewest
+    ("de", 0, 5, True),  # planted: an English answer to a German question
+    ("de", 3, 4, True),
+    ("en", 4, 4, False),  # a tie is no evidence
+    ("en", 0, 0, False),  # an empty answer (a refusal stop)
+    ("de", 1, 0, False),
+    ("en", 1, 0, True),
+]
+
+
+@pytest.mark.parametrize(("lang", "german", "english", "fails"), SHAPES)
+def test_language_fails_when_the_other_languages_stopwords_outnumber(
+    lang: str, german: int, english: int, fails: bool
+) -> None:
+    text = words(german, english) if german or english else ""
+    result = scoring.score(case(lang=lang), sample(text))
+    assert result.failed == (("language",) if fails else ()), (lang, german, english)
+    assert not result.hard
+
+
+def test_language_counts_whole_words_in_any_case() -> None:
+    # "Die" and "THE" count; "theory", "dies" and "ist" inside "Liste" do not.
+    assert scoring.score(case(lang="en"), sample("Die Familie ist DER Kunde.")).failed == (
+        "language",
+    )
+    english = "The theory dies here: a Liste, Distanz, artist and Diesel."
+    assert scoring.score(case(lang="en"), sample(english)).failed == ()
+
+
+def test_language_is_scored_on_every_case_and_is_soft() -> None:
+    assert "language" in scoring.SCORERS and "language" not in scoring.HARD
+    for expected in (case(), case(lang="de"), case(refusal=True), case(advisor_id=OTHER)):
+        assert "language" in expected.scorers()
