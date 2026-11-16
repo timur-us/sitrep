@@ -10,6 +10,7 @@
       "Bash(docker push *)",
       "Bash(psql *)",
       "Bash(*--live*)",
+      "Bash(*app.runners*)",
       "Edit(CLAUDE.md)",
       "Edit(.claude/agents/**)",
       "Edit(.claude/skills/**)",
@@ -52,6 +53,10 @@
       "Read(.env.local)",
       "Read(**/*.pem)",
       "Read(**/*.key)",
+      "Edit(evals/recorded/**)",
+      "Write(evals/recorded/**)",
+      "Edit(redteam/recorded/**)",
+      "Write(redteam/recorded/**)",
       "Edit(.claude/settings*.json)",
       "Edit(.claude/hooks/**)"
     ]
@@ -65,6 +70,12 @@
           {
             "type": "command",
             "command": "python3 -I \"${CLAUDE_PROJECT_DIR}/.claude/hooks/block_secrets.py\"",
+            "timeout": 10,
+            "onFailure": "block"
+          },
+          {
+            "type": "command",
+            "command": "python3 -I \"${CLAUDE_PROJECT_DIR}/.claude/hooks/block_guardrail_writes.py\"",
             "timeout": 10,
             "onFailure": "block"
           }
