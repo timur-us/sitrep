@@ -33,6 +33,11 @@ READ_ONLY = [
     "ls -la .github",
     "cat CLAUDE.md | head -20",
     "git log -p -- CLAUDE.md | head -50",
+    # -o is not --output: grep prints only the match, ls prints the long format.
+    "grep -o onFailure .claude/settings.json",
+    "grep -rno 'python3 -I' .claude/settings.json",
+    "ls -o .github",
+    "ls -lo .claude/hooks",
 ]
 
 WRITES = [
@@ -57,32 +62,32 @@ WRITES = [
     "ls .claude/hooks && rm .claude/hooks/block_secrets.py",
     "ls .claude/hooks | xargs rm",
     "cat CLAUDE.md || rm CLAUDE.md",
-    # tee as an argument of a read-only program: only the tee check sees it.
+    "cat CLAUDE.md; rm CLAUDE.md",
+    # An unquoted heredoc runs $(...) in its body, even for a read-only program.
+    "cat <<EOF\n$(rm CLAUDE.md)\nEOF",
     "find .claude -exec tee -a {} +",
+    # tee as an argument of a read-only program: only the tee check sees it.
+    "cat .claude/settings.json tee",
+    # Formerly measured bypasses (ddc2b89), closed in 4460840.
+    # A shell separator right after a bare directory name.
+    "cd .github;rm workflows/ci.yml",
+    "cd .github&&rm -r workflows",
+    "cd .claude||rm settings.json",
+    "(cd .github)",
+    # Programs that can write or run other programs, no longer on the read-only list.
+    "find .github -delete",
+    "find .claude -name '*.py' -exec rm {} +",
+    "awk 'BEGIN{system(\"rm x\")}' .claude/settings.json",
+    "sort -o CLAUDE.md CLAUDE.md",
+    # git's --output writes a file, whatever the subcommand.
+    "git diff --output=CLAUDE.md",
+    "git log --output=.claude/settings.json",
+    "git diff --output CLAUDE.md",
     # The default macOS file system ignores case, so other spellings are the same file.
     "sed -i '' 's/never/always/' Claude.MD",
     "rm claude.md",
     "rm -rf .CLAUDE/hooks",
     "rm .GitHub/workflows/ci.yml",
-]
-
-# Measured bypasses (found while writing these tests, listed in the commit that
-# added them). The hook is Timur's file, so it is not changed here; strict xfail
-# turns into a failure as soon as the hook blocks them, and the marker is then removed.
-BYPASSES = [
-    # The path regex only ends a bare directory name at /, \, space, a quote or the
-    # end of the command, so a shell separator right after it is not seen.
-    "cd .github;rm workflows/ci.yml",
-    "cd .github&&rm -r workflows",
-    "cd .claude||rm settings.json",
-    "(cd .github)",
-    # Programs on the read-only list that can write or run other programs.
-    "find .github -delete",
-    "find .claude -name '*.py' -exec rm {} +",
-    "awk 'BEGIN{system(\"rm x\")}' .claude/settings.json",
-    "sort -o CLAUDE.md CLAUDE.md",
-    "git diff --output=CLAUDE.md",
-    "git log --output=.claude/settings.json",
 ]
 
 UNRELATED = [
@@ -96,6 +101,9 @@ UNRELATED = [
     "python3 - <<'EOF'\nprint(1)\nEOF",
     "cd docs && rm -rf old",
     "uv run pytest -q tests/guardrails",
+    # A guardrail name only counts as its own path segment.
+    "rm -rf .claude-old .github_bak",
+    "rm docs/oldCLAUDE.md",
 ]
 
 
@@ -122,14 +130,6 @@ def test_read_only_commands_pass(command: str) -> None:
 
 @pytest.mark.parametrize("command", WRITES)
 def test_writes_are_blocked_with_the_rule_11_message(command: str) -> None:
-    result = run(command)
-    assert result.returncode == 2
-    assert RULE_11 in result.stderr
-
-
-@pytest.mark.xfail(strict=True, reason="measured bypass of the hook, open for Timur")
-@pytest.mark.parametrize("command", BYPASSES)
-def test_measured_bypasses_are_blocked(command: str) -> None:
     result = run(command)
     assert result.returncode == 2
     assert RULE_11 in result.stderr
