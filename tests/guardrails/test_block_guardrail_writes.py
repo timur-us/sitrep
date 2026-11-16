@@ -10,6 +10,7 @@ that name none of them are not the hook's business.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,44 @@ import pytest
 HOOK = Path(__file__).resolve().parents[2] / ".claude" / "hooks" / "block_guardrail_writes.py"
 
 RULE_11 = "Guardrail files belong to Timur (rule 11)"
+
+# The read-only programs and git subcommands, listed here rather than imported from
+# the hook, so that taking one off (or adding one) is a visible change to this file.
+# uniq is left out: `uniq IN OUT` writes OUT (PR #40 review, open for Timur).
+READ_ONLY_PROGRAMS = [
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "grep",
+    "rg",
+    "egrep",
+    "fgrep",
+    "ls",
+    "wc",
+    "file",
+    "stat",
+    "cut",
+    "tr",
+    "jq",
+    "md5",
+    "shasum",
+    "sha256sum",
+    "echo",
+    "printf",
+]
+READ_ONLY_GIT = [
+    "diff",
+    "show",
+    "log",
+    "status",
+    "blame",
+    "ls-files",
+    "grep",
+    "cat-file",
+    "rev-parse",
+]
 
 READ_ONLY = [
     "cat CLAUDE.md",
@@ -33,11 +72,17 @@ READ_ONLY = [
     "ls -la .github",
     "cat CLAUDE.md | head -20",
     "git log -p -- CLAUDE.md | head -50",
+    "diff CLAUDE.md .claude/settings.json",
+    "test -f CLAUDE.md",
+    "[ -f .claude/settings.json ]",
     # -o is not --output: grep prints only the match, ls prints the long format.
     "grep -o onFailure .claude/settings.json",
     "grep -rno 'python3 -I' .claude/settings.json",
     "ls -o .github",
     "ls -lo .claude/hooks",
+    # Empty segments run nothing.
+    "ls .github || echo none",
+    "cat CLAUDE.md ;",
 ]
 
 WRITES = [
@@ -51,12 +96,26 @@ WRITES = [
     "mv .claude/hooks/block_secrets.py /tmp/",
     "rm .github/workflows/ci.yml",
     "rm -rf .claude/hooks",
+    "install -m 644 /tmp/x .claude/hooks/x.py",
     "git checkout -- .claude/settings.json",
     "git checkout main -- CLAUDE.md",
     "git add CLAUDE.md",
     "git add .github/workflows/ci.yml",
+    "git restore .claude",
+    "git rm CLAUDE.md",
+    "git reset --hard -- .github",
+    "git apply /tmp/x.patch .claude",
+    "git -C . diff CLAUDE.md",
     "python3 - <<'EOF'\nopen('CLAUDE.md', 'w').write('')\nEOF",
     "python3 -c \"open('.claude/settings.json', 'w').write('{}')\"",
+    "python CLAUDE.md",
+    "perl -pi -e 's/a/b/' CLAUDE.md",
+    "bash -c 'rm CLAUDE.md'",
+    # A segment must start with the program itself: no prefix in front of it.
+    "env rm CLAUDE.md",
+    "command rm CLAUDE.md",
+    "sudo rm CLAUDE.md",
+    "FOO=1 cat CLAUDE.md",
     "cd .github && rm -rf workflows",
     "cd .github ; rm workflows/ci.yml",
     "ls .claude/hooks && rm .claude/hooks/block_secrets.py",
@@ -83,11 +142,48 @@ WRITES = [
     "git diff --output=CLAUDE.md",
     "git log --output=.claude/settings.json",
     "git diff --output CLAUDE.md",
+    # The path after = or ~/ is still a path (~/.claude holds the user settings).
+    "rm --x=.claude/a",
+    "rm ~/.claude/settings.json",
     # The default macOS file system ignores case, so other spellings are the same file.
     "sed -i '' 's/never/always/' Claude.MD",
     "rm claude.md",
     "rm -rf .CLAUDE/hooks",
     "rm .GitHub/workflows/ci.yml",
+]
+
+# Reads that are blocked anyway: the checks look at the text, not at what the
+# shell does with it. Pinned so that a change here is a decision, not an accident.
+BLOCKED_READS = [
+    "cat .claude/settings.json 2>/dev/null",
+    "grep '=>' .github/workflows/ci.yml",
+    "grep tee .github/workflows/ci.yml",
+    "git diff --output-indicator-new=+ -- CLAUDE.md",
+    "(cat CLAUDE.md)",
+]
+
+# Measured bypasses from the PR #40 review (hook 4460840): each exits 0 and the
+# shell would write, delete or run something. The hook is Timur's file, so it is not
+# changed here; strict xfail fails as soon as the hook blocks one, and the entry then
+# moves to WRITES.
+OPEN_BYPASSES = [
+    # Separators and substitutions the segment split does not see.
+    "cat CLAUDE.md\nrm CLAUDE.md",
+    "cat CLAUDE.md\rrm CLAUDE.md",
+    "cat CLAUDE.md & rm CLAUDE.md",
+    "cat $(rm CLAUDE.md)",
+    "cat `rm CLAUDE.md`",
+    "cat <(sed -i '' 's/never/always/' CLAUDE.md)",
+    # Read-only programs that write (uniq IN OUT) or run a program.
+    "uniq /tmp/s.json .claude/settings.json",
+    "rg --pre rm x CLAUDE.md",
+    "git grep -Orm -e . -- CLAUDE.md",
+    "git grep --open-files-in-pager=rm -e . -- CLAUDE.md",
+    # Any program named cat counts as cat.
+    "./cat CLAUDE.md",
+    "scratch/bin/cat CLAUDE.md",
+    # A letter right before the name hides it (GNU cp -t DIR).
+    "cp /tmp/x -t.claude/hooks",
 ]
 
 UNRELATED = [
@@ -104,22 +200,44 @@ UNRELATED = [
     # A guardrail name only counts as its own path segment.
     "rm -rf .claude-old .github_bak",
     "rm docs/oldCLAUDE.md",
+    "rm foo.claude",
+    "rm .claudex .github2",
+]
+
+# One command per check that only that check blocks, with the part of its message
+# that names it.
+SINGLE_CHECK = [
+    ("echo x > CLAUDE.md", "and redirects"),
+    ("cat .claude/settings.json tee", "and uses tee"),
+    ("git diff --output=CLAUDE.md", "with an output flag"),
+    ("rm CLAUDE.md", "with a program that may write (rm)"),
 ]
 
 
-def run_payload(payload: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+def run_payload(
+    payload: str,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    isolated: bool = True,
+) -> subprocess.CompletedProcess:
+    flags = ["-I"] if isolated else []
     return subprocess.run(
-        [sys.executable, "-I", str(HOOK)],
+        [sys.executable, *flags, str(HOOK)],
         input=payload,
         text=True,
         capture_output=True,
         cwd=cwd,
+        env=env,
         check=False,
     )
 
 
-def run(command: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    return run_payload(json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}), cwd)
+def bash(command: object) -> str:
+    return json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+
+
+def run(command: str) -> subprocess.CompletedProcess:
+    return run_payload(bash(command))
 
 
 @pytest.mark.parametrize("command", READ_ONLY)
@@ -128,11 +246,43 @@ def test_read_only_commands_pass(command: str) -> None:
     assert result.returncode == 0, result.stderr
 
 
+@pytest.mark.parametrize("program", READ_ONLY_PROGRAMS)
+def test_each_read_only_program_passes(program: str) -> None:
+    result = run(f"{program} CLAUDE.md")
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("subcommand", READ_ONLY_GIT)
+def test_each_read_only_git_subcommand_passes(subcommand: str) -> None:
+    result = run(f"git {subcommand} -- .claude")
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("command", WRITES)
 def test_writes_are_blocked_with_the_rule_11_message(command: str) -> None:
     result = run(command)
     assert result.returncode == 2
     assert RULE_11 in result.stderr
+
+
+@pytest.mark.parametrize("command", BLOCKED_READS)
+def test_some_reads_are_blocked_as_the_cost_of_a_text_check(command: str) -> None:
+    assert run(command).returncode == 2
+
+
+@pytest.mark.xfail(strict=True, reason="measured bypass (PR #40 review), open for Timur")
+@pytest.mark.parametrize("command", OPEN_BYPASSES)
+def test_open_bypasses_are_blocked(command: str) -> None:
+    result = run(command)
+    assert result.returncode == 2
+    assert RULE_11 in result.stderr
+
+
+@pytest.mark.parametrize(("command", "check"), SINGLE_CHECK)
+def test_each_check_blocks_on_its_own(command: str, check: str) -> None:
+    result = run(command)
+    assert result.returncode == 2
+    assert check in result.stderr
 
 
 @pytest.mark.parametrize("command", UNRELATED)
@@ -154,18 +304,24 @@ def test_commands_naming_no_guardrail_path_pass(command: str) -> None:
 def test_unreadable_input_is_blocked(payload: str) -> None:
     result = run_payload(payload)
     assert result.returncode == 2
-    assert "fail closed" in result.stderr
+    assert "could not be read" in result.stderr
 
 
 @pytest.mark.parametrize("command", [["rm", "CLAUDE.md"], None, 0, {"command": "ls"}])
 def test_non_string_command_is_blocked(command: object) -> None:
-    result = run_payload(json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}))
+    result = run_payload(bash(command))
     assert result.returncode == 2
-    assert "fail closed" in result.stderr
+    assert "unexpected tool input" in result.stderr
 
 
-def test_json_module_in_working_directory_is_ignored(tmp_path: Path) -> None:
+def test_planted_json_module_is_ignored_with_dash_i(tmp_path: Path) -> None:
+    # `python script.py` never puts the working directory on sys.path, so a json.py
+    # there proves nothing; PYTHONPATH is what -I ignores and a plain run honours.
     (tmp_path / "json.py").write_text(
         "def load(f):\n    return {'tool_input': {'command': 'ls'}}\n"
     )
-    assert run("rm CLAUDE.md", cwd=tmp_path).returncode == 2
+    env = dict(os.environ, PYTHONPATH=str(tmp_path))
+    payload = bash("rm CLAUDE.md")
+    # Non-vacuity: without -I the planted module is imported and the write passes.
+    assert run_payload(payload, cwd=tmp_path, env=env, isolated=False).returncode == 0
+    assert run_payload(payload, cwd=tmp_path, env=env).returncode == 2
