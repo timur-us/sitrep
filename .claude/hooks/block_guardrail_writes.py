@@ -15,8 +15,10 @@ well. Started with `python3 -I`, so nothing from the working directory is import
 The rule: a command that names a guardrail path passes only if every segment of it
 (split on |, ;, && and ||) starts with a read-only program, and the command holds no
 redirect (>, >>, <<) and no `tee`. Anything else that names such a path is blocked,
-whatever it meant. This is a text heuristic (layer 2); the GitHub ruleset and the
-human merge (layer 3) do not depend on it. Tests: tests/guardrails/test_block_guardrail_writes.py.
+whatever it meant. This is a text heuristic (layer 2): a glob (`.c?aude`), a quote
+inside a name (`.git'hub'`) or a variable (`d=.github; rm -r $d`) does not name the
+path and passes. The GitHub ruleset and the human merge (layer 3) do not depend on
+it. Tests: tests/guardrails/test_block_guardrail_writes.py.
 """
 
 import json
@@ -26,13 +28,15 @@ import sys
 # A guardrail path named anywhere in the command, as its own path segment.
 # Case-insensitive, because the default macOS file system is.
 GUARDRAIL_PATH = re.compile(
-    r"(?<![A-Za-z0-9_.-])(?:CLAUDE\.md|\.claude(?:/|\\|$|(?=[\s\"'`]))|\.github(?:/|\\|$|(?=[\s\"'`])))",
+    r"(?<![A-Za-z0-9_.-])(?:CLAUDE\.md|\.claude|\.github)(?![A-Za-z0-9_-])",
     re.IGNORECASE,
 )
 
-# Programs that only read. A segment must start with one of these (after leading
-# spaces, an optional `command`, `env` or variable assignment is NOT allowed: keep it
-# plain). `git` is read-only only with the subcommands listed.
+# Programs that only read. A segment must start with one of these, plain (no `env`,
+# `command` or variable assignment in front). Not on the list, because they can write
+# or run other programs: find (-delete, -exec), awk (system()), sort (-o), xargs, sed,
+# perl, python. `git` is read-only only with the subcommands listed, and never with
+# --output. echo and printf stay: they write only through a redirect, which is blocked.
 READ_ONLY = (
     "cat",
     "head",
@@ -48,11 +52,8 @@ READ_ONLY = (
     "diff",
     "file",
     "stat",
-    "find",
-    "sort",
     "uniq",
     "cut",
-    "awk",
     "tr",
     "jq",
     "md5",
@@ -76,6 +77,7 @@ GIT_READ_ONLY = (
 )
 
 REDIRECT = re.compile(r">|<<")
+OUTPUT_FLAG = re.compile(r"(?<![\w-])--output(?![\w])")  # git diff/log --output=FILE writes
 SEGMENT = re.compile(r"\|\||&&|[|;]")
 FIRST_WORD = re.compile(r"^\s*([^\s]+)(?:\s+([^\s]+))?")
 
@@ -115,6 +117,10 @@ def main() -> None:
         )
     if re.search(r"(?<![\w-])tee(?![\w-])", command):
         block(f"the command names {where} and uses tee. Guardrail files belong to Timur (rule 11).")
+    if OUTPUT_FLAG.search(command):
+        block(
+            f"the command names {where} with an output flag. Guardrail files belong to Timur (rule 11)."
+        )
     for segment in SEGMENT.split(command):
         if not read_only(segment):
             block(

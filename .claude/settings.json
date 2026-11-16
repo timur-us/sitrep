@@ -54,9 +54,7 @@
       "Read(**/*.pem)",
       "Read(**/*.key)",
       "Edit(evals/recorded/**)",
-      "Write(evals/recorded/**)",
       "Edit(redteam/recorded/**)",
-      "Write(redteam/recorded/**)",
       "Edit(.claude/settings*.json)",
       "Edit(.claude/hooks/**)"
     ]
