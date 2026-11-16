@@ -82,8 +82,13 @@ Derived by the agent, proposed for Timur to confirm (his merge of PR 16 confirms
 - **PR 14 raises `PROMPT_VERSION` to `v3`**, not `v2`, and records both suites at `v3`; `evals/results/v2.md` belongs to PR 16 and `v3.md` to PR 14. **M2 measures against the `v3` rate.**
 - **PR 17 records at `v2`,** with the prompt of PR 16.
 - The amendment of 2026-11-10 holds otherwise: wherever it says `v1` for the first recordings, read `v2`, and for PR 14's, `v3`.
-- **One sentence of `v2` is the agent's, not Timur's:** besides the date and "no Markdown formatting", the prompt says that a meeting, call or deadline before today with no later record is a gap to be named. The past-appointment case scores exactly that, so the prompt meets its own eval; Timur confirms or drops it before the recording (a drop changes the pinned hash).
+- **One sentence of `v2` is the agent's, not Timur's:** besides the date and "no Markdown formatting", the prompt says that a meeting, call or deadline before today with no later record is a gap to be named. The past-appointment case scores exactly that, so the prompt meets its own eval; Timur confirms or drops it before the recording (a drop changes the pinned hash). Kept (Timur, 2026-11-15, after Fable's review).
 - **`evals/results/v2.md` comes with the recordings**, in the commit that adds them after Timur's live run, not before: it reports their scores.
+
+Handovers from the `v2` recordings (Fable's decisions, 2026-11-16; `evals/results/v2.md`). The eval scorer counts two figures of the request as known (R1, R2) without changing the app, so the 42 recordings stay valid; the app follows later:
+- **PR 14, with the `v3` re-recording:** the route and `app/harness/grounding.py` count the request's date as a known figure, so the advisor's page stops counting today's date as unmatched.
+- **M2:** the number guard reads `DD.MM.` as a date, not a decimal (`28.10.` is the record's `28.10.2026` written short).
+- **Prompt `v3` (PR 14):** five of 21 answers to English questions came back in German, and one answer used Markdown bold despite "no Markdown formatting"; `v3` addresses the language and the formatting, and the `language` and `plain_text` scorers measure it.
 
 ## Defaults that shape every PR
 

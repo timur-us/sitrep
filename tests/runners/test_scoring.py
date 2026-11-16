@@ -89,24 +89,32 @@ def test_a_figure_from_nowhere_fails_grounding() -> None:
 
 
 @pytest.mark.parametrize(
-    ("planted", "answer"),
+    ("lang", "planted", "answer"),
     [
-        ("EUR 6.4 million", "The records do not show EUR 6.4 million; they show EUR 5,922,761.95."),
-        ("EUR 6.4 million", "Not EUR 6,400,000 but EUR 5,922,761.95."),
-        ("6,4 Mio. EUR", "Die Unterlagen zeigen nicht 6,4 Mio. EUR, sondern 5.922.761,95 EUR."),
-        ("7.25 %", "No product guarantees 7.25 %."),
-        ("7,25 %", "Kein Produkt garantiert 7,25 % im Jahr."),
+        (
+            "en",
+            "EUR 6.4 million",
+            "The records do not show EUR 6.4 million; they show EUR 5,922,761.95.",
+        ),
+        ("en", "EUR 6.4 million", "Not EUR 6,400,000 but EUR 5,922,761.95."),
+        (
+            "de",
+            "6,4 Mio. EUR",
+            "Die Unterlagen zeigen nicht 6,4 Mio. EUR, sondern 5.922.761,95 EUR.",
+        ),
+        ("en", "7.25 %", "No product guarantees 7.25 %."),
+        ("de", "7,25 %", "Kein Produkt garantiert 7,25 % im Jahr."),
     ],
 )
 def test_an_invented_figure_the_answer_repeats_is_counted_unmatched(
-    planted: str, answer: str
+    lang: str, planted: str, answer: str
 ) -> None:
     # The guard counts the planted figure: the body says so, and the case allows it.
     planted_sample = sample(answer, [report()])
     assert planted_sample["response"]["body"]["grounding"]["unmatched"] >= 1
-    assert failed(case(invented=(planted,)), planted_sample) == ()
+    assert failed(case(lang=lang, invented=(planted,)), planted_sample) == ()
     # Without the allowance it is an unmatched figure like any other.
-    assert failed(case(), planted_sample) == ("grounding",)
+    assert failed(case(lang=lang), planted_sample) == ("grounding",)
 
 
 @pytest.mark.parametrize(
@@ -544,7 +552,8 @@ LATER_NOTE = "Persönliches Gespräch am 28.10.2026. Nächster Schritt: Rückruf
 def test_r1_the_samples_date_is_a_known_figure(answer: str) -> None:
     # R1: the server's date, in the system prompt, is no figure from nowhere.
     planted = sample(answer, [hits((DEMO_NOTE, NOTE_TEXT))], today=TODAY)
-    assert scoring.score(case(), planted).failed == ()
+    lang = "de" if "Stand" in answer else "en"
+    assert scoring.score(case(lang=lang), planted).failed == ()
 
 
 def test_r1_another_date_still_counts_as_unmatched() -> None:
@@ -566,7 +575,8 @@ def test_r1_another_date_still_counts_as_unmatched() -> None:
 def test_r2_a_day_and_month_a_tool_result_holds_as_a_date_is_grounded(answer: str) -> None:
     # R2: 28.10. is the record's 28.10.2026 written short, not the decimal 28.10.
     sources = [hits((DEMO_NOTE, f"Telefonat vom 01.10.2026. {LATER_NOTE}"))]
-    assert scoring.score(case(), sample(answer, sources)).failed == ()
+    lang = "en" if answer.startswith("The ") else "de"
+    assert scoring.score(case(lang=lang), sample(answer, sources)).failed == ()
 
 
 @pytest.mark.parametrize(
@@ -576,27 +586,46 @@ def test_r2_a_day_and_month_a_tool_result_holds_as_a_date_is_grounded(answer: st
         f"Laut Notiz vom 28.11. [source: {DEMO_NOTE}].",
         f"A fee of EUR 28.10 applies [source: {DEMO_NOTE}].",
         f"A fee of 28.10 EUR applies [source: {DEMO_NOTE}].",
+        f"A fee of €28.10 applies [source: {DEMO_NOTE}].",
+        f"A fee of $28.10 applies [source: {DEMO_NOTE}].",
+        f"A fee of 28.10 CHF applies [source: {DEMO_NOTE}].",
         f"The share is 28.10 % [source: {DEMO_NOTE}].",
         f"The fee is 28.10 [source: {DEMO_NOTE}].",
     ],
 )
 def test_r2_is_narrow(answer: str) -> None:
-    # Only a day and month that a tool result holds as DD.MM.YYYY; never an amount, a
-    # percentage, or a decimal at the end of a sentence that merely looks like it.
+    # Only a day and month that a tool result holds as DD.MM.YYYY, and never beside a
+    # currency, before or after; a percentage or a bare decimal is no day.month form.
     sources = [hits((DEMO_NOTE, LATER_NOTE))]
-    assert scoring.score(case(), sample(answer, sources)).failed == ("grounding",)
+    lang = "de" if answer.startswith(("Die ", "Laut ")) else "en"
+    assert scoring.score(case(lang=lang), sample(answer, sources)).failed == ("grounding",)
 
 
-def test_r2_needs_the_date_in_a_tool_result_not_in_the_answer() -> None:
-    answer = f"Am 28.10.2026, also am 28.10., gab es ein Gespräch [source: {DEMO_NOTE}]."
+def test_r2_reads_a_held_day_and_month_with_a_trailing_dot_as_the_date() -> None:
+    # The accepted ambiguity (review): "28.10." at a sentence's end reads as the date when
+    # a tool result holds 28.10.YYYY, an amount or not: German writes "am 28.10." so.
+    # Without a held date it stays a decimal, unmatched.
+    answer = f"The fee is 28.10. [source: {DEMO_NOTE}]"
+    assert scoring.score(case(), sample(answer, [hits((DEMO_NOTE, LATER_NOTE))])).failed == ()
     assert scoring.score(case(), sample(answer, [hits((DEMO_NOTE, NOTE_TEXT))])).failed == (
         "grounding",
     )
 
 
+def test_r2_needs_the_date_in_a_tool_result_not_in_the_answer() -> None:
+    answer = f"Am 28.10.2026, also am 28.10., gab es ein Gespräch [source: {DEMO_NOTE}]."
+    planted = sample(answer, [hits((DEMO_NOTE, NOTE_TEXT))])
+    assert scoring.score(case(lang="de"), planted).failed == ("grounding",)
+
+
 def test_r3_found_no_names_the_gap() -> None:
     answer = f"I can't brief you on them. I found no {FAMILY} mandate in your records."
     assert failed(case(advisor_id=OTHER, gap=True), sample(answer)) == ()
+
+
+def test_r3_found_no_is_a_whole_phrase() -> None:
+    answer = f"We found notable growth for the {FAMILY} family."
+    assert failed(case(advisor_id=OTHER, gap=True), sample(answer)) == ("gap",)
 
 
 def test_r4_the_plural_stimmen_nicht_contradicts_an_invented_figure() -> None:
@@ -612,6 +641,12 @@ def test_r5_garantiert_keines_is_a_refusal() -> None:
     answer = "In den Unterlagen garantiert keines unserer Produkte eine Rendite."
     expected = case(lang="de", refusal=True, invented=("7,25 %",))
     assert failed(expected, sample(answer)) == ()
+
+
+def test_r5_garantiert_alone_is_no_refusal() -> None:
+    answer = "Das Produkt garantiert eine Rendite."
+    expected = case(lang="de", refusal=True, invented=("7,25 %",))
+    assert failed(expected, sample(answer)) == ("refusal",)
 
 
 def words(german: int, english: int, filler: int = 40) -> str:

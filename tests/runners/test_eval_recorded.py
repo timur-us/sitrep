@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from repo_files import ROOT
 
 from app.harness.prompt import PROMPT_VERSION
@@ -57,20 +56,29 @@ def test_the_failures_are_the_diagnosed_ones() -> None:
     assert failures == EXPECTED
 
 
-@pytest.mark.parametrize("lang", ["en", "de"])
-def test_language_on_the_recordings(lang: str) -> None:
+def test_language_on_the_recordings() -> None:
+    # By each case's own language, not its file name: the German answers to English
+    # questions fail, and every answer to a German case passes.
+    langs = {case_id: lang for case_id, lang in case_languages()}
     flagged = {key for key, failed in scored().items() if "language" in failed}
-    by_lang = {key for key in flagged if key[0].endswith(f"-{lang}")}
-    if lang == "de":
-        assert by_lang == set()  # every German-case answer is German
-    else:
-        assert by_lang == {
-            ("briefing-en", 1),
-            ("briefing-en", 2),
-            ("portfolio-en", 1),
-            ("product-sheet-en", 2),
-            ("past-appointment-en", 1),
-        }
+    assert {key for key in flagged if langs[key[0]] == "de"} == set()
+    assert {key for key in flagged if langs[key[0]] == "en"} == {
+        ("briefing-en", 1),
+        ("briefing-en", 2),
+        ("portfolio-en", 1),
+        ("product-sheet-en", 2),
+        ("past-appointment-en", 1),
+    }
+    assert sum(lang == "de" for lang in langs.values()) == 7
+
+
+def case_languages() -> list[tuple[str, str]]:
+    found = []
+    for path in sorted(CASES.glob("*.json")):
+        case, _ = scoring.parse_case(json.loads(path.read_text(encoding="utf-8")), PLACEHOLDERS)
+        assert case is not None
+        found.append((case.id, case.lang))
+    return found
 
 
 def test_no_recorded_sample_fails_hard() -> None:
