@@ -22,8 +22,8 @@ HOOK = Path(__file__).resolve().parents[2] / ".claude" / "hooks" / "block_guardr
 RULE_11 = "Guardrail files belong to Timur (rule 11)"
 
 # The read-only programs and git subcommands, listed here rather than imported from
-# the hook, so that taking one off (or adding one) is a visible change to this file.
-# uniq is left out: `uniq IN OUT` writes OUT (PR #40 review, open for Timur).
+# the hook, so that taking one off is a visible change to this file. uniq left the
+# hook's list in 71ab9b4 (`uniq IN OUT` writes OUT) and is blocked in WRITES.
 READ_ONLY_PROGRAMS = [
     "cat",
     "head",
@@ -80,6 +80,10 @@ READ_ONLY = [
     "grep -rno 'python3 -I' .claude/settings.json",
     "ls -o .github",
     "ls -lo .claude/hooks",
+    # A run flag must stand on its own: --pretty is not --pre, -OSX inside a name is
+    # not git grep's -O.
+    "git log --pretty=oneline -- CLAUDE.md",
+    "cat .github/workflows/build-OSX.yml",
     # Empty segments run nothing.
     "ls .github || echo none",
     "cat CLAUDE.md ;",
@@ -150,40 +154,50 @@ WRITES = [
     "rm claude.md",
     "rm -rf .CLAUDE/hooks",
     "rm .GitHub/workflows/ci.yml",
+    # The thirteen bypasses measured in the PR #40 review (strict xfail in 45dc830),
+    # closed in 71ab9b4.
+    # Separators the segment split did not see: newline, carriage return, single &.
+    "cat CLAUDE.md\nrm CLAUDE.md",
+    "cat CLAUDE.md\rrm CLAUDE.md",
+    "cat CLAUDE.md & rm CLAUDE.md",
+    # Substitutions run whatever is inside them.
+    "cat $(rm CLAUDE.md)",
+    "cat `rm CLAUDE.md`",
+    "cat <(sed -i '' 's/never/always/' CLAUDE.md)",
+    # Programs that write (uniq IN OUT) or run a program through a flag.
+    "uniq /tmp/s.json .claude/settings.json",
+    "rg --pre rm x CLAUDE.md",
+    "git grep -Orm -e . -- CLAUDE.md",
+    "git grep --open-files-in-pager=rm -e . -- CLAUDE.md",
+    # A program named with a path is any program.
+    "./cat CLAUDE.md",
+    "scratch/bin/cat CLAUDE.md",
+    # A letter right before the dot no longer hides the name (GNU cp -t DIR).
+    "cp /tmp/x -t.claude/hooks",
+    # The same flags in other spellings: -O alone, inside a cluster, rg's --pre=.
+    "git grep -O -e x -- CLAUDE.md",
+    "git grep -inOrm -e x -- CLAUDE.md",
+    "rg --pre=rm x CLAUDE.md",
+    "rg --pre-glob '*' --pre rm x CLAUDE.md",
+    # A single & right after a name, and a newline at the start of a segment.
+    "ls .github&rm -r .github",
+    "ls .claude\n  rm -r .claude",
 ]
 
-# Reads that are blocked anyway: the checks look at the text, not at what the
-# shell does with it. Pinned so that a change here is a decision, not an accident.
+# Commands that cannot write a guardrail file but are blocked anyway: the checks
+# look at the text, not at what the shell does with it. Pinned so that a change
+# here is a decision, not an accident.
 BLOCKED_READS = [
     "cat .claude/settings.json 2>/dev/null",
     "grep '=>' .github/workflows/ci.yml",
     "grep tee .github/workflows/ci.yml",
     "git diff --output-indicator-new=+ -- CLAUDE.md",
     "(cat CLAUDE.md)",
-]
-
-# Measured bypasses from the PR #40 review (hook 4460840): each exits 0 and the
-# shell would write, delete or run something. The hook is Timur's file, so it is not
-# changed here; strict xfail fails as soon as the hook blocks one, and the entry then
-# moves to WRITES.
-OPEN_BYPASSES = [
-    # Separators and substitutions the segment split does not see.
-    "cat CLAUDE.md\nrm CLAUDE.md",
-    "cat CLAUDE.md\rrm CLAUDE.md",
-    "cat CLAUDE.md & rm CLAUDE.md",
-    "cat $(rm CLAUDE.md)",
-    "cat `rm CLAUDE.md`",
-    "cat <(sed -i '' 's/never/always/' CLAUDE.md)",
-    # Read-only programs that write (uniq IN OUT) or run a program.
-    "uniq /tmp/s.json .claude/settings.json",
-    "rg --pre rm x CLAUDE.md",
-    "git grep -Orm -e . -- CLAUDE.md",
-    "git grep --open-files-in-pager=rm -e . -- CLAUDE.md",
-    # Any program named cat counts as cat.
-    "./cat CLAUDE.md",
-    "scratch/bin/cat CLAUDE.md",
-    # A letter right before the name hides it (GNU cp -t DIR).
-    "cp /tmp/x -t.claude/hooks",
+    # Any << blocks, a here-string too (only the redirect check sees it).
+    "cat <<< CLAUDE.md",
+    # Nothing may hide the dot before .claude or .github (71ab9b4), so a name that
+    # only ends in one counts as one.
+    "rm foo.claude",
 ]
 
 UNRELATED = [
@@ -200,7 +214,6 @@ UNRELATED = [
     # A guardrail name only counts as its own path segment.
     "rm -rf .claude-old .github_bak",
     "rm docs/oldCLAUDE.md",
-    "rm foo.claude",
     "rm .claudex .github2",
 ]
 
@@ -209,8 +222,10 @@ UNRELATED = [
 SINGLE_CHECK = [
     ("echo x > CLAUDE.md", "and redirects"),
     ("cat .claude/settings.json tee", "and uses tee"),
-    ("git diff --output=CLAUDE.md", "with an output flag"),
+    ("git diff --output=CLAUDE.md", "with a flag that writes or runs a program"),
+    ("cat $(echo CLAUDE.md)", "and substitutes a command"),
     ("rm CLAUDE.md", "with a program that may write (rm)"),
+    ("./cat CLAUDE.md", "with a program that may write (./cat)"),
 ]
 
 
@@ -268,14 +283,6 @@ def test_writes_are_blocked_with_the_rule_11_message(command: str) -> None:
 @pytest.mark.parametrize("command", BLOCKED_READS)
 def test_some_reads_are_blocked_as_the_cost_of_a_text_check(command: str) -> None:
     assert run(command).returncode == 2
-
-
-@pytest.mark.xfail(strict=True, reason="measured bypass (PR #40 review), open for Timur")
-@pytest.mark.parametrize("command", OPEN_BYPASSES)
-def test_open_bypasses_are_blocked(command: str) -> None:
-    result = run(command)
-    assert result.returncode == 2
-    assert RULE_11 in result.stderr
 
 
 @pytest.mark.parametrize(("command", "check"), SINGLE_CHECK)
