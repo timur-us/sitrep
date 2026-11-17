@@ -6,7 +6,7 @@
 
 *Know your client before the call.*
 
-Status: M0, the local foundation, closes with PR 9; its report, with what is shaky and what M1 inherits, is `docs/reports/m0.md`. M1, the MVP core, is next. To get from a fresh clone to green: `docs/runbooks/local-setup.md`, "From a fresh clone". See `docs/brief.md`, `docs/threat-model.md`, `docs/discovery.md` and `redteam/SCOPE.md`. Decisions are recorded in `docs/decisions/` (ADRs).
+Status: M0, the local foundation, is closed; its report is `docs/reports/m0.md`. M1, the MVP core, is under way: the advisor page at `/`, `POST /api/ask` with cited answers, the loader, retrieval under row-level security, the hardened tool registry and the offline eval gate over recorded runs (`evals/results/v2.md`) are on `main`; the red team's unhardened baseline, the approval path and the M1 report are next. To get from a fresh clone to green: `docs/runbooks/local-setup.md`, "From a fresh clone". See `docs/brief.md`, `docs/threat-model.md`, `docs/discovery.md` and `redteam/SCOPE.md`. Decisions are recorded in `docs/decisions/` (ADRs).
 
 ## Local database
 
