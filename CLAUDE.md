@@ -20,15 +20,17 @@ Tagline: *Know your client before the call.*
 ## Commands
 
 - `make up` / `make down` — Postgres with pgvector via Docker Compose, on 127.0.0.1:55432; `make migrate` — apply db/migrations as the migration role
-- `make test` — ruff check, ruff format --check, pytest (offline; tests/db needs `make up` and `make migrate` first)
-- `make lint-test` — what CI's lint-test job runs: `make up`, `make migrate`, then `make test`, which also scans the branch's commits for secrets
-- `make audit` — re-resolve the lock, then pip-audit over it with hashes (needs the network)
-- `make docker-build` — build the image and smoke-test it (non-root, 127.0.0.1 only, plaintext refused)
-- `make web-test` — the Playwright smoke test in Chromium; `make web-deps` installs Chromium first
-- `uv run python -P -m app` — run the app on 127.0.0.1:8000
-- `make evals` — evals against recorded runs (offline); live runs only by hand with `--live --yes` after a cost estimate
-- `make redteam` — red-team cases against recorded runs (offline); live runs as above
+- `make model` — download the three pinned files of the embedding model into `models/` and verify every sha256 (about 490 MB, once)
 - `make data` — regenerate the synthetic corpus (fixed seed) into `data/synthetic/out/` (git-ignored)
+- `make load` — write the reviewed corpus into the database (after `make up` and `make migrate`; runs `make model` and `make data` itself)
+- `make test` — ruff check, ruff format --check, pytest (offline; tests/db needs `make up`, `make migrate`, `make model` and `make load` first)
+- `make lint-test` — what CI's lint-test job runs: `make up`, `make migrate`, `make model`, then `make test`, which also scans the branch's commits for secrets
+- `make audit` — re-resolve the lock, then pip-audit over it with hashes (needs the network); exceptions are recorded in the audit target and expire with the fix
+- `make docker-build` — build the image and smoke-test it (non-root, 127.0.0.1 only, plaintext refused)
+- `make web-test` — the browser tests in Chromium against the loaded corpus; `make web-deps` installs Chromium first
+- `SITREP_DEV_AUTH=1 uv run python -P -m app` — run the app on 127.0.0.1:8000 with the dev login at `/dev/login`; the ask box is at `/`
+- `make evals` — the eval gate over recorded runs (offline); recording only by hand with `--live --yes` after `--estimate`, in a terminal outside the agent
+- `make redteam` — the red-team gate over recorded runs (offline); live runs as above
 
 ## Rules
 

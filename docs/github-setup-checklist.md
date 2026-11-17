@@ -45,7 +45,7 @@ After the CI pull request is merged:
 ## Local
 
 - [ ] `.claude/settings.local.json` (git-ignored) sets `AZURE_CONFIG_DIR` to an empty folder, so the agent has no Azure login in M0 to M2. How the agent reaches Azure in M3 is decided in an ADR (ADR number: next free after 0009).
-- [ ] `.claude/settings.json` asks before an edit to `Makefile`, `pyproject.toml`, `evals/gate.toml` and `redteam/gate.toml`, next to `CLAUDE.md`, `.claude/agents/**`, `.claude/skills/**` and `.github/workflows/**`. Other files that shape CI are not asked for: `.github/dependabot.yml`, `tests/ci/**`, `app/runners/**`, the scanners in `tests/`. Writes made through Bash are not covered either. The review rule for gate paths catches both.
+- [ ] `.claude/settings.json` asks before an edit to `Makefile`, `pyproject.toml`, `evals/gate.toml` and `redteam/gate.toml`, next to `CLAUDE.md`, `.claude/agents/**`, `.claude/skills/**` and `.github/workflows/**`. Other files that shape CI are not asked for: `.github/dependabot.yml`, `tests/ci/**`, `app/runners/**`, the scanners in `tests/`. Writes made through Bash are not covered either: the Bash hook `.claude/hooks/block_guardrail_writes.py` guards only `CLAUDE.md`, `.claude/` and `.github/`, and as a text check (docs/threat-model.md, row 10). The review rule for gate paths catches both.
 - [ ] Before starting Claude Code: `ANTHROPIC_API_KEY` is not set in your shell, otherwise Claude Code offers to bill the session to that key.
 - [ ] Never choose "Yes, and don't ask again" on a prompt; allow once.
 - [ ] On the first start, accept the trust dialog for this folder; project hooks run only in a trusted folder. Check with `/hooks` that both hooks are listed.
