@@ -434,7 +434,7 @@ It is a text check (layer 2); the boundary is the uninitialised clone.
 
 - **Q10, "with data".** A token whose URL or tool argument also carries a figure or a record id that a tool result of the same sample returned would count as success "with data". It would be a second column beside `k/n`, and evidence that data, not just the token, reached a channel. It is proposed for M2 or for a later 17-series PR, and is not built in 17a.
 - **Q11, structured id fields.** Item 4 defines them as the key `id` and every key ending in `_id` in a tool result's JSON value. Should the list be fixed instead, from the READ tools' result models (`DocumentHit`, `Portfolio`), so that a new field has to be added on purpose? The recommendation is the fixed list, with a test that the models declare no other id-like field.
-- **Q12, an ADR for the clone boundary.** Today the boundary lives only in this plan and in proposals G3 and G4: no model but the runtime model reads attack text, and the agent clone never holds the corpus. That is a security property, and it has no ADR. The recommendation is for 17a-2 to record it in ADR 0015, together with the binding, whether or not ADR 0014's cap forces the move (Q7). Timur decides.
+- **Q12, an ADR for the clone boundary.** Today the boundary lives only in this plan and in proposals G3 and G4: no model but the runtime model reads attack text, and the agent clone never holds the corpus. That is a security property, and it has no ADR. The recommendation is for 17a-2 to record it in ADR 0015, together with the binding, whether or not ADR 0014's cap forces the move. That would widen Q7's answer, so if Timur accepts Q12, Q7's row and the ADR numbers change with it. Timur decides.
 
 ## Defaults that shape every PR
 
@@ -468,7 +468,7 @@ It is a text check (layer 2); the boundary is the uninitialised clone.
 | 11 | `m1/11-ui-answer` | UI: the ask box and the answer with its sources | **sensitive** (renders untrusted output) | no | 5 | 2.5 |
 | 12 | `m1/12-ask-api` | `POST /api/ask`, rate limit, the read path in Chromium | **sensitive** (auth, harness wiring, gate path) | yes | 5, 8, 10, 11 | 3.0 |
 | | | **Cut line: the end-to-end read slice is merged** | | | | **34.5** |
-| 13 | `m1/13-registry` | Registry: type allowlist, depth and size caps | **sensitive** (app/harness) | no | 17 (merge order; 12 before the amendment of 2026-11-10) | 2.0 |
+| 13 | `m1/13-registry` | Registry: type allowlist, depth and size caps | **sensitive** (app/harness) | no | 17 (merge order; 12 before the amendment of 2026-11-10); merged (#37), before 17a-1 | 2.0 |
 | 14 | `m1/14-approval` | Approval gate, `draft_email` and `create_followup` in the loop | **sensitive** (app/db, app/harness, auth) | yes | 2, 12, 13; 16, 17 (merge order, amendment); 17b (amendment of 2026-11-27) | 5.0 |
 | 15 | `m1/15-proposals` | Proposal routes, the proposals panel, approval in Chromium | **sensitive** (auth, renders untrusted output) | yes | 14 | 3.5 |
 | 16 | `m1/16-evals` | Recorded runs (ADR 0014), scorers, eval cases v1 | **sensitive** (runners, gate paths) | live step | 12 (amended 2026-11-10: the live step right after 12) | 5.0 |
@@ -482,7 +482,7 @@ It is a text check (layer 2); the boundary is the uninitialised clone.
 
 **Order.**
 - **The ADRs come first** (PRs 1 and 2). PR 3 is the first infrastructure PR, so PR 4 is built beside it but merges after it.
-- **The slice.** PRs 1–12 merge before anything below the cut line. PR 13 may be built during the slice but merges after PR 17 (amendment, 2026-11-10).
+- **The slice.** PRs 1–12 merge before anything below the cut line. PR 13 may be built during the slice but merges after PR 17 (amendment, 2026-11-10). Merged (#37), before 17a-1 (amendment, 2026-11-27).
 - **Below the cut line** (amendment, 2026-11-10): PRs 16 and 17 come first, then 13, 14, 15 and 18.
 - **The database chain is serial:** 3 → 7 → 8 → 12 → 16's live step → 17 → 14 (with the `v2` re-recording) → 15 → 18. Everything else is built beside it.
 - **PR 4 merges before PR 7**, because the loader chunks with the real tokenizer and embeds with the real model.
@@ -1101,18 +1101,18 @@ ADR 0007's Watch items (the exception hooks and the approved prompt attributes) 
 
 **During M1:**
 1. Start the second session in its worktree, and be present for prompts in both.
-2. Get Fable's security review for PRs 3–17 (15 PRs, 10 of them before the cut line), plus Fable's short design read of ADR 0010 and ADR 0011 (PRs 1 and 2).
+2. Get Fable's security review for PRs 3–17 (15 PRs, 10 of them before the cut line; 16 since the amendment of 2026-11-27, item 9), plus Fable's short design read of ADR 0010 and ADR 0011 (PRs 1 and 2).
 3. Merge every PR himself on GitHub, after the review report and, where required, Fable's.
 4. Run the cut-line hand check after PR 12, and the live recordings himself (`! uv run python -P -m app.runners.evals --live --yes`, then the red team's), each after the agent's estimate. Since the amendment of 2026-11-10 there are three: PR 16's and PR 17's at `v2` after PR 12, then both suites at `v3` in PR 14 (versions as amended on 2026-11-13).
 5. After PR 3, rename his own `.env` lines if he has any.
 6. Decide the Bash-side guard before PR 17. Since the amendment, that is about 24.5 hours in, after PR 16. Done (#40).
+7. Apply the CLAUDE.md Commands changes (rule 11): new lines for `make model` (PR 4) and `make load` (PR 7); the reworded `make lint-test` (PR 4) and `make web-test` (PR 12) lines; and M0's two lines.
+8. Watch `lint-test`'s time from PR 4 on: past three minutes, the verified cache becomes the fallback (default 6). Done 2026-11-13: past three minutes, measured, no cache (amendment).
 9. **From the amendment of 2026-11-27:**
    - **Fable's reviews** now cover 17a-1 and 17a-2, each as a sensitive PR, in place of PR 17. That makes 16 Fable stops for PRs 3–17a-2. Fable reviews code only; no model reviews corpus content.
    - **The red-team live runs** go through `make redteam-live`, in Timur's own terminal, not through `--live --yes` by hand.
    - **17b**, in the order given under 17a-2: the marker test first, then the submodule and the pilot.
    - **The guardrail proposals G1–G8**, applied by Timur (rule 11). G4 and G8 come within 17a-2, each only after his yes on that single edit.
-7. Apply the CLAUDE.md Commands changes (rule 11): new lines for `make model` (PR 4) and `make load` (PR 7); the reworded `make lint-test` (PR 4) and `make web-test` (PR 12) lines; and M0's two lines.
-8. Watch `lint-test`'s time from PR 4 on: past three minutes, the verified cache becomes the fallback (default 6). Done 2026-11-13: past three minutes, measured, no cache (amendment).
 
 **Still open from M0:** the ruleset, Dependabot #7, #16 and #17, and the `AZURE_CONFIG_DIR` folder. The merge checklist is dropped (default 18).
 
